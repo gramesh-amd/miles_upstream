@@ -101,6 +101,9 @@ def convert_deepseekv3_to_hf(args, name, param):
             return [(f"model.layers.{layer_idx}.self_attn.kv_a_layernorm.weight", param)]
         elif rest == "self_attention.linear_kv_up_proj.weight":
             return [(f"model.layers.{layer_idx}.self_attn.kv_b_proj.weight", param)]
+        # FarSkip gated attention support
+        elif rest == "self_attention.linear_gate_proj.weight":
+            return [(f"model.layers.{layer_idx}.self_attn.gate_proj.weight", param)]
         elif rest == "pre_mlp_layernorm.weight":
             return [(f"model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
         elif rest == "mlp.router.weight":

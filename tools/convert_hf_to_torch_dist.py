@@ -52,7 +52,10 @@ def get_args():
     def ceildiv(a, b):
         return -(a // -b)
 
-    if args.pipeline_model_parallel_size == 1 and world_size > 1:
+    # Skip auto PP adjustment if SKIP_AUTO_PP is set (for TP/EP only conversions)
+    skip_auto_pp = os.environ.get("SKIP_AUTO_PP", "0") == "1"
+    
+    if args.pipeline_model_parallel_size == 1 and world_size > 1 and not skip_auto_pp:
         pp_size = world_size
         while True:
             args.pipeline_model_parallel_size = pp_size
@@ -69,6 +72,8 @@ def get_args():
                 raise ValueError(
                     f"Cannot find a valid pipeline model parallel size for {args.num_layers} layers and {world_size} GPUs."
                 )
+    elif skip_auto_pp:
+        print(f"[INFO] Skipping auto PP adjustment (SKIP_AUTO_PP=1)")
     print(
         f"Using pipeline model parallel size: {args.pipeline_model_parallel_size}, decoder last pipeline num layers: {args.decoder_last_pipeline_num_layers}"
     )

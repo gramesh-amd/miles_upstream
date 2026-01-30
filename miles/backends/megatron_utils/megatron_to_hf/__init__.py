@@ -1,3 +1,4 @@
+from .deepseekv2 import convert_deepseekv2_to_hf
 from .deepseekv3 import convert_deepseekv3_to_hf
 from .glm4 import convert_glm4_to_hf
 from .glm4moe import convert_glm4moe_to_hf
@@ -11,14 +12,18 @@ from .qwen3moe import convert_qwen3moe_to_hf
 
 # TODO unify w/ `convert_to_hf`
 def postprocess_hf_param(args, megatron_param_name, hf_param_name, param):
-    param = remove_padding(megatron_param_name, param, args.vocab_size)
+    # Use padded_vocab_size if available (for SGLang compatibility)
+    target_vocab_size = getattr(args, 'padded_vocab_size', None) or args.vocab_size
+    param = remove_padding(megatron_param_name, param, target_vocab_size)
     # TODO support quant
     return param
 
 
 # TODO optimize code details
 def convert_to_hf(args, model_name, name, param, quantization_config=None):
-    param = remove_padding(name, param, args.vocab_size)
+    # Use padded_vocab_size if available (for SGLang compatibility)
+    target_vocab_size = getattr(args, 'padded_vocab_size', None) or args.vocab_size
+    param = remove_padding(name, param, target_vocab_size)
 
     converted_named_tensors = _convert_to_hf_core(args, model_name, name, param)
 
@@ -43,6 +48,8 @@ def _convert_to_hf_core(args, model_name, name, param):
         converted_named_tensors = convert_qwen2_to_hf(args, name, param)
     elif "deepseekv3" in model_name:
         converted_named_tensors = convert_deepseekv3_to_hf(args, name, param)
+    elif "deepseekv2" in model_name.lower() or "deepseek_v2" in model_name.lower():
+        converted_named_tensors = convert_deepseekv2_to_hf(args, name, param)
 
     elif "llama" in model_name:
         converted_named_tensors = convert_llama_to_hf(args, name, param)
