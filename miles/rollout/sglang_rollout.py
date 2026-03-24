@@ -243,7 +243,7 @@ async def generate_and_rm(
 
         # for multi agent system, the reward of some sample is calculated during generation.
         samples_need_reward = [sample for sample in samples if sample.reward is None]
-        rewards = await batched_async_rm(args, samples_need_reward)
+        rewards = await batched_async_rm(args, samples_need_reward, evaluation=evaluation)
         for sample, reward in zip(samples_need_reward, rewards, strict=False):
             sample.reward = reward
         return samples
@@ -252,7 +252,7 @@ async def generate_and_rm(
             return sample
         # for multi-turn environment, a reward could be assigned to the agent.
         if sample.reward is None:
-            sample.reward = await async_rm(args, sample)
+            sample.reward = await async_rm(args, sample, evaluation=evaluation)
 
     return sample
 
@@ -279,7 +279,7 @@ async def generate_and_rm_group(
 
     # for the rm that need the whole group, we will do the rm here
     if not state.aborted and args.group_rm:
-        rewards = await batched_async_rm(args, group)
+        rewards = await batched_async_rm(args, group, evaluation=evaluation)
         for sample, reward in zip(group, rewards, strict=False):
             sample.reward = reward
 
@@ -534,6 +534,7 @@ async def eval_rollout_single_dataset(
             "rewards": [sample.reward if not reward_key else sample.reward[reward_key] for sample in data],
             "truncated": [sample.status == Sample.Status.TRUNCATED for sample in data],
             "samples": data,
+            "n_samples_per_eval_prompt": dataset_cfg.n_samples_per_eval_prompt,
         }
     }
 

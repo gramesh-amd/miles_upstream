@@ -698,6 +698,36 @@ def _start_router(args):
     logger.info(f"Router launched at {args.sglang_router_ip}:{args.sglang_router_port}")
 
 
+def _try_log_ifeval_loose(log_dict: dict, key: str, samples: list) -> None:
+    """Compute IFEval loose accuracy for eval datasets with rm_type=ifbench.
+
+    This gives numbers directly comparable to OLMo's reported scores
+    (prompt_level_loose_acc from oe-eval).
+    """
+    try:
+        from examples.olmo_poc.lenient_math_rm import _compute_ifeval_reward_loose
+    except ImportError:
+        return
+
+    ifeval_samples = [
+        s for s in samples
+        if (s.metadata if isinstance(s.metadata, dict) else {}).get("rm_type") == "ifbench"
+    ]
+    if not ifeval_samples:
+        return
+
+    from examples.olmo_poc.lenient_math_rm import _enrich_ifbench_metadata
+
+    loose_rewards = []
+    for s in ifeval_samples:
+        meta = s.metadata if isinstance(s.metadata, dict) else {}
+        meta = _enrich_ifbench_metadata(meta, s.label, s.prompt)
+        loose_rewards.append(_compute_ifeval_reward_loose(s.response or "", meta))
+
+    if loose_rewards:
+        log_dict[f"eval/{key}_loose"] = sum(loose_rewards) / len(loose_rewards)
+
+
 def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] | None = None):
     if args.custom_eval_rollout_log_function_path is not None:
         custom_log_func = load_function(args.custom_eval_rollout_log_function_path)
@@ -710,14 +740,16 @@ def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any]
         log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
         if (samples := data[key].get("samples")) is not None:
             log_dict |= dict_add_prefix(compute_metrics_from_samples(args, samples), f"eval/{key}/")
+            _try_log_ifeval_loose(log_dict, key, samples)
         if "truncated" in data[key]:
             truncated = data[key]["truncated"]
             log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
         if args.log_passrate:
+            group_size = data[key].get("n_samples_per_eval_prompt", args.n_samples_per_eval_prompt)
             log_dict |= dict_add_prefix(
                 compute_pass_rate(
                     flat_rewards=rewards,
-                    group_size=args.n_samples_per_eval_prompt,
+                    group_size=group_size,
                 ),
                 f"eval/{key}-",
             )

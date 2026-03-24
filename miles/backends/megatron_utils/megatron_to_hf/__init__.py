@@ -4,6 +4,7 @@ from .glm4 import convert_glm4_to_hf
 from .glm4moe import convert_glm4moe_to_hf
 from .llama import convert_llama_to_hf
 from .mimo import convert_mimo_to_hf
+from .olmo3 import convert_olmo3_to_hf
 from .processors import quantize_params, remove_padding
 from .qwen2 import convert_qwen2_to_hf
 from .qwen3_next import convert_qwen3_next_to_hf
@@ -51,6 +52,8 @@ def _convert_to_hf_core(args, model_name, name, param):
     elif "deepseekv2" in model_name.lower() or "deepseek_v2" in model_name.lower():
         converted_named_tensors = convert_deepseekv2_to_hf(args, name, param)
 
+    elif "olmo3" in model_name:
+        converted_named_tensors = convert_olmo3_to_hf(args, name, param)
     elif "llama" in model_name:
         converted_named_tensors = convert_llama_to_hf(args, name, param)
     elif "mimo" in model_name:

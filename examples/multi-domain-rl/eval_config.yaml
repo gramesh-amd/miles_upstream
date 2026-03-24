@@ -1,0 +1,24 @@
+eval:
+  defaults:
+    max_response_len: 2048
+    top_p: 0.95
+    temperature: 0.6
+  datasets:
+    - name: math500
+      path: /wekafs/gramesh/olmo3_rl_research/data/v4_instruct/math500_eval.jsonl
+      rm_type: math
+      n_samples_per_eval_prompt: 4
+      temperature: 0.6
+      top_p: 0.95
+    - name: humanevalplus
+      path: /wekafs/gramesh/olmo3_rl_research/data/v4_instruct/humanevalplus_eval.jsonl
+      rm_type: code
+      n_samples_per_eval_prompt: 4
+      temperature: 0.6
+      top_p: 0.95
+    - name: ifeval
+      path: /wekafs/gramesh/olmo3_rl_research/data/v4_instruct/ifeval_eval.jsonl
+      rm_type: ifbench
+      n_samples_per_eval_prompt: 1
+      temperature: 0.0
+      top_p: 1.0
