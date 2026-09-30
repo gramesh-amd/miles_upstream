@@ -1383,20 +1383,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--balance-by-flops",
-                action="store_true",
-                default=False,
-                help=(
-                    "Balance dynamic micro-batch partitioning by estimated forward FLOPs "
-                    "(via calculate_fwd_flops, which includes the O(L^2) attention term) "
-                    "instead of by token count. The micro-batch COUNT stays token-budgeted "
-                    "(memory), only WHICH samples land in each micro-batch changes. When "
-                    "sequence lengths vary widely this evens out per-rank compute and cuts "
-                    "straggler time (slime#2017: +20-30% MoE train throughput). "
-                    "Requires --use-dynamic-batch-size."
-                ),
-            )
-            parser.add_argument(
                 "--max-tokens-per-gpu",
                 type=int,
                 default=None,
