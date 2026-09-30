@@ -1,8 +1,15 @@
 import math
+import os
 from collections.abc import Iterator
 from typing import Any, Literal
 
 import numpy as np
+
+# When rewards are scaled (e.g. REWARD_SCALE=10 for OLMo3/Instella runs where a
+# correct verifiable answer returns 10.0 instead of 1.0), "perfect" is the
+# scaled magnitude. Used by pass@k thresholding and by callers that need to
+# normalize raw-reward means back to accuracy ∈ [0, 1].
+_REWARD_PERFECT = float(os.environ.get("REWARD_SCALE", "1"))
 
 
 REPETITION_WINDOW_SIZE_CHARS = 10_000
@@ -55,7 +62,7 @@ def compute_pass_rate(
 
     log_dict = {}
     for k in pass_rate_name_list:
-        num_correct = np.sum(rewards_of_group == 1, axis=1)
+        num_correct = np.sum(rewards_of_group == _REWARD_PERFECT, axis=1)
         num_samples = np.full(num_groups, group_size)
 
         pass_k_estimates = _estimate_pass_at_k(num_samples, num_correct, k)

@@ -692,6 +692,37 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-repetition-penalty",
+                type=float,
+                default=1.0,
+                help=(
+                    "Repetition penalty applied by the inference engine DURING decode "
+                    "(SGLang SamplingParams.repetition_penalty). 1.0 = off. Values >1.0 "
+                    "suppress already-emitted tokens, making degenerate loops terminate "
+                    "earlier (cuts the long tail) instead of running to max_new_tokens. "
+                    "Note: this makes the rollout off-policy vs the unpenalized logits; "
+                    "rely on TIS to correct."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-frequency-penalty",
+                type=float,
+                default=0.0,
+                help=(
+                    "Frequency penalty applied by the inference engine during decode "
+                    "(SGLang SamplingParams.frequency_penalty). 0.0 = off."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-presence-penalty",
+                type=float,
+                default=0.0,
+                help=(
+                    "Presence penalty applied by the inference engine during decode "
+                    "(SGLang SamplingParams.presence_penalty). 0.0 = off."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-max-context-len",
                 type=int,
                 default=None,
@@ -1352,6 +1383,20 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--balance-by-flops",
+                action="store_true",
+                default=False,
+                help=(
+                    "Balance dynamic micro-batch partitioning by estimated forward FLOPs "
+                    "(via calculate_fwd_flops, which includes the O(L^2) attention term) "
+                    "instead of by token count. The micro-batch COUNT stays token-budgeted "
+                    "(memory), only WHICH samples land in each micro-batch changes. When "
+                    "sequence lengths vary widely this evens out per-rank compute and cuts "
+                    "straggler time (slime#2017: +20-30% MoE train throughput). "
+                    "Requires --use-dynamic-batch-size."
+                ),
+            )
+            parser.add_argument(
                 "--max-tokens-per-gpu",
                 type=int,
                 default=None,
@@ -1668,6 +1713,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Interval (in rollout steps) to update ref model from actor. If None, ref model is not updated.",
             )
             parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
+            parser.add_argument(
+                "--log-policy-entropy",
+                action="store_true",
+                default=False,
+                help=(
+                    "Compute and log mean policy entropy even when --entropy-coef is 0. "
+                    "Restores the old always-on entropy_loss metric for diagnostics "
+                    "(e.g. mode-collapse monitoring) without adding an entropy bonus to "
+                    "the objective. Incurs an extra per-step entropy reduction over logits."
+                ),
+            )
             parser.add_argument("--gamma", type=float, default=1.0, help="PPO GAE gamma")
             parser.add_argument("--lambd", type=float, default=1.0, help="PPO GAE lambd")
             parser.add_argument("--normalize-advantages", action="store_true", default=False)
@@ -1934,6 +1990,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=3,
                 help="Number of consecutive failures before marking a worker as unhealthy.",
+            )
+            parser.add_argument(
+                "--miles-router-health-check-revival-threshold",
+                type=int,
+                default=2,
+                help=(
+                    "Number of consecutive successful health checks before a DEAD worker is "
+                    "returned to the routing pool. A revived worker may serve stale weights for "
+                    "up to one step, so pair it with --update-weights-interval=1 and --use-tis."
+                ),
             )
             RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
             return parser

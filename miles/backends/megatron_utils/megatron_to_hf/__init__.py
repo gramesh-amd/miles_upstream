@@ -16,16 +16,30 @@ from .qwen3_next import convert_qwen3_next_to_hf
 from .qwen3moe import convert_qwen3moe_to_hf
 
 
+def _target_vocab_for_hf(args):
+    """Pick the vocab-size to slice embedding/output_layer to when sending to the
+    HF/SGLang side.
+
+    Prefer ``args.padded_vocab_size`` when it is set (either explicitly via
+    ``--padded-vocab-size N`` on the CLI, or auto-derived in
+    ``set_default_megatron_args``).  This matches what the HF model config and
+    the SGLang rollout side actually expect.  Falling back to
+    ``args.vocab_size`` (the unpadded tokenizer base vocab) silently truncates
+    valid embedding rows when the user has explicitly opted for a larger
+    padded vocab — e.g. Instella's 128896 vs the tokenizer's 128000."""
+    return getattr(args, "padded_vocab_size", None) or args.vocab_size
+
+
 # TODO unify w/ `convert_to_hf`
 def postprocess_hf_param(args, megatron_param_name, hf_param_name, param):
-    param = remove_padding(megatron_param_name, param, args.vocab_size)
+    param = remove_padding(megatron_param_name, param, _target_vocab_for_hf(args))
     # TODO support quant
     return param
 
 
 # TODO optimize code details
 def convert_to_hf(args, model_name, name, param, quantization_config=None, packed_weight_basenames=None):
-    param = remove_padding(name, param, args.vocab_size)
+    param = remove_padding(name, param, _target_vocab_for_hf(args))
 
     converted_named_tensors = _convert_to_hf_core(args, model_name, name, param)
 

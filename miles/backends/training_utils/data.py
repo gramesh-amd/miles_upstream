@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.data import get_minimum_num_micro_batch_size
+from miles.utils.flops_utils import calculate_fwd_flops
 from miles.utils.ft_utils.process_group_utils import GeneralPGUtil
 from miles.utils.object_store import ObjectStoreGetResult
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
@@ -545,12 +546,22 @@ def get_data_iterator(
 
         # balance the each micro batch
         samples = rollout_data["total_lengths"]
+        balance_by_flops = getattr(args, "balance_by_flops", False)
         # balance the number of mirobatches across steps
         micro_batch_indices = []
         for i, num_mbs in enumerate(num_microbatches):
             start, end = i * num_local_gbs, (i + 1) * num_local_gbs
             samples = rollout_data["total_lengths"][start:end]
-            partitions = get_seqlen_balanced_partitions(samples, num_mbs, equal_size=False)
+            # The micro-batch COUNT (num_mbs) above is token-budgeted and DP-MAX-synced,
+            # so it stays identical across ranks. balance_by_flops only changes the
+            # partition METRIC (which sample lands in which micro-batch), weighting by
+            # estimated forward FLOPs (incl. the O(L^2) attention term) instead of token
+            # count to even out per-rank compute under high length variance (slime#2017).
+            if balance_by_flops:
+                weights = [calculate_fwd_flops([sl], args) for sl in samples]
+            else:
+                weights = samples
+            partitions = get_seqlen_balanced_partitions(weights, num_mbs, equal_size=False)
             for j in range(num_mbs):
                 for k in range(len(partitions[j])):
                     partitions[j][k] += start

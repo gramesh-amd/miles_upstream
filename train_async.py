@@ -66,6 +66,23 @@ async def train(args, *, disposer: Disposer):
         await inference_controller.prepare_rollout(rollout_id)
         return await rollout_executor.get(rollout_id)
 
+    # Eval the freshly loaded weights before any RL updates, so we have a
+    # baseline AIME/MATH score for the SFT checkpoint. Mirrors train.py:70's
+    # `if rollout_id == 0 and not args.skip_eval_before_train:` block, which
+    # the async loop below would otherwise never satisfy (the periodic
+    # `should_run_periodic_action` gate fires for step=N*interval, never
+    # rollout_id=0). Synchronously await so we don't race the first generate.
+    # MILES_EVAL_ON_START=1 forces this baseline eval to also run on RESUME
+    # (start_rollout_id != 0), so the loaded checkpoint is evaluated at the
+    # first step before any RL update. Default (unset) preserves the original
+    # behavior of only evaling at rollout_id == 0 on fresh runs.
+    if (
+        args.eval_interval is not None
+        and not args.skip_eval_before_train
+        and (args.start_rollout_id == 0 or os.environ.get("MILES_EVAL_ON_START") == "1")
+    ):
+        await rollout_manager.eval.remote(args.start_rollout_id)
+
     # async train loop.
     rollout_data_next_future = await eager_create_task(prepare_and_generate(args.start_rollout_id))
     for rollout_id in range(args.start_rollout_id, args.num_rollout):

@@ -36,6 +36,12 @@ def _build_prefill_scoring_payload(
             **dict(sampling_params),
             "max_new_tokens": 0,
             "temperature": 0,
+            # Neutralize decode-time penalties so the RECOMPUTED logprobs are the
+            # pure model logprobs (penalties are next-token sampling-logit
+            # processors; they must not bias logprob scoring of fixed tokens).
+            "repetition_penalty": 1.0,
+            "frequency_penalty": 0.0,
+            "presence_penalty": 0.0,
             "skip_special_tokens": False,
         },
         "return_logprob": True,

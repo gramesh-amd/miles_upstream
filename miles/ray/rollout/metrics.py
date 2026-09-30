@@ -8,6 +8,7 @@ from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils.function_registry import load_function
 from miles.utils.iter_utils import group_by
 from miles.utils.metric_utils import (
+    _REWARD_PERFECT,
     compute_pass_rate,
     compute_rollout_step,
     compute_statistics,
@@ -37,7 +38,11 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
                 f"eval/{key}: {num_none}/{len(rewards)} samples have reward=None (likely errored/aborted trials); treating as 0.0 for metrics."
             )
             rewards = [0.0 if r is None else r for r in rewards]
-        log_dict[f"eval/{key}"] = sum(rewards) / len(rewards) if len(rewards) > 0 else 0.0
+        # Normalize the raw-reward mean by REWARD_SCALE so eval metrics read as
+        # accuracy in [0, 1] whether the reward fn returns 1.0 (default) or a
+        # scaled magnitude like 10.0 (OLMo3/Instella). Without this divide,
+        # "eval/aime2024 = 7.28" actually meant 72.8% accuracy.
+        log_dict[f"eval/{key}"] = (sum(rewards) / len(rewards)) / _REWARD_PERFECT if len(rewards) > 0 else 0.0
         if (samples := data[key].get("samples")) is not None:
             log_dict |= dict_add_prefix(_compute_metrics_from_samples(args, samples), f"eval/{key}/")
         if "truncated" in data[key]:

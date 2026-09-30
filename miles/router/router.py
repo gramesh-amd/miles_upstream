@@ -68,10 +68,16 @@ class MilesRouter:
     async def _start_background_health_check(self):
         asyncio.create_task(self._health_check_loop())
 
-    async def _check_worker_health(self, url):
-        """Encapsulated health check logic for better maintainability."""
+    async def _check_worker_health(self, url, timeout=60.0):
+        """Encapsulated health check logic for better maintainability.
+
+        MILES_REVIVE_PATCH: timeout bumped from 5s -> 60s. SGLang's FastAPI
+        /health endpoint shares the event loop with active decode/weight-sync
+        work; a busy worker can take 30s+ to answer even when fully healthy.
+        Matches sgl-project/sglang PR #9198 trend toward longer probe timeouts.
+        """
         try:
-            response = await self.client.get(f"{url}/health", timeout=5.0)
+            response = await self.client.get(f"{url}/health", timeout=timeout)
             if response.status_code == 200:
                 return url, True
             logger.debug(f"[miles-router] Worker {url} is unhealthy (Status: {response.status_code})")
@@ -80,15 +86,28 @@ class MilesRouter:
         return url, False
 
     async def _health_check_loop(self):
-        """Background loop to monitor worker health and adjust routing pool."""
+        """Background loop to monitor worker health and adjust routing pool.
+
+        MILES_REVIVE_PATCH: previously this loop probed only NON-DEAD workers
+        and never re-checked workers it had killed, so once every worker had
+        hit a transient probe failure (busy mid-decode) the router answered
+        "No healthy workers" forever and the run idled. We now probe DEAD
+        workers too and revive them after `revival_threshold` consecutive
+        successes (sgl-project/sglang PR #9198). A revived worker can serve
+        stale weights for ~1 step; --update-weights-interval=1 + --use-tis
+        mitigates that.
+        """
         interval = self.config.health_check_interval
         threshold = self.config.health_check_failure_threshold
+        revival_threshold = self.config.health_check_revival_threshold
+        # URL -> consecutive successes (only meaningful while a worker is DEAD)
+        revival_counts: dict[str, int] = {}
 
         while True:
             try:
                 await asyncio.sleep(interval)
 
-                urls = [u for u in self.worker_request_counts if u not in self.dead_workers]
+                urls = list(self.worker_request_counts.keys())
                 if not urls:
                     continue
 
@@ -97,20 +116,28 @@ class MilesRouter:
                 for url, is_healthy in results:
                     if url not in self.worker_request_counts:
                         continue
+                    is_dead = url in self.dead_workers
                     if not is_healthy:
+                        revival_counts[url] = 0
                         failures = self.worker_failure_counts.get(url, 0) + 1
                         self.worker_failure_counts[url] = failures
 
-                        if failures >= threshold:
+                        if failures >= threshold and not is_dead:
                             logger.warning(
                                 f"[miles-router] Worker {url} failed {threshold} consecutive health checks. Marking as DEAD."
                             )
                             self.dead_workers.add(url)
-                            # TODO (chenyang): Connect back 'dead' workers requires a mechanism to sync
-                            # model versions to avoid off-policy issues from stale weights, since these
-                            # dead workers' parameters may not be refitted.
                     else:
                         self.worker_failure_counts[url] = 0
+                        if is_dead:
+                            revival_counts[url] = revival_counts.get(url, 0) + 1
+                            if revival_counts[url] >= revival_threshold:
+                                logger.warning(
+                                    f"[miles-router] Worker {url} passed {revival_threshold} consecutive health checks. "
+                                    f"Marking as ALIVE (revived from DEAD pool)."
+                                )
+                                self.dead_workers.discard(url)
+                                revival_counts[url] = 0
 
                 logger.debug(
                     f"[miles-router] Health check complete. {len(self.worker_request_counts) - len(self.dead_workers)} workers healthy."

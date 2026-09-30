@@ -308,6 +308,81 @@ def compute_mis_weights(
     return all_weights, all_modified_masks, metrics
 
 
+# ---------------------------------------------------------------------------
+# Per-sequence train-infer mismatch dump (DIAGNOSTIC; opt-in via
+# INSTELLA_MIS_DUMP_DIR). Read-only over the gathered train/rollout logprobs;
+# does NOT touch the IS/RS math. Fully exception-wrapped so it can never break a
+# training step. Appends one JSONL per rank; each row carries a monotonic
+# micro-batch index so trough steps can be aligned offline against the per-step
+# train/mis_* aggregate metrics (and joined to the train_*.jsonl rollout dump by
+# n_tokens). Only valid for cp_size==1 (our run), where gathered logprobs and
+# the per-rank loss_masks share length; other lengths are skipped defensively.
+# ---------------------------------------------------------------------------
+_MIS_DUMP_MBATCH = 0
+
+
+def _maybe_dump_mis_per_seq(args, train_log_probs, rollout_log_probs, loss_masks):
+    import os
+
+    dump_dir = os.environ.get("INSTELLA_MIS_DUMP_DIR")
+    if not dump_dir:
+        return
+    global _MIS_DUMP_MBATCH
+    try:
+        import json
+        import math
+
+        try:
+            import torch.distributed as dist
+
+            rank = dist.get_rank() if (dist.is_available() and dist.is_initialized()) else 0
+        except Exception:
+            rank = 0
+
+        os.makedirs(dump_dir, exist_ok=True)
+        veto = getattr(args, "rs_veto_threshold", None)
+        log_veto = math.log(veto) if veto else None
+        mb = _MIS_DUMP_MBATCH
+        _MIS_DUMP_MBATCH += 1
+
+        def _safe_exp(x):
+            return math.exp(max(min(x, 20.0), -20.0))
+
+        out_path = os.path.join(dump_dir, f"mis_rank{rank}.jsonl")
+        with open(out_path, "a") as f:
+            for i, (tr, ro, lm) in enumerate(zip(train_log_probs, rollout_log_probs, loss_masks, strict=False)):
+                if tr.shape != ro.shape or tr.shape != lm.shape:
+                    continue  # cp_size>1 length mismatch: skip defensively
+                m = lm.bool()
+                n = int(m.sum().item())
+                if n == 0:
+                    continue
+                lr = (tr - ro)[m].float()
+                mean_lr = float(lr.mean().item())
+                min_lr = float(lr.min().item())
+                max_lr = float(lr.max().item())
+                row = {
+                    "mbatch": mb,
+                    "rank": rank,
+                    "seq_idx": i,
+                    "n_tokens": n,
+                    "mean_log_ratio": round(mean_lr, 5),
+                    "geo_ratio": round(_safe_exp(mean_lr), 6),
+                    "min_token_log_ratio": round(min_lr, 5),
+                    "max_token_log_ratio": round(max_lr, 5),
+                    "min_token_ratio": round(_safe_exp(min_lr), 6),
+                    "max_token_ratio": round(_safe_exp(max_lr), 6),
+                    "frac_tokens_lt_veto": (
+                        round(float((lr < log_veto).float().mean().item()), 5) if log_veto is not None else None
+                    ),
+                    "catastrophic": (bool((lr < log_veto).any().item()) if log_veto is not None else None),
+                }
+                f.write(json.dumps(row) + "\n")
+    except Exception:
+        # Diagnostics must never break a training step.
+        pass
+
+
 def compute_mis_weights_with_cp(
     args,
     *,
@@ -357,6 +432,10 @@ def compute_mis_weights_with_cp(
 
     full_rollout_log_probs = gather_log_probs(rollout_log_probs)
     full_old_log_probs = gather_log_probs(train_log_probs)
+
+    # DIAGNOSTIC (opt-in via INSTELLA_MIS_DUMP_DIR): per-sequence exact IS-ratio
+    # dump. Read-only; never alters the IS/RS computation below.
+    _maybe_dump_mis_per_seq(args, full_old_log_probs, full_rollout_log_probs, loss_masks)
 
     # Main logic for is (decoupled)
     is_weights, modified_masks, is_metrics = compute_mis_weights(

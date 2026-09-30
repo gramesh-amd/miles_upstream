@@ -12,7 +12,12 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from sglang.srt.debug_utils.dumper import DumperConfig, _get_rank, dumper
+from sglang.srt.debug_utils.dumper import _get_rank, dumper
+
+try:
+    from sglang.srt.debug_utils.dumper import DumperConfig
+except ImportError:
+    from sglang.srt.debug_utils.dumper import _DumperConfig as DumperConfig
 
 from miles.backends.sglang_utils.sglang_config import resolve_sglang_config
 from miles.backends.training_utils.parallel import get_parallel_state
@@ -352,9 +357,21 @@ def _barrier_after_dump_dir_cleanup() -> None:
             )
 
 
+def _kv_pairs_to_dict_fallback(raw: list[str] | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    result: dict[str, Any] = {}
+    for item in raw:
+        if "=" in item:
+            k, v = item.split("=", 1)
+            result[k] = v
+    return result
+
+
 def _get_phase_override_configs(args: Namespace, phase: DumperPhase) -> dict[str, Any]:
     raw = getattr(args, f"dumper_{phase.value}")
-    return {"enable": args.dumper_enable, **DumperConfig._kv_pairs_to_dict(raw)}
+    kv_to_dict = getattr(DumperConfig, "_kv_pairs_to_dict", None) or _kv_pairs_to_dict_fallback
+    return {"enable": args.dumper_enable, **kv_to_dict(raw)}
 
 
 def _is_phase_enabled(args: Namespace, phase: DumperPhase) -> bool:

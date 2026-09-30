@@ -911,6 +911,53 @@ def save(
     if should_disable_forward_pre_hook(args):
         enable_forward_pre_hook(model)
 
+    _prune_old_checkpoints(args)
+
+
+def _prune_old_checkpoints(args) -> None:
+    """Keep only the most recent N persistent checkpoints (opt-in, rank-0 only).
+
+    Enabled by INSTELLA_KEEP_LAST_N_CKPT (>0); default 0 = no-op, so this is
+    byte-identical for any run that doesn't set it. Megatron's own
+    save_retain_interval logic only ever rolls a window of 1, so to keep the
+    last N you must (a) set --save-retain-interval == --save-interval to stop
+    Megatron auto-deleting, and (b) set INSTELLA_KEEP_LAST_N_CKPT=N. Symlinks
+    and non `iter_#######` entries are never touched. Any failure is non-fatal.
+    """
+    import os
+    import re
+    import shutil
+
+    try:
+        keep_n = int(os.environ.get("INSTELLA_KEEP_LAST_N_CKPT", "0"))
+    except ValueError:
+        keep_n = 0
+    if keep_n <= 0 or not getattr(args, "save", None):
+        return
+    if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+        return
+
+    try:
+        iter_re = re.compile(r"^iter_(\d{7})$")
+        entries = []
+        for name in os.listdir(args.save):
+            m = iter_re.match(name)
+            if not m:
+                continue
+            path = os.path.join(args.save, name)
+            if os.path.islink(path) or not os.path.isdir(path):
+                continue
+            entries.append((int(m.group(1)), path))
+        entries.sort(key=lambda x: x[0], reverse=True)
+        for _, path in entries[keep_n:]:
+            try:
+                shutil.rmtree(path)
+                logger.info(f"[keep-last-{keep_n}] pruned old checkpoint {path}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[keep-last-{keep_n}] could not prune {path}: {e}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[keep-last] checkpoint prune skipped: {e}")
+
 
 def initialize_model_and_optimizer(
     args: Namespace,

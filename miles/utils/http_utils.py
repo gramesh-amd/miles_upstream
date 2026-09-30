@@ -374,8 +374,30 @@ async def post(url, payload, max_retries=60, action="post", headers=None):
 
 
 # TODO unify w/ `post` to add retries and remote-execution
-async def get(url):
-    response = await _http_client.get(url)
-    response.raise_for_status()
-    output = response.json()
+async def get(url, max_retries=60):
+    # Retry on transient network errors (e.g., httpx.ReadError from the in-process
+    # miles router during heavy load / abort cleanup) so a single hiccup does not
+    # tear down the whole rollout. Mirrors the retry behavior of `_post`.
+    retry_count = 0
+    while True:
+        try:
+            response = await _http_client.get(url)
+            response.raise_for_status()
+            output = response.json()
+        except Exception as e:
+            retry_count += 1
+            if isinstance(e, httpx.HTTPStatusError):
+                response_text = e.response.text
+            else:
+                response_text = None
+            logger.info(
+                f"GET error: {e}, retrying... (attempt {retry_count}/{max_retries}, url={url}, response={response_text})"
+            )
+            if retry_count >= max_retries:
+                logger.info(f"Max retries ({max_retries}) reached, failing... (url={url})")
+                raise e
+            await asyncio.sleep(1)
+            continue
+        break
+
     return output

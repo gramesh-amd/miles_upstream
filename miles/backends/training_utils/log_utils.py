@@ -10,7 +10,12 @@ import torch.distributed as dist
 from miles.utils import train_metric_utils
 from miles.utils.flops_utils import fwd_tflops_per_gpu
 from miles.utils.ft_utils.process_group_utils import MultiPGUtil
-from miles.utils.metric_utils import compute_rollout_step, namespace_metrics, strip_metrics_namespace
+from miles.utils.metric_utils import (
+    _REWARD_PERFECT,
+    compute_rollout_step,
+    namespace_metrics,
+    strip_metrics_namespace,
+)
 from miles.utils.tracking_utils.structured_log import log_structured
 from miles.utils.types import RolloutBatch
 
@@ -341,7 +346,7 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
             correct_loss_masks = []
             correct_entropy = []
             for i, raw_reward in enumerate(raw_rewards):
-                if raw_reward == 1:
+                if raw_reward == _REWARD_PERFECT:
                     correct_response_lengths.append(response_lengths[i])
                     correct_total_lengths.append(total_lengths[i])
                     correct_loss_masks.append(loss_masks[i])
