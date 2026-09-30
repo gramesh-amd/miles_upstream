@@ -1699,17 +1699,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Interval (in rollout steps) to update ref model from actor. If None, ref model is not updated.",
             )
             parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
-            parser.add_argument(
-                "--log-policy-entropy",
-                action="store_true",
-                default=False,
-                help=(
-                    "Compute and log mean policy entropy even when --entropy-coef is 0. "
-                    "Restores the old always-on entropy_loss metric for diagnostics "
-                    "(e.g. mode-collapse monitoring) without adding an entropy bonus to "
-                    "the objective. Incurs an extra per-step entropy reduction over logits."
-                ),
-            )
             parser.add_argument("--gamma", type=float, default=1.0, help="PPO GAE gamma")
             parser.add_argument("--lambd", type=float, default=1.0, help="PPO GAE lambd")
             parser.add_argument("--normalize-advantages", action="store_true", default=False)
