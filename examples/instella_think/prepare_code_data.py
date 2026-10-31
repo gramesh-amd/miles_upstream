@@ -2,7 +2,7 @@
 """Build code RL data from Dolci-Think-RL's code_rlvr subset.
 
     python3 examples/instella_think/prepare_code_data.py inspect        # schema + stats, writes nothing
-    python3 examples/instella_think/prepare_code_data.py build          # train + held-out eval JSONL
+    python3 examples/instella_think/prepare_code_data.py build          # train JSONL
 
 Output rows match the IF data, with metadata.rm_type = "code":
     {"prompt": [{"role": "user", "content": ...}],
@@ -13,9 +13,9 @@ Dolci nests `ground_truth` as a list holding one string: JSON stdin/stdout cases
 assert strings, or (about 3k rows) base64(zlib(pickle)) of the stdin/stdout cases.
 `label` here is always plain JSON, capped to --max-tests cases.
 
-The eval file is a fixed, seeded hold-out of the same distribution (removed from
-train) and is stamped split=eval, which is what makes code_reward.py score it
-all-or-nothing. It is a sanity metric for the smoke run, not LiveCodeBench.
+Evals are the OLMo 3 code benchmarks (prepare_code_benchmarks.py). --n-eval N still carves
+a seeded N-row hold-out out of train into code-eval/dolci-code-heldout.jsonl, stamped
+split=eval so code_reward.py scores it all-or-nothing.
 
 Run where the HF cache is shared (HF_HOME on NFS) and memory is not capped, i.e.
 inside the training container rather than on the login node. --out-dir defaults to
@@ -129,7 +129,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["inspect", "build"])
     ap.add_argument("--out-dir", default=os.environ.get("DATA_ROOT"), required="DATA_ROOT" not in os.environ)
-    ap.add_argument("--n-eval", type=int, default=256)
+    ap.add_argument("--n-eval", type=int, default=0, help="rows held out of train as an eval set")
     ap.add_argument("--min-tests", type=int, default=1)
     ap.add_argument("--max-tests", type=int, default=32,
                     help="cases stored per row; match code_reward.py's CODE_MAX_TESTS")
@@ -168,7 +168,8 @@ def main():
     eval_rows, train_rows = parsed[: args.n_eval], parsed[args.n_eval:]
     train_path = os.path.join(args.out_dir, "code-train", "dolci-code-train.jsonl")
     eval_path = os.path.join(args.out_dir, "code-eval", "dolci-code-heldout.jsonl")
-    for path, items, split in ((train_path, train_rows, "train"), (eval_path, eval_rows, "eval")):
+    outputs = [(train_path, train_rows, "train")] + ([(eval_path, eval_rows, "eval")] if eval_rows else [])
+    for path, items, split in outputs:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             for r, tests in items:

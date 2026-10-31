@@ -205,7 +205,7 @@ ROLLOUT_ARGS=(
 # these paths contain spaces. run_if.sh points this at the IFEval/IFBench sets.
 if [ -n "${EVAL_CONFIG:-}" ]; then
    # A miles eval YAML (eval.datasets with per-set n/temperature/length); run_code.sh
-   # writes one for CODE_BENCH=1. It replaces EVAL_PROMPT_DATA.
+   # writes one with the code benchmarks. It replaces EVAL_PROMPT_DATA.
    EVAL_DATA_ARGS=(--eval-config "${EVAL_CONFIG}")
 elif [ -n "${EVAL_PROMPT_DATA:-}" ]; then
    # shellcheck disable=SC2206  # deliberate word-splitting into name/path pairs

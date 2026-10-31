@@ -12,11 +12,11 @@ applied by `patch_mbridge_gate_proj.sh`.
 |------|------|
 | `paths.sh` | Per-user locations (checkpoints, data, NFS logs, Primus checkout, sandbox token), all overridable; per-user overrides go in `~/.instella-env.sh`. Sourced by every script below. |
 | `cluster/` | Login-node tooling for Spur: `bringup.sh` (containers), `on_node.sh` (run a payload in a node's container), `env_setup.sh`, `ray_head.sh` / `ray_worker.sh`, `launch.sh`, `code_exec.sh` (sandbox). |
-| `run_code.sh` | **Code RL arm.** Dolci-Think-RL `code_rlvr`, unit-test reward, held-out pass@1 eval. Wrapper over `run_async.sh`. |
+| `run_code.sh` | **Code RL arm.** Dolci-Think-RL `code_rlvr`, unit-test reward, HumanEval+/MBPP+/LiveCodeBench v3 evals. Wrapper over `run_async.sh`. |
 | `code_reward.py` | The code reward (`--custom-rm-path code_reward.batched_reward`). Pass rate while training, all-or-nothing at eval. Self-tests with `python3 code_reward.py` (needs the sandbox). |
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
-| `prepare_code_data.py` | Builds the code train JSONL and a 256-row held-out eval JSONL from Dolci. |
-| `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol (`CODE_BENCH=1`). |
+| `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
+| `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol. |
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`). |
 | `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
 | `model_args.sh` | `MODEL_ARGS=(...)` + `MOE_LAYER_FREQ` (layer 0 dense, 1–26 MoE). MLA + `--gated-attention` + `--use-simple-farskip-layer`. **No `--spec`** (this Megatron forbids it for MoE; FarSkip is config-driven). |
@@ -59,9 +59,9 @@ CODE_EXEC_HOST=<a CPU host>         # runs the sandbox; reachable by ssh from he
 # converting your own (step 4). Checkpoints you train still go to your own CKPT_ROOT.
 HF_CKPT=/shared_nfs/gramesh/checkpoints/Instella-MoE-16B-A3B-DPO
 REF_LOAD=/shared_nfs/gramesh/checkpoints/Instella-MoE-16B-A3B-DPO_torch_dist
-# The built code data is also readable; skip step 4's data build by pointing at it:
+# The built code data is also readable; skip step 4's data builds by pointing at it:
 CODE_TRAIN=/shared_nfs/gramesh/data/code-train/dolci-code-train.jsonl
-CODE_EVAL=/shared_nfs/gramesh/data/code-eval/dolci-code-heldout.jsonl
+CODE_BENCH_DIR=/shared_nfs/gramesh/data/code-bench
 ```
 
 W&B credentials go in `~/.netrc` (`wandb login` writes it); the scripts pass it to the
@@ -114,13 +114,15 @@ the shell prelude above):
 bash $I/investigate_megatron.sh                     # FarSkip Megatron into ~/Primus-Instella-Internal
 PHASE=prepare bash $I/run_async.sh                  # HF -> torch_dist (8 GPU), only if REF_LOAD is unset
 HF_HOME=$NFS_ROOT/hf_cache python3 $I/prepare_code_data.py build   # -> $DATA_ROOT, only if CODE_TRAIN is unset
+python3 $I/prepare_code_benchmarks.py --out-dir $CODE_BENCH_DIR     # eval sets, skip if step 0 points CODE_BENCH_DIR at the shared copy
 ```
 
-### 5. Sandbox on the CPU host
+### 5. Sandboxes on the CPU host
 
 ```bash
-$I/cluster/code_exec.sh start         # creates ~/.code-exec-token, starts code_exec_server.py
-$I/cluster/code_exec.sh status        # /health must answer
+$I/cluster/code_exec.sh start         # training reward; creates ~/.code-exec-token
+$I/cluster/code_exec.sh start bench   # benchmark evals, port 18951; builds ~/.code-exec-venv (numpy) on first start
+$I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench   # /health must answer
 ```
 
 ### 6. Ray head, then launch
@@ -195,11 +197,11 @@ contributing; if it collapses, the filter is starving the update.
 engine). For 3 nodes: bring up all three, run `env_setup.sh` on each, `ray_head.sh` on the
 head, `cluster/ray_worker.sh $HEAD_IP` on the other two, then launch without `SINGLE_NODE`.
 
-### OLMo 3 code benchmarks (`CODE_BENCH=1`)
+### Evals: OLMo 3's code benchmarks
 
-`CODE_BENCH=1` adds HumanEval+, MBPP+ and LiveCodeBench v3 to every eval, next to
-`code-heldout`, logged as `eval/humanevalplus`, `eval/mbppplus` and `eval/lcb_v3`. Prompts,
-answer extraction, program assembly, tests and timeouts are oe-eval's `::olmo3:adapt` tasks.
+Every eval runs HumanEval+, MBPP+ and LiveCodeBench v3, logged as `eval/humanevalplus`,
+`eval/mbppplus` and `eval/lcb_v3`. Step 4 builds the data and step 5 starts their sandbox.
+Prompts, answer extraction, program assembly, tests and timeouts are oe-eval's `::olmo3:adapt` tasks.
 Sampling is OLMo 3 Think's: 10 samples, temperature 0.6, top_p 0.95, 32768 tokens. So each
 value is their pass@1 and compares directly with the paper (arXiv 2512.13961, Table 16):
 
@@ -209,19 +211,15 @@ value is their pass@1 and compares directly with the paper (arXiv 2512.13961, Ta
 | MBPP+ | 63.2 / 63.0 / 64.7 | 66.7 / 67.2 / 68.0 |
 | LiveCodeBench v3 | 67.8 / 75.1 / 75.2 | 75.8 / 81.9 / 83.5 |
 
-```bash
-# Once: pinned dataset revisions, sha256-checked. LiveCodeBench's ~5 GB of tests go to
-# $CODE_BENCH_DIR/tests, which the sandbox host must be able to read.
-python3 examples/instella_think/prepare_code_benchmarks.py --out-dir "$CODE_BENCH_DIR"
-# Login node: a second sandbox instance (port 18951; makes a numpy venv on first start).
-examples/instella_think/cluster/code_exec.sh start bench
-# Launch as usual, with:
-... CODE_BENCH=1 EVAL_INTERVAL=20
-```
+The data needs no manual work. `prepare_code_benchmarks.py` downloads pinned Hugging Face
+revisions (evalplus/humanevalplus, evalplus/mbppplus, livecodebench/code_generation_lite
+`release_v3`), checks their sha256, and converts them. LiveCodeBench's ~5 GB of tests go
+to `$CODE_BENCH_DIR/tests`, which the sandbox host must be able to read. Best-checkpoint
+pruning ranks by the mean of the three.
 
-The sandbox reproduces two oe-eval behaviours on purpose:
-- A response with no `</think>` is still graded. oe-eval searches the whole text, while
-  `code-heldout` scores it 0.
+The grading reproduces two oe-eval behaviours on purpose:
+- A response with no `</think>` is still graded, because oe-eval searches the whole text.
+  The training reward scores such a response 0.
 - Model-written `if __name__ == "__main__":` blocks don't run for HumanEval+, MBPP+ or
   LiveCodeBench call-based problems.
 
@@ -245,8 +243,8 @@ failing correct LiveCodeBench solutions (6 s per test).
 L=$(ls -t $NFS_ROOT/rl-logs/launch-code*.out | head -1)
 grep "CODE_REWARD scored" $L | tail -1     # api_error must stay 0
 grep -o "'rollout/[a-z_]*': [0-9.e-]*" $L | tail -4
-grep -o "'eval/code-heldout': [0-9.]*" $L
-$I/cluster/code_exec.sh status
+grep -o "'eval/\(humanevalplus\|mbppplus\|lcb_v3\)': [0-9.]*" $L
+$I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench
 ```
 
 Stop a run from inside the container: `RAY_ADDRESS=http://$HEAD_IP:8265 ray job list`, then
@@ -259,18 +257,17 @@ Stop a run from inside the container: `RAY_ADDRESS=http://$HEAD_IP:8265 ray job 
 |---|---|
 | step time | ~20 min (rollout-bound; the train step itself is ~2 min, weight sync ~3 s) |
 | train reward | 0.45 at step 1, 0.5-0.6 by step 30 |
-| `eval/code-heldout` | 0.309 @10, 0.328 @20, 0.324 @30, 0.355 @40 |
-| eval cost | ~30 min per eval, during which training waits |
+| eval cost | see "Evals" above; training waits while it runs |
 | checkpoint | ~207 GB, ~66 s to save |
 
 Things learned on that run:
 
-- **Truncation is the main loss.** At 16k, 25-40% of training responses and ~40% of eval
-  responses hit the limit mid-thought. Those fail the think gate (`think_gate_fail` in the
+- **Truncation is the main loss.** At 16k, 25-40% of training responses hit the limit
+  mid-thought. Those fail the think gate (`think_gate_fail` in the
   `CODE_REWARD` line) and score 0. The policy always opens `<think>`; the gate failures are
   truncation, not a template problem. Hence the 32k default.
 - **Disk.** The checkpoint volume is shared and fills up from other users too. `run_code.sh`
-  keeps the newest checkpoint plus the 2 best by `eval/code-heldout` (`KEEP_RECENT=1`,
+  keeps the newest checkpoint plus the 2 best by the benchmark mean (`KEEP_RECENT=1`,
   `KEEP_BEST=2`), i.e. at most ~620 GB. Restart the pruner with lower values if space runs out.
 - **Occasional router `/generate` 500s** (`httpcore.ReadError` tracebacks from the
   RolloutManager) are retried automatically and are harmless unless the retry count climbs.

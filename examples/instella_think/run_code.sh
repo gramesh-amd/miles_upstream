@@ -5,8 +5,7 @@
 # with the task swapped to unit-test-verified code generation:
 #   data   : Dolci-Think-RL code_rlvr (21k prompts, stdin/stdout + assert tests)
 #   reward : code_reward.batched_reward -- pass rate while training, all-or-nothing at eval
-#   eval   : a fixed 256-prompt hold-out of the same distribution, pass@1; CODE_BENCH=1 adds
-#            HumanEval+, MBPP+ and LiveCodeBench v3 under OLMo 3's protocol (README)
+#   eval   : HumanEval+, MBPP+ and LiveCodeBench v3 under OLMo 3's protocol (README)
 # Objective defaults (nostd + R3, per-sample loss, fp32 head) are run_if.sh's, for the
 # same reasons given there; this file only sets what differs.
 #
@@ -25,7 +24,9 @@
 #
 # USAGE -- from inside the head node's container (see README "Code RL"):
 #   One-time, any node:  python3 examples/instella_think/prepare_code_data.py build
-#   Sandbox:             examples/instella_think/cluster/code_exec.sh start   (login node)
+#                        python3 examples/instella_think/prepare_code_benchmarks.py --out-dir "$CODE_BENCH_DIR"
+#   Sandboxes:           examples/instella_think/cluster/code_exec.sh start         (login node)
+#                        examples/instella_think/cluster/code_exec.sh start bench
 #   Smoke on 1 node:     SINGLE_NODE=1 NUM_ROLLOUT=8 bash examples/instella_think/run_code.sh
 #   Preflight only:      CHECK_ONLY=1 bash examples/instella_think/run_code.sh
 #   3-node train:        bash examples/instella_think/run_code.sh
@@ -53,40 +54,31 @@ fi
 
 # --- data -------------------------------------------------------------------------
 CODE_TRAIN="${CODE_TRAIN:-${DATA_ROOT}/code-train/dolci-code-train.jsonl}"
-CODE_EVAL="${CODE_EVAL:-${DATA_ROOT}/code-eval/dolci-code-heldout.jsonl}"
-for f in "${CODE_TRAIN}" "${CODE_EVAL}"; do
-   [ -s "${f}" ] || { echo "FATAL: missing ${f}; run: python3 ${SCRIPT_DIR}/prepare_code_data.py build" >&2; exit 1; }
-done
+[ -s "${CODE_TRAIN}" ] || { echo "FATAL: missing ${CODE_TRAIN}; run: python3 ${SCRIPT_DIR}/prepare_code_data.py build" >&2; exit 1; }
 export PROMPT_DATA="${PROMPT_DATA:-${CODE_TRAIN}}"
-export EVAL_PROMPT_DATA="${EVAL_PROMPT_DATA:-code-heldout ${CODE_EVAL}}"
 
-# CODE_BENCH=1 adds OLMo 3's code benchmarks to every eval (prepare_code_benchmarks.py builds
-# them; `cluster/code_exec.sh start bench` serves their tests). Sampling is OLMo 3 Think's
-# (arXiv 2512.13961 Table 16): 10 samples, temperature 0.6, top_p 0.95, 32768 tokens, so
-# eval/<set> is their pass@1. code-heldout keeps its own settings alongside.
-CODE_BENCH="${CODE_BENCH:-0}"
+# Eval: OLMo 3's code benchmarks (prepare_code_benchmarks.py builds them; `cluster/code_exec.sh
+# start bench` serves their tests). Sampling is OLMo 3 Think's (arXiv 2512.13961 Table 16):
+# 10 samples, temperature 0.6, top_p 0.95, 32768 tokens, so eval/<set> is their pass@1.
 CODE_BENCH_SETS="${CODE_BENCH_SETS:-humanevalplus mbppplus lcb_v3}"
 CODE_BENCH_N="${CODE_BENCH_N:-10}"
 CODE_BENCH_MAX_LEN="${CODE_BENCH_MAX_LEN:-32768}"
-if [ "${CODE_BENCH}" = "1" ]; then
-   for s in ${CODE_BENCH_SETS}; do
-      [ -s "${CODE_BENCH_DIR}/${s}.jsonl" ] || {
-         echo "FATAL: missing ${CODE_BENCH_DIR}/${s}.jsonl; run: python3 ${SCRIPT_DIR}/prepare_code_benchmarks.py --out-dir ${CODE_BENCH_DIR}" >&2; exit 1; }
-   done
-   if [ -z "${CODE_BENCH_API_URL:-}" ]; then
-      [ -n "${CODE_EXEC_HOST:-}" ] || { echo "FATAL: CODE_BENCH=1 needs CODE_EXEC_HOST or CODE_BENCH_API_URL" >&2; exit 1; }
-      export CODE_BENCH_API_URL="http://${CODE_EXEC_HOST}:${CODE_BENCH_PORT}/$(tr -d '[:space:]' < "${CODE_EXEC_TOKEN_FILE}")"
-   fi
-   # miles reads the eval set list from a YAML; dry runs write theirs to /tmp.
+for s in ${CODE_BENCH_SETS}; do
+   [ -s "${CODE_BENCH_DIR}/${s}.jsonl" ] || {
+      echo "FATAL: missing ${CODE_BENCH_DIR}/${s}.jsonl; run: python3 ${SCRIPT_DIR}/prepare_code_benchmarks.py --out-dir ${CODE_BENCH_DIR}" >&2; exit 1; }
+done
+if [ -z "${CODE_BENCH_API_URL:-}" ]; then
+   [ -n "${CODE_EXEC_HOST:-}" ] || { echo "FATAL: set CODE_EXEC_HOST or CODE_BENCH_API_URL" >&2; exit 1; }
+   export CODE_BENCH_API_URL="http://${CODE_EXEC_HOST}:${CODE_BENCH_PORT}/$(tr -d '[:space:]' < "${CODE_EXEC_TOKEN_FILE}" 2>/dev/null)"
+fi
+# miles reads per-set sampling from an eval YAML; dry runs write theirs to /tmp.
+if [ -z "${EVAL_CONFIG:-}" ]; then
    [ "${DRY_RUN:-0}" = "1" ] && _cfg_dir=/tmp || _cfg_dir="${LOG_DIR}/eval-configs"
    mkdir -p "${_cfg_dir}"
-   export EVAL_CONFIG="${EVAL_CONFIG:-${_cfg_dir}/code-bench-$(date +%Y%m%d_%H%M%S).yaml}"
+   export EVAL_CONFIG="${_cfg_dir}/code-bench-$(date +%Y%m%d_%H%M%S).yaml"
    {
       echo "eval:"
       echo "  datasets:"
-      # shellcheck disable=SC2086  # EVAL_PROMPT_DATA is "name path" pairs
-      set -- ${EVAL_PROMPT_DATA}
-      while [ $# -ge 2 ]; do echo "    - {name: $1, path: $2}"; shift 2; done
       for s in ${CODE_BENCH_SETS}; do
          echo "    - {name: ${s}, path: ${CODE_BENCH_DIR}/${s}.jsonl, n_samples_per_eval_prompt: ${CODE_BENCH_N},"
          echo "       temperature: 0.6, top_p: 0.95, top_k: -1, max_response_len: ${CODE_BENCH_MAX_LEN}}"
@@ -174,7 +166,8 @@ export SAVE_DIR="${SAVE_DIR:-${CKPT_ROOT}/Instella-MoE-16B-A3B-DPO_${SAVE_TAG}}"
 # The volume is shared, so keep the footprint small: newest (for resume) + best by eval.
 KEEP_RECENT="${KEEP_RECENT:-1}"
 KEEP_BEST="${KEEP_BEST:-2}"
-PRUNE_METRIC="${PRUNE_METRIC:-eval/code-heldout}"
+# Space-separated; the pruner ranks checkpoints by the mean of these.
+PRUNE_METRIC="${PRUNE_METRIC:-$(for s in ${CODE_BENCH_SETS}; do printf 'eval/%s ' "$s"; done)}"
 AVAIL_GB="$(df -BG --output=avail "${CKPT_ROOT}" 2>/dev/null | tail -1 | tr -dc '0-9')"
 # Peak footprint is the retained set plus the one being written before the pruner runs.
 NEED_CKPTS=$(( KEEP_RECENT + KEEP_BEST + 1 ))
@@ -196,10 +189,9 @@ if [ "${SKIP_REWARD_PREFLIGHT:-0}" != "1" ]; then
       echo "FATAL: code_reward.py self-test failed. Is the sandbox up? cluster/code_exec.sh status" >&2
       exit 1
    fi
-   if [ "${CODE_BENCH}" = "1" ]; then
-      echo "=== benchmark preflight (sandbox at ${CODE_BENCH_API_URL%/*}/<token>) ==="
-      # One canonical HumanEval+ solution must pass: proves numpy, the 20 s cap and the route.
-      if ! python3 - "${SCRIPT_DIR}" "${CODE_BENCH_DIR}" <<'EOF'
+   echo "=== benchmark preflight (sandbox at ${CODE_BENCH_API_URL%/*}/<token>) ==="
+   # One canonical HumanEval+ solution must pass: proves numpy, the 20 s cap and the route.
+   if ! python3 - "${SCRIPT_DIR}" "${CODE_BENCH_DIR}" <<'EOF'
 import json, sys
 sys.path.insert(0, sys.argv[1])
 import code_reward as cr
@@ -209,13 +201,12 @@ ok = cr.bench_pass(label["prefix"] + body, label)
 print(f"  HumanEval/0 reference solution: {ok}")
 sys.exit(0 if ok else 1)
 EOF
-      then
-         echo "FATAL: benchmark sandbox check failed. Is it up? cluster/code_exec.sh status bench" >&2
-         exit 1
-      fi
+   then
+      echo "FATAL: benchmark sandbox check failed. Is it up? cluster/code_exec.sh status bench" >&2
+      exit 1
    fi
 fi
-if [ "${CODE_BENCH}" = "1" ] && [ "${CODE_BENCH_MAX_LEN}" -gt "${CONTEXT_LEN}" ]; then
+if [ "${CODE_BENCH_MAX_LEN}" -gt "${CONTEXT_LEN}" ]; then
    echo "FATAL: CODE_BENCH_MAX_LEN=${CODE_BENCH_MAX_LEN} exceeds CONTEXT_LEN=${CONTEXT_LEN}" >&2; exit 1
 fi
 
@@ -225,8 +216,7 @@ if [ "${CHECK_ONLY:-0}" = "1" ]; then
    echo "  project    : ${WANDB_PROJECT}"
    echo "  run name   : ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
    echo "  train data : ${PROMPT_DATA} ($(wc -l < "${PROMPT_DATA}") prompts)"
-   echo "  eval data  : ${EVAL_PROMPT_DATA}"
-   [ "${CODE_BENCH}" = "1" ] && echo "  benchmarks : ${CODE_BENCH_SETS} (n=${CODE_BENCH_N}, ${CODE_BENCH_MAX_LEN} tokens) via ${EVAL_CONFIG}"
+   echo "  eval       : ${CODE_BENCH_SETS} (n=${CODE_BENCH_N}, ${CODE_BENCH_MAX_LEN} tokens) via ${EVAL_CONFIG}"
    echo "  save dir   : ${SAVE_DIR} (every ${SAVE_INTERVAL} steps)"
    exit 0
 fi
@@ -248,10 +238,10 @@ echo "=== code RL $(( ROLLOUT_MAX_RESPONSE_LEN / 1024 ))k arm ==="
 echo "  wandb: ${WANDB_PROJECT} / ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
 for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_PARTIAL_CREDIT CODE_REQUIRE_THINK \
          SAVE_INTERVAL EVAL_INTERVAL ROLLOUT_MAX_RESPONSE_LEN DISABLE_STD_NORM USE_ROUTING_REPLAY \
-         CONTEXT_LEN PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER CODE_BENCH; do
+         CONTEXT_LEN PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER; do
    echo "  ${V}=${!V}"
 done
-[ "${CODE_BENCH}" = "1" ] && echo "  benchmarks: ${CODE_BENCH_SETS} (n=${CODE_BENCH_N}) config ${EVAL_CONFIG}"
+echo "  eval: ${CODE_BENCH_SETS} (n=${CODE_BENCH_N}) config ${EVAL_CONFIG}"
 echo "  PROMPT_DATA=${PROMPT_DATA} ($(wc -l < "${PROMPT_DATA}") prompts)"
 echo "  SINGLE_NODE=${SINGLE_NODE:-0}  NUM_ROLLOUT=${NUM_ROLLOUT:-3000}"
 
@@ -262,7 +252,7 @@ if [ "${PRUNE_CHECKPOINTS:-1}" = "1" ]; then
    PRUNE_LOG="${LOG_DIR}/prune-${SAVE_TAG}-${TS}.log"
    setsid nohup python3 -u "${SCRIPT_DIR}/prune_checkpoints.py" "${SAVE_DIR}" \
       --keep-recent "${KEEP_RECENT}" --keep-best "${KEEP_BEST}" \
-      --metric "${PRUNE_METRIC}" --tag "${SAVE_TAG}" --log "${OUT}" \
+      $(for m in ${PRUNE_METRIC}; do printf -- '--metric %s ' "$m"; done) --tag "${SAVE_TAG}" --log "${OUT}" \
       > "${PRUNE_LOG}" 2>&1 &
    echo "PRUNER  pid=$! log=${PRUNE_LOG}"
 fi

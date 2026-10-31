@@ -9,7 +9,7 @@ Prompts, answer extraction, program assembly, tests and timeouts follow oe-eval'
 `::olmo3:adapt` task configs (allenai/olmes, oe_eval/configs/tasks.py), which is what the
 OLMo 3 Think results (arXiv 2512.13961, Table 16) were measured with. The sampling half of
 that protocol (10 samples, temperature 0.6, top_p 0.95, 32768 tokens) is the eval config
-run_code.sh passes when CODE_BENCH=1.
+run_code.sh passes.
 
 LiveCodeBench ships ~5 GB of tests, so its rows reference per-problem test files instead
 of embedding them; code_exec_server.py loads them from --tests-dir. That directory is
