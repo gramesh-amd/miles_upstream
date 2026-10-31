@@ -7,9 +7,12 @@ import time
 
 import aiohttp
 
+from miles.rollout.base_types import RolloutFnTrainOutput
 from miles.rollout.data_source import DataSource
+from miles.rollout.filter_hub.base_types import call_dynamic_filter
 from miles.rollout.sglang_rollout import GenerateState, generate_and_rm_group
 from miles.utils.async_utils import run
+from miles.utils.misc import load_function
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -22,27 +25,53 @@ def group_oldest_weight_version(group: list[Sample]) -> int | None:
 
 
 class _CachedWeightVersion:
-    """Throttled query for the current engine weight version via /model_info."""
+    """Throttled query for the current engine weight version.
+
+    The endpoint that reports ``weight_version`` has drifted across SGLang
+    versions and differs between the router and the engines. On this build the
+    router serves it at ``/get_model_info`` (``/model_info`` is 404 there),
+    while some builds/engines use ``/model_info`` or ``/get_weight_version``.
+    Try them in order and use the first that returns a numeric version. If none
+    resolve, warn ONCE and loudly -- a silently-None version disables the whole
+    staleness filter (nothing is ever recycled, so max_weight_staleness becomes
+    a no-op and rejected_ratio is a meaningless 0).
+    """
+
+    _ENDPOINTS = ("/get_model_info", "/model_info", "/get_weight_version")
 
     def __init__(self, ttl: float = 1.0):
         self._ttl = ttl
         self._value: int | None = None
         self._last_query: float = 0.0
+        self._warned = False
 
     async def get(self, args) -> int | None:
         now = time.monotonic()
         if self._value is not None and (now - self._last_query) < self._ttl:
             return self._value
-        url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/model_info"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
-                    if resp.status == 200:
+        base = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+        for endpoint in self._ENDPOINTS:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(base + endpoint, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                        if resp.status != 200:
+                            continue
                         data = await resp.json()
-                        self._value = int(data["weight_version"])
-                        self._last_query = now
-        except Exception as e:
-            logger.debug(f"Failed to query engine weight version: {e}")
+            except Exception as e:
+                logger.debug(f"Weight-version query to {endpoint} failed: {e}")
+                continue
+            version = data.get("weight_version") if isinstance(data, dict) else None
+            if version is not None and str(version).isdigit():
+                self._value = int(version)
+                self._last_query = now
+                return self._value
+        if not self._warned:
+            self._warned = True
+            logger.warning(
+                "Could not read weight_version from any of "
+                f"{self._ENDPOINTS} at {base}; the staleness filter is DISABLED "
+                "(no groups will be recycled and --max-weight-staleness is a no-op)."
+            )
         return self._value
 
 
@@ -213,9 +242,24 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
     completed_groups = {}
     do_print = True
     stale_groups_recycled = 0
+    aborted_groups_returned = 0
+    dynamic_filter_dropped = 0
     staleness_values = []
 
     use_staleness_filter = getattr(args, "max_weight_staleness", None) is not None
+
+    # DAPO dynamic sampling: drop groups the filter rejects (e.g. zero-std groups
+    # where every trajectory is all-correct or all-wrong, which contribute a ~0
+    # advantage / no gradient). Dropped groups are NOT recycled -- the continuously
+    # running worker just keeps pulling fresh prompts, which is the async
+    # equivalent of DAPO's over-sampling. No-op unless the flag is set.
+    dynamic_filter = (
+        load_function(args.dynamic_sampling_filter_path)
+        if getattr(args, "dynamic_sampling_filter_path", None) is not None
+        else None
+    )
+    if dynamic_filter is not None:
+        print(f"Dynamic sampling filter enabled: {args.dynamic_sampling_filter_path}")
 
     print(f"Starting async rollout generation for {target_data_size} groups")
     print(f"Global worker queue size: {worker.get_queue_size()}")
@@ -270,6 +314,7 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
                     print(f"Returned aborted group {group_id} to data buffer", flush=True)
                 except Exception as e:
                     print(f"Failed to return aborted group {group_id} to buffer: {e}", flush=True)
+                aborted_groups_returned += 1
                 # don't count as processed for training
                 continue
 
@@ -292,6 +337,17 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
                         f"staleness={staleness} > max={args.max_weight_staleness})"
                     )
                     # don't count as processed for training
+                    continue
+
+            # DAPO dynamic sampling filter (e.g. reject zero-std groups). Unlike
+            # stale/aborted groups these are discarded, not recycled: the prompt
+            # produced a degenerate all-same-reward group, so we drop it and let
+            # the worker over-sample fresh prompts instead.
+            if dynamic_filter is not None:
+                filter_output = call_dynamic_filter(dynamic_filter, args, group)
+                if not filter_output.keep:
+                    dynamic_filter_dropped += 1
+                    logger.info(f"Dropped group {group_id} by dynamic filter (reason={filter_output.reason})")
                     continue
 
             if do_print:
@@ -337,16 +393,39 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
             flush=True,
         )
 
+    # Surface queue-rejection stats to wandb. These ride the rollout/step axis
+    # via log_rollout_data's rollout_extra_metrics channel. "rejected" = groups
+    # pulled from the completed queue but NOT forwarded to training: recycled
+    # (too stale) + aborted. Ratio is over all groups considered this step.
+    accepted_groups = len(data)
+    considered = accepted_groups + stale_groups_recycled + aborted_groups_returned + dynamic_filter_dropped
+    metrics = {
+        "rollout/async/accepted_groups": accepted_groups,
+        "rollout/async/recycled_stale_groups": stale_groups_recycled,
+        "rollout/async/aborted_groups": aborted_groups_returned,
+        "rollout/async/dynamic_filter_dropped": dynamic_filter_dropped,
+        "rollout/async/rejected_ratio": ((stale_groups_recycled + aborted_groups_returned) / considered)
+        if considered > 0
+        else 0.0,
+        "rollout/async/stale_recycled_ratio": (stale_groups_recycled / considered) if considered > 0 else 0.0,
+        "rollout/async/dynamic_filter_dropped_ratio": (dynamic_filter_dropped / considered) if considered > 0 else 0.0,
+        "perf/async/queue_size_end": worker.get_queue_size(),
+        "perf/async/rollout_duration_s": duration,
+    }
+    if staleness_values:
+        metrics["rollout/async/avg_staleness"] = sum(staleness_values) / len(staleness_values)
+        metrics["rollout/async/max_staleness"] = max(staleness_values)
+
     data = sorted(data, key=lambda group: group[0].index)
-    return data
+    return data, metrics
 
 
 def generate_rollout_fully_async(args, rollout_id, data_buffer: DataSource, evaluation=False):
     if evaluation:
         raise ValueError("Evaluation mode not supported in simple async rollout")
 
-    completed_samples = run(generate_rollout_async(args, rollout_id, data_buffer))
-    return completed_samples
+    completed_samples, metrics = run(generate_rollout_async(args, rollout_id, data_buffer))
+    return RolloutFnTrainOutput(samples=completed_samples, metrics=metrics)
 
 
 # Register exit cleanup function

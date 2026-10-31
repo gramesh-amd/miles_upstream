@@ -2,6 +2,7 @@ import asyncio
 import copy
 import logging
 import uuid
+import weakref
 from argparse import Namespace
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -78,8 +79,21 @@ class GenerateState(metaclass=SingletonMeta):
         )
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        self.semaphore = asyncio.Semaphore(
+        # One semaphore per event loop. GenerateState is a process-wide singleton
+        # shared across loops (the fully-async worker runs its own loop via
+        # asyncio.run in a background thread; eval runs the sync rollout on a
+        # different loop). An asyncio.Semaphore binds its waiter futures to the
+        # loop that first blocks on it, so reusing one instance across loops
+        # raises "got Future attached to a different loop" under contention.
+        # Hand each loop its own semaphore, keyed by the running loop;
+        # WeakKeyDictionary drops the entry once a loop is gone. (Mirrors
+        # http_utils._get_client; upstream radixark/miles#1717 removes the second
+        # loop entirely, which is the structural fix.)
+        self._semaphore_capacity = (
             args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+        )
+        self._semaphores: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+            weakref.WeakKeyDictionary()
         )
         self.sampling_params: dict[str, Any] = dict(
             temperature=args.rollout_temperature,
@@ -102,6 +116,21 @@ class GenerateState(metaclass=SingletonMeta):
         self.dp_rank = 0
 
         self.reset()
+
+    @property
+    def semaphore(self) -> asyncio.Semaphore:
+        """Concurrency gate for the currently-running event loop.
+
+        Lazily creates one asyncio.Semaphore per loop (see ``_semaphores``) so
+        the fully-async worker loop and the eval loop never share one, which is
+        what triggers cross-loop ``RuntimeError``s under contention.
+        """
+        loop = asyncio.get_running_loop()
+        sem = self._semaphores.get(loop)
+        if sem is None:
+            sem = asyncio.Semaphore(self._semaphore_capacity)
+            self._semaphores[loop] = sem
+        return sem
 
     @contextmanager
     def dp_rank_context(self):

@@ -7,6 +7,7 @@ import os
 import random
 import socket
 import time
+import weakref
 
 import httpx
 
@@ -171,8 +172,56 @@ def terminate_process(process: multiprocessing.Process, timeout: float = 1.0) ->
         process.join()
 
 
-_http_client: httpx.AsyncClient | None = None
+# One httpx.AsyncClient per event loop. httpx binds a client's connection pool
+# (and its internal asyncio primitives, e.g. the pool's asyncio.Event/locks) to
+# the event loop that first drives it. The fully-async setup runs multiple loops
+# in the same process: the continuous rollout worker runs its own loop via
+# asyncio.run() in a background thread, while eval drives the *sync* rollout on a
+# different loop (async_utils.AsyncLoopThread). Sharing a single global client
+# across both raised "Event object is bound to a different event loop" and forced
+# 60x retries on every eval request. Keying the client by the running loop hands
+# each loop a client bound to itself; WeakKeyDictionary drops the entry (and lets
+# the client be collected) once a loop is gone, so short-lived eval loops don't
+# leak or collide via id() reuse.
+_http_clients: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient]" = (
+    weakref.WeakKeyDictionary()
+)
+# _client_concurrency is retained only to size the distributed-POST Ray actors
+# (see _init_ray_distributed_post); the per-loop client itself is uncapped.
 _client_concurrency: int = 0
+
+# Fail fast if a host is unreachable, but never time out an in-flight request:
+# weight-update / long generate calls legitimately block until the server-side
+# collective forms.
+_CONNECT_TIMEOUT: float = 10.0
+
+
+def _build_client() -> httpx.AsyncClient:
+    # Uncapped pool, matching upstream PR #1852's GeneralHttpClientProvider: a
+    # capped pool can deadlock the N-engine weight-sync/health broadcast, where
+    # every engine must connect before the collective forms, so the request
+    # queued behind the cap would wait on a collective that is itself waiting on
+    # it. Actual generate concurrency is already bounded by GenerateState's
+    # semaphore, so the HTTP pool needs no additional cap.
+    return httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=None, max_keepalive_connections=None),
+        timeout=httpx.Timeout(None, connect=_CONNECT_TIMEOUT),
+    )
+
+
+def _get_client() -> httpx.AsyncClient:
+    """Return an httpx.AsyncClient bound to the currently-running event loop.
+
+    Lazily creates (and caches) one client per loop so callers on different loops
+    never share a client, which is what triggers httpx's cross-loop errors.
+    """
+    loop = asyncio.get_running_loop()
+    client = _http_clients.get(loop)
+    if client is None or client.is_closed:
+        client = _build_client()
+        _http_clients[loop] = client
+    return client
+
 
 # Optional Ray-based distributed POST dispatch
 _distributed_post_enabled: bool = False
@@ -225,17 +274,18 @@ async def _post(client, url, payload, max_retries=60, action="post", headers=Non
 
 
 def init_http_client(args):
-    """Initialize HTTP client and optionally enable distributed POST via Ray."""
-    global _http_client, _client_concurrency, _distributed_post_enabled
+    """Configure HTTP client concurrency and optionally enable distributed POST.
+
+    The httpx.AsyncClient itself is created lazily, one per event loop (see
+    ``_get_client``), so the fully-async worker loop and the eval loop never
+    share a client. This runs outside any event loop, so it only records the
+    desired concurrency here.
+    """
+    global _client_concurrency, _distributed_post_enabled
     if not args.rollout_num_gpus:
         return
 
     _client_concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
-    if _http_client is None:
-        _http_client = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=_client_concurrency),
-            timeout=httpx.Timeout(None),
-        )
 
     # Optionally initialize distributed POST via Ray without changing interfaces
     if args.use_distributed_post:
@@ -308,12 +358,12 @@ async def post(url, payload, max_retries=60, action="post", headers=None):
             logger.info(f"[http_utils] Distributed POST failed, falling back to local: {e} (url={url})")
             # fall through to local
 
-    return await _post(_http_client, url, payload, max_retries, action=action, headers=headers)
+    return await _post(_get_client(), url, payload, max_retries, action=action, headers=headers)
 
 
 # TODO unify w/ `post` to add retries and remote-execution
 async def get(url):
-    response = await _http_client.get(url)
+    response = await _get_client().get(url)
     response.raise_for_status()
     output = response.json()
     return output
