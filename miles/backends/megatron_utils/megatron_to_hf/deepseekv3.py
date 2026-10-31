@@ -60,6 +60,9 @@ def convert_deepseekv3_to_hf(args, name, param):
 
         if rest == "self_attention.linear_proj.weight":
             return [(f"model.layers.{layer_idx}.self_attn.o_proj.weight", param)]
+        elif rest == "self_attention.linear_gate_proj.weight":
+            # Instella-MoE gated attention (FarSkip): per-layer output gate.
+            return [(f"model.layers.{layer_idx}.self_attn.gate_proj.weight", param)]
         elif rest == "self_attention.linear_q_proj.weight":
             return [(f"model.layers.{layer_idx}.self_attn.q_proj.weight", param)]
         elif rest == "self_attention.linear_q_down_proj.weight":

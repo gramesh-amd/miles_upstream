@@ -1256,6 +1256,20 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "If not set, we will use the logprobs from the actor model."
                 ),
             )
+            parser.add_argument(
+                "--fp32-lm-head",
+                action="store_true",
+                default=False,
+                help=(
+                    "Compute the LM head in fp32 during the forward-only log-prob pass. "
+                    "By default the head multiplies bf16 hidden states by a bf16 weight and "
+                    "Float16Module upcasts the result afterwards, so the logits are already "
+                    "quantized to a bf16 grid. That grid is 0.5 nats wide for models whose "
+                    "logits are large (Instella's are in [32, 128)), which shows up directly in "
+                    "train_rollout_logprob_abs_diff. Pair with sglang's --enable-fp32-lm-head, "
+                    "which removes the same rounding on the rollout side."
+                ),
+            )
             # Off-Policy Correction using Importance Sampling: https://fengyao.notion.site/off-policy-rl
             parser.add_argument(
                 "--use-tis",

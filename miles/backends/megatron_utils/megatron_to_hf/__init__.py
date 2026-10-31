@@ -34,6 +34,8 @@ def _convert_to_hf_core(args, model_name, name, param):
     if (
         "glm4moelite" in model_name
         or "deepseekv3" in model_name
+        # Instella-MoE is DeepSeek-V3 arch + gated attention (handled in convert_deepseekv3_to_hf).
+        or "instella" in model_name
         or "glmmoedsa" in model_name
         or "glm_moe_dsa" in model_name
     ):
