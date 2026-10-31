@@ -25,10 +25,11 @@ set -eo pipefail
 PHASE="${PHASE:-train}"
 SINGLE_NODE="${SINGLE_NODE:-0}"     # 1 => single 8-GPU node smoke (4 trainer + 4 rollout)
 
-# Response-length budget. Instella's context (max-position-embeddings) is 32768; miles sends
-# max_new_tokens unclamped, so SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION=32768 in the runtime env
-# below clamps sglang's estimation (same as Primus-Instella-Internal/rl/examples/{if_rl,mopd})
-# rather than us reserving prompt headroom here.
+# Response-length budget. The context is CONTEXT_LEN (default 32768, see below); miles sends
+# max_new_tokens unclamped, so SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION=CONTEXT_LEN in the runtime
+# env caps sglang's scheduler estimate of remaining tokens per request (it does not cap
+# generation; same as Primus-Instella-Internal/rl/examples/{if_rl,mopd}) rather than us
+# reserving prompt headroom here.
 #
 # TRAIN length is 32768, matching eval and the model's full context. This is deliberately
 # ABOVE Instella's own if_rl/mopd recipes (16384): the first 3-node run at 16384 truncated
@@ -57,6 +58,22 @@ SINGLE_NODE="${SINGLE_NODE:-0}"     # 1 => single 8-GPU node smoke (4 trainer + 
 # PYTORCH_ALLOC_CONF below), which is why 30720 and 16384 both died.
 ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-32768}"
 EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-32768}"
+
+# CONTEXT_LEN: total prompt+response tokens for both Megatron (--seq-length) and sglang. The
+# checkpoint's config.json says max_position_embeddings 32768, but its YaRN rope (factor 40 on a
+# 4096 base) covers more; Megatron computes YaRN from the 4096 base at any length, while sglang
+# derives its context from config.json and refuses a longer --context-length unless
+# SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1. Both are set below when CONTEXT_LEN > 32768.
+export CONTEXT_LEN="${CONTEXT_LEN:-32768}"
+for _len in "${ROLLOUT_MAX_RESPONSE_LEN}" "${EVAL_MAX_RESPONSE_LEN}"; do
+   [ "${_len}" -le "${CONTEXT_LEN}" ] || {
+      echo "ERROR: response length ${_len} exceeds CONTEXT_LEN=${CONTEXT_LEN}." >&2; exit 1; }
+done
+if [ "${CONTEXT_LEN}" -gt 32768 ]; then
+   SGLANG_LONG_CONTEXT=1
+else
+   SGLANG_LONG_CONTEXT=0
+fi
 
 export PYTHONUNBUFFERED=1
 export PYTHONBUFFERED=16
@@ -641,6 +658,9 @@ SGLANG_ARGS=(
 # shorter --eval-max-response-len would instead truncate answers, and a truncated response
 # never closes </think>, which scores 0 and biases the metric down. 64 also matches
 # --sglang-cuda-graph-max-bs-decode above, so decode stays on cuda graphs.
+if [ "${SGLANG_LONG_CONTEXT}" = "1" ]; then
+   SGLANG_ARGS+=(--sglang-context-length "${CONTEXT_LEN}")
+fi
 if [ -n "${SGLANG_MAX_RUNNING_REQUESTS:-}" ]; then
    SGLANG_ARGS+=(--sglang-max-running-requests "${SGLANG_MAX_RUNNING_REQUESTS}")
 fi
@@ -841,7 +861,8 @@ RUNTIME_ENV_JSON="{
     \"NVTE_CK_USES_BWD_V3\": \"1\",
     \"DEPRECATED_MEGATRON_COMPATIBLE\": \"1\",
     \"FARSKIP_REFERENCE_DECODER_LAYER\": \"1\",
-    \"SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION\": \"32768\",
+    \"SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION\": \"${CONTEXT_LEN}\",
+    \"SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN\": \"${SGLANG_LONG_CONTEXT}\",
     \"SGLANG_USE_AITER\": \"${SGLANG_USE_AITER}\",
     \"SGLANG_ROCM_FUSED_DECODE_MLA\": \"0\",
     \"GPU_MAX_HW_QUEUES\": \"8\",

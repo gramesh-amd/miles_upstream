@@ -94,7 +94,7 @@ MODEL_ARGS=(
     --moe-router-enable-expert-bias
 
     # --- runtime / dtype ---
-    --seq-length 32768
-    --max-position-embeddings 32768
+    --seq-length "${CONTEXT_LEN:-32768}"
+    --max-position-embeddings "${CONTEXT_LEN:-32768}"
     --bf16
 )

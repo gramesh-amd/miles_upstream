@@ -104,6 +104,9 @@ export DRGRPO="${DRGRPO:-0}"
 export DRGRPO_DIVISOR="${DRGRPO_DIVISOR:-}"
 export ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-32768}"
 export EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-32768}"
+# Prompt+response budget; raise it above 32768 for longer caps (e.g. CONTEXT_LEN=63488 with
+# ROLLOUT_MAX_RESPONSE_LEN=61440). sglang's auto-truncate gives each request context - prompt.
+export CONTEXT_LEN="${CONTEXT_LEN:-32768}"
 export SGLANG_MAX_RUNNING_REQUESTS="${SGLANG_MAX_RUNNING_REQUESTS:-64}"
 
 _n=("instella16b" "code$(( ROLLOUT_MAX_RESPONSE_LEN / 1024 ))k" "async_stale${MAX_WEIGHT_STALENESS}" "grpo")
@@ -119,6 +122,7 @@ else _n+=("persample"); fi
 [ "${CODE_PARTIAL_CREDIT}" = "1" ]  && _n+=("passrate")  || _n+=("allpass")
 [ "${CODE_REQUIRE_THINK}" = "1" ]   || _n+=("nothink")
 [ "${EVAL_MAX_RESPONSE_LEN}" = "${ROLLOUT_MAX_RESPONSE_LEN}" ] || _n+=("evallen${EVAL_MAX_RESPONSE_LEN}")
+[ "${CONTEXT_LEN}" = "32768" ] || _n+=("ctx${CONTEXT_LEN}")
 export WANDB_GROUP="${WANDB_GROUP:-$(IFS=-; printf '%s' "${_n[*]}")}"
 
 # --- preflight: loss config ---------------------------------------------------------
@@ -187,7 +191,7 @@ echo "=== code RL $(( ROLLOUT_MAX_RESPONSE_LEN / 1024 ))k arm ==="
 echo "  wandb: ${WANDB_PROJECT} / ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
 for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_PARTIAL_CREDIT CODE_REQUIRE_THINK \
          SAVE_INTERVAL EVAL_INTERVAL ROLLOUT_MAX_RESPONSE_LEN DISABLE_STD_NORM USE_ROUTING_REPLAY \
-         PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER; do
+         CONTEXT_LEN PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER; do
    echo "  ${V}=${!V}"
 done
 echo "  PROMPT_DATA=${PROMPT_DATA} ($(wc -l < "${PROMPT_DATA}") prompts)"

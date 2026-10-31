@@ -148,13 +148,31 @@ $I/cluster/on_node.sh $J $NODE cluster/launch.sh $HEAD_IP SINGLE_NODE=1 SAVE_TAG
   SGLANG_MAX_RUNNING_REQUESTS=128 SAVE_INTERVAL=10 EVAL_INTERVAL=10
 ```
 
+### Longer responses (`CONTEXT_LEN`)
+
+`CONTEXT_LEN` (default 32768) is the prompt+response budget for both Megatron (`--seq-length`)
+and sglang. The checkpoint's `config.json` says 32768, so above that `run_async.sh` also passes
+`--sglang-context-length` and sets `SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1` (without it
+sglang refuses to start). For ~61k responses:
+
+```bash
+... CONTEXT_LEN=63488 ROLLOUT_MAX_RESPONSE_LEN=61440 EVAL_MAX_RESPONSE_LEN=61440
+```
+
+Not yet run on this setup: a 61k sample is one microbatch on one GPU (CP=1), with ~32 GB of
+fp32 logits, so smoke-test it with `SINGLE_NODE=1 NUM_ROLLOUT=2` first.
+
 ### Dr. GRPO loss (`DRGRPO=1`, opt-in)
 
 By default the policy loss averages each sample over its own length, so a token in a long
 sample gets less weight. `DRGRPO=1` sums over tokens and divides by a constant
 (`drgrpo_reducer.py`), so every token counts the same. It needs `DRGRPO_DIVISOR`, the step-0
-mean response length (10686 for the DPO base at a 16k cap; measure it again for another cap or
-checkpoint), and should be paired with `OVERLONG_FILTER=1`:
+mean response length (10686 for the DPO base at a 16k cap), and should be paired with
+`OVERLONG_FILTER=1`. For any other cap or checkpoint, measure it: launch the same config with
+`DRGRPO=0`, read `rollout/response_len/mean` for the first 2-3 rollouts from the log, stop the
+job before its first checkpoint, then relaunch with `DRGRPO=1` and a fresh `SAVE_TAG`. It cannot
+be extrapolated from a shorter cap, because truncated samples' true lengths are unknown.
+`NUM_ROLLOUT=1` is not a shortcut: miles always checkpoints the final rollout (~207 GB).
 
 ```bash
 ... cluster/launch.sh $HEAD_IP SINGLE_NODE=1 SAVE_TAG=code_drgrpo_$USER \
