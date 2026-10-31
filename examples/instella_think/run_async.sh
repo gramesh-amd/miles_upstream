@@ -450,6 +450,17 @@ if [ "${PER_TOKEN_LOSS:-0}" = "1" ]; then
    GRPO_ARGS+=(--calculate-per-token-loss)
 fi
 
+# DRGRPO=1: pg_loss summed over tokens and divided by the constant DRGRPO_DIVISOR instead of
+# each sample's own length (examples/instella_think/drgrpo_reducer.py has the measurements and
+# how to pick the divisor). The divisor reaches the trainer actors only through
+# RUNTIME_ENV_JSON below, so it is checked here rather than defaulted.
+if [ "${DRGRPO:-0}" = "1" ]; then
+   [ "${PER_TOKEN_LOSS:-0}" != "1" ] || { echo "ERROR: DRGRPO=1 requires PER_TOKEN_LOSS=0." >&2; exit 1; }
+   [[ "${DRGRPO_DIVISOR:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+      echo "ERROR: DRGRPO=1 needs DRGRPO_DIVISOR (step-0 mean response length), got '${DRGRPO_DIVISOR:-}'." >&2; exit 1; }
+   GRPO_ARGS+=(--custom-pg-loss-reducer-function-path drgrpo_reducer.get_pg_loss_reducer)
+fi
+
 # OVERLONG_FILTER=1: drop truncated samples from the loss AND recentre the survivors' advantages.
 # Implemented in examples/instella_think/overlong_filter.py (on the workers' PYTHONPATH, see the
 # runtime env below) via --custom-reward-post-process-path, because that hook is the only place
@@ -495,7 +506,7 @@ fi
 # the critical path. Evals dump too (as eval_<id>.pt) at 960 sequences.
 if [ "${DUMP_ROLLOUTS:-0}" = "1" ]; then
    DUMP_DIR="${DUMP_DIR:-${DUMP_ROOT}/${SAVE_TAG}}"
-   mkdir -p "${DUMP_DIR}/rollout_data"
+   [ "${DRY_RUN:-0}" = "1" ] || mkdir -p "${DUMP_DIR}/rollout_data"
    GRPO_ARGS+=(--save-debug-rollout-data "${DUMP_DIR}/rollout_data/{rollout_id}.pt")
    echo "DUMP_ROLLOUTS=1 -> ${DUMP_DIR}/rollout_data/"
 fi
@@ -712,10 +723,12 @@ MISC_ARGS=(
 
 # --- logging to shared NFS ---------------------------------------------------
 TS="$(date +%Y%m%d_%H%M%S)"
-mkdir -p "${LOG_DIR}" "${WANDB_LOCAL_DIR}"
-LOG_FILE="${LOG_DIR}/instella-moe-16b-async-s4-${RUN_TAG}-$(hostname -s)-${TS}.log"
-echo "Logging everything to ${LOG_FILE}"
-exec > >(tee -a "${LOG_FILE}") 2>&1
+if [ "${DRY_RUN:-0}" != "1" ]; then
+   mkdir -p "${LOG_DIR}" "${WANDB_LOCAL_DIR}"
+   LOG_FILE="${LOG_DIR}/instella-moe-16b-async-s4-${RUN_TAG}-$(hostname -s)-${TS}.log"
+   echo "Logging everything to ${LOG_FILE}"
+   exec > >(tee -a "${LOG_FILE}") 2>&1
+fi
 
 HAS_NVLINK=0
 NVLINK_COUNT=0
@@ -726,7 +739,11 @@ fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
 # --- Ray: local head for single-node smoke, else connect to external cluster --
-if [ "${SINGLE_NODE}" = "1" ]; then
+# DRY_RUN=1 touches no Ray or GPU processes: it prints the resolved argv and exits before submit.
+if [ "${DRY_RUN:-0}" = "1" ]; then
+   export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+   export RAY_ADDRESS="${RAY_ADDRESS:-http://${MASTER_ADDR}:8265}"
+elif [ "${SINGLE_NODE}" = "1" ]; then
    # Clean any wedged processes from a previous smoke run, then start a local head.
    pkill -9 sglang 2>/dev/null || true
    ray stop --force 2>/dev/null || true
@@ -844,10 +861,24 @@ RUNTIME_ENV_JSON="{
     \"CODE_REWARD_SCALE\": \"${CODE_REWARD_SCALE:-1.0}\",
     \"CODE_REWARD_CONCURRENCY\": \"${CODE_REWARD_CONCURRENCY:-64}\",
     \"CODE_LOG_EVERY\": \"${CODE_LOG_EVERY:-200}\",
+    \"DRGRPO_DIVISOR\": \"${DRGRPO_DIVISOR:-}\",
     \"NCCL_SOCKET_IFNAME\": \"${NET_IF}\",
     \"GLOO_SOCKET_IFNAME\": \"${NET_IF}\"${SERIALIZE_ENV}
   }
 }"
+
+if [ "${DRY_RUN:-0}" = "1" ]; then
+   python3 -c 'import json,sys; json.loads(sys.argv[1])' "${RUNTIME_ENV_JSON}" \
+      || { echo "DRY_RUN: RUNTIME_ENV_JSON is not valid JSON" >&2; exit 1; }
+   echo "=== DRY_RUN: runtime env ==="
+   echo "${RUNTIME_ENV_JSON}"
+   echo "=== DRY_RUN: train_async.py argv (argparse keeps the LAST occurrence of a repeated flag) ==="
+   printf '%s\n' "${MODEL_ARGS[@]}" "${TOPOLOGY_ARGS[@]}" "${CKPT_ARGS[@]}" "${ROLLOUT_ARGS[@]}" \
+      "${ASYNC_ARGS[@]}" "${OPTIMIZER_ARGS[@]}" "${GRPO_ARGS[@]}" "${WANDB_ARGS[@]}" "${PERF_ARGS[@]}" \
+      "${EVAL_ARGS[@]}" "${SGLANG_ARGS[@]}" "${MISC_ARGS[@]}" | sed -e 's/^--/\n--/' | tr '\n' ' ' | sed -e 's/ --/\n--/g'
+   echo
+   exit 0
+fi
 
 set -x
 ray job submit --address="${RAY_ADDRESS}" \

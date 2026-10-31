@@ -17,6 +17,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
 | `prepare_code_data.py` | Builds the code train JSONL and a 256-row held-out eval JSONL from Dolci. |
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`). |
+| `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
 | `model_args.sh` | `MODEL_ARGS=(...)` + `MOE_LAYER_FREQ` (layer 0 dense, 1–26 MoE). MLA + `--gated-attention` + `--use-simple-farskip-layer`. **No `--spec`** (this Megatron forbids it for MoE; FarSkip is config-driven). |
 | `run_async.sh` | Main launcher. `PHASE=prepare` (HF→torch_dist) then `PHASE=train` (submit async DAPO-Math job to Ray). `SINGLE_NODE=1` for the 1-node smoke. |
 | `investigate_megatron.sh` | Assemble a FarSkip-capable Megatron at `MEGATRON_PATH` (clone NVIDIA pin `847781764` + overlay patch tree + `pip install -e`). |
@@ -127,12 +128,49 @@ $I/cluster/code_exec.sh status        # /health must answer
 HEAD_IP=$(ssh -p 18822 $NODE "ip -o -4 route get 1" | grep -oP '(?<=src )\S+')   # routable IP, not docker0
 $I/cluster/on_node.sh $J $NODE cluster/ray_head.sh $HEAD_IP
 $I/cluster/on_node.sh $J $NODE cluster/launch.sh $HEAD_IP CHECK_ONLY=1    # preflights only
+$I/cluster/on_node.sh $J $NODE cluster/launch.sh $HEAD_IP DRY_RUN=1       # print resolved argv, submit nothing
 $I/cluster/on_node.sh $J $NODE cluster/launch.sh $HEAD_IP SINGLE_NODE=1 SAVE_TAG=code_1node_$USER
 ```
 
 `launch.sh` takes `VAR=VALUE` overrides (srun does not forward your environment) and runs
 `run_code.sh` by default (`RUN_SCRIPT=run_if.sh` for the IF arm). It prints the log path:
-`$NFS_ROOT/rl-logs/launch-code32k-<node>-<ts>.out`.
+`$NFS_ROOT/rl-logs/launch-code<N>k-<node>-<ts>.out`.
+
+`DRY_RUN=1` prints the runtime env and every `train_async.py` flag, then exits without touching
+Ray or the GPUs. Some flags appear twice (e.g. from `model_args.sh` and an override); argparse
+keeps the last one, so check the printed list rather than reading the scripts.
+
+The reference run below is exactly:
+
+```bash
+$I/cluster/on_node.sh $J $NODE cluster/launch.sh $HEAD_IP SINGLE_NODE=1 SAVE_TAG=code_1node_$USER \
+  ROLLOUT_MAX_RESPONSE_LEN=16384 EVAL_MAX_RESPONSE_LEN=16384 \
+  SGLANG_MAX_RUNNING_REQUESTS=128 SAVE_INTERVAL=10 EVAL_INTERVAL=10
+```
+
+### Dr. GRPO loss (`DRGRPO=1`, opt-in)
+
+By default the policy loss averages each sample over its own length, so a token in a long
+sample gets less weight. `DRGRPO=1` sums over tokens and divides by a constant
+(`drgrpo_reducer.py`), so every token counts the same. It needs `DRGRPO_DIVISOR`, the step-0
+mean response length (10686 for the DPO base at a 16k cap; measure it again for another cap or
+checkpoint), and should be paired with `OVERLONG_FILTER=1`:
+
+```bash
+... cluster/launch.sh $HEAD_IP SINGLE_NODE=1 SAVE_TAG=code_drgrpo_$USER \
+  ROLLOUT_MAX_RESPONSE_LEN=16384 EVAL_MAX_RESPONSE_LEN=16384 \
+  DRGRPO=1 DRGRPO_DIVISOR=10686 OVERLONG_FILTER=1
+```
+
+Measured on the reference run's rollouts (52 steps, 13,312 samples): 28% of samples truncate,
+at 1.5x the mean length and mean reward 0.03. Under Dr. GRPO they would carry 41% of the
+gradient (29% today), which is why the overlong filter drops them and recentres the rest of
+the group; 71% of groups keep a reward spread after that. Only 0.8% of samples finish
+without `</think>`, so the math recipe's extra unclosed-think filter is not needed here.
+
+Check `train/grad_norm` in the first 3 steps: it should be the same order as the reference
+run's ~0.04-0.06. `overlong_filter: ... usable=` in the log is the number of groups still
+contributing; if it collapses, the filter is starving the update.
 
 `SINGLE_NODE=1` splits the node into 4 trainer GPUs (EP4) and 4 rollout GPUs (one sglang
 engine). For 3 nodes: bring up all three, run `env_setup.sh` on each, `ray_head.sh` on the

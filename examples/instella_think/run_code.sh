@@ -97,6 +97,11 @@ export DISABLE_STD_NORM="${DISABLE_STD_NORM:-1}"
 export USE_ROUTING_REPLAY="${USE_ROUTING_REPLAY:-1}"
 export PER_TOKEN_LOSS="${PER_TOKEN_LOSS:-0}"
 export OVERLONG_FILTER="${OVERLONG_FILTER:-0}"
+# DRGRPO=1: constant loss denominator (drgrpo_reducer.py). Needs DRGRPO_DIVISOR = the step-0 mean
+# response length for this cap and checkpoint (10686 at a 16384 cap from the DPO base); use it
+# with OVERLONG_FILTER=1, or truncated samples carry ~41% of the gradient.
+export DRGRPO="${DRGRPO:-0}"
+export DRGRPO_DIVISOR="${DRGRPO_DIVISOR:-}"
 export ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-32768}"
 export EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-32768}"
 export SGLANG_MAX_RUNNING_REQUESTS="${SGLANG_MAX_RUNNING_REQUESTS:-64}"
@@ -106,13 +111,23 @@ _n+=("bs${ROLLOUT_BATCH_SIZE}x${N_SAMPLES_PER_PROMPT}" "gbs${GLOBAL_BATCH_SIZE}"
 _n+=("lr${LR}" "clip${EPS_CLIP}_${EPS_CLIP_HIGH}" "tis")
 [ "${DISABLE_STD_NORM}" = "1" ]     && _n+=("nostd")     || _n+=("std")
 [ "${USE_ROUTING_REPLAY}" = "1" ]   && _n+=("r3")        || _n+=("nor3")
-[ "${PER_TOKEN_LOSS}" = "1" ]       && _n+=("ptl")       || _n+=("persample")
+if [ "${PER_TOKEN_LOSS}" = "1" ]; then _n+=("ptl")
+elif [ "${DRGRPO}" = "1" ]; then _n+=("drgrpo${DRGRPO_DIVISOR%%.*}")
+else _n+=("persample"); fi
 [ "${OVERLONG_FILTER}" = "1" ]      && _n+=("overlong")
 [ "${FP32_TRAINER_READOUT}" = "1" ] && _n+=("fp32head")
 [ "${CODE_PARTIAL_CREDIT}" = "1" ]  && _n+=("passrate")  || _n+=("allpass")
 [ "${CODE_REQUIRE_THINK}" = "1" ]   || _n+=("nothink")
 [ "${EVAL_MAX_RESPONSE_LEN}" = "${ROLLOUT_MAX_RESPONSE_LEN}" ] || _n+=("evallen${EVAL_MAX_RESPONSE_LEN}")
 export WANDB_GROUP="${WANDB_GROUP:-$(IFS=-; printf '%s' "${_n[*]}")}"
+
+# --- preflight: loss config ---------------------------------------------------------
+if [ "${DRGRPO}" = "1" ]; then
+   [ "${PER_TOKEN_LOSS}" = "0" ] || { echo "FATAL: DRGRPO=1 requires PER_TOKEN_LOSS=0" >&2; exit 1; }
+   [[ "${DRGRPO_DIVISOR}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+      echo "FATAL: DRGRPO=1 needs DRGRPO_DIVISOR (step-0 mean response length, e.g. 10686 at a 16k cap)" >&2; exit 1; }
+   [ "${OVERLONG_FILTER}" = "1" ] || echo "WARNING: DRGRPO=1 without OVERLONG_FILTER=1: truncated samples get ~41% of the gradient" >&2
+fi
 
 # --- preflight: disk ----------------------------------------------------------------
 CKPT_GB=207
@@ -129,7 +144,7 @@ if [ -n "${AVAIL_GB}" ]; then
    echo "=== disk preflight: ${CKPT_ROOT} ${AVAIL_GB} GiB free, ~${FITS} checkpoints, need ${NEED_CKPTS} ==="
    if [ "${FITS}" -lt "${NEED_CKPTS}" ]; then
       echo "  REFUSING TO LAUNCH: fewer than ${NEED_CKPTS} checkpoints fit. Free space or lower KEEP_BEST." >&2
-      exit 1
+      [ "${DRY_RUN:-0}" = "1" ] || exit 1
    fi
 fi
 
@@ -155,6 +170,11 @@ if [ "${CHECK_ONLY:-0}" = "1" ]; then
    exit 0
 fi
 
+if [ "${DRY_RUN:-0}" = "1" ]; then
+   cd "${REPO_DIR}" || exit 1
+   exec bash "${TARGET}"
+fi
+
 # --- freeze and launch (same mechanics as run_if.sh) --------------------------------
 cd "${REPO_DIR}" || exit 1
 mkdir -p "${LOG_DIR}" "${WANDB_LOCAL_DIR}"
@@ -163,10 +183,11 @@ OUT="${LOG_DIR}/launch-code$(( ROLLOUT_MAX_RESPONSE_LEN / 1024 ))k-$(hostname -s
 FROZEN="${SCRIPT_DIR}/.run-frozen-${TS}.sh"
 cp "${TARGET}" "${FROZEN}" || exit 1
 
-echo "=== code RL 32k arm ==="
+echo "=== code RL $(( ROLLOUT_MAX_RESPONSE_LEN / 1024 ))k arm ==="
 echo "  wandb: ${WANDB_PROJECT} / ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
 for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_PARTIAL_CREDIT CODE_REQUIRE_THINK \
-         SAVE_INTERVAL EVAL_INTERVAL ROLLOUT_MAX_RESPONSE_LEN DISABLE_STD_NORM USE_ROUTING_REPLAY; do
+         SAVE_INTERVAL EVAL_INTERVAL ROLLOUT_MAX_RESPONSE_LEN DISABLE_STD_NORM USE_ROUTING_REPLAY \
+         PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER; do
    echo "  ${V}=${!V}"
 done
 echo "  PROMPT_DATA=${PROMPT_DATA} ($(wc -l < "${PROMPT_DATA}") prompts)"
