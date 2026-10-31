@@ -8,7 +8,7 @@ Run INSIDE the container with the venv active:
 Without --apply it only reports what it would change. Example:
 
     python3 examples/instella_think/fix_ckpt_common_optimizer_state.py \\
-        /home/goramesh/checkpoints/Qwen3.6-35B-A3B_miles_async_s4/iter_0000039 --apply
+        <SAVE_DIR>/iter_0000039 --apply
 
 Checkpoints saved with --optimizer-cpu-offload before the patch carry a bogus 'param_state'
 subtree in common.pt: the CPU sub-optimizer (torch.optim.AdamW) keeps a per-parameter `step`,

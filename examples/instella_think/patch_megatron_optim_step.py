@@ -5,8 +5,8 @@ Run INSIDE the container (writes into MEGATRON_PATH), once per container:
 
     MEGATRON_PATH=/root/Megatron-LM python3 examples/instella_think/patch_megatron_optim_step.py
 
-Needed by run-qwen3.6-35b-a3b-async-stale4-3node.sh, which uses --optimizer-cpu-offload
-together with --use-precision-aware-optimizer. Without this patch, resuming from a
+Needed only by runs that use --optimizer-cpu-offload together with
+--use-precision-aware-optimizer (the Instella recipes here use neither). Without this patch, resuming from a
 mid-training checkpoint with optimizer state dies in
 megatron/core/dist_checkpointing/serialization.py:126 with
 
