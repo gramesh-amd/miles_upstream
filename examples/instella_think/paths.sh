@@ -43,7 +43,12 @@ IF_IFBENCH_DIR="${IF_IFBENCH_DIR:-${NFS_ROOT}/IFBench}"
 # Code RL sandbox (cluster/code_exec.sh).
 CODE_EXEC_TOKEN_FILE="${CODE_EXEC_TOKEN_FILE:-${USER_HOME}/.code-exec-token}"
 CODE_EXEC_PORT="${CODE_EXEC_PORT:-18950}"
+# Benchmark evals (prepare_code_benchmarks.py output; the sandbox host must read it) and
+# their sandbox instance (`cluster/code_exec.sh start bench`).
+CODE_BENCH_DIR="${CODE_BENCH_DIR:-${DATA_ROOT}/code-bench}"
+CODE_BENCH_PORT="${CODE_BENCH_PORT:-18951}"
+CODE_BENCH_VENV="${CODE_BENCH_VENV:-${USER_HOME}/.code-exec-venv}"
 
 export INSTELLA_USER USER_HOME NFS_ROOT ASSET_ROOT DATA_ROOT CKPT_ROOT LOG_DIR DUMP_ROOT \
        WANDB_LOCAL_DIR PRIMUS_ROOT MEGATRON_PATH NETRC_PATH NLTK_DATA IF_IFBENCH_DIR \
-       CODE_EXEC_TOKEN_FILE CODE_EXEC_PORT
+       CODE_EXEC_TOKEN_FILE CODE_EXEC_PORT CODE_BENCH_DIR CODE_BENCH_PORT CODE_BENCH_VENV

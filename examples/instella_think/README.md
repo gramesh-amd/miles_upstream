@@ -16,6 +16,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `code_reward.py` | The code reward (`--custom-rm-path code_reward.batched_reward`). Pass rate while training, all-or-nothing at eval. Self-tests with `python3 code_reward.py` (needs the sandbox). |
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
 | `prepare_code_data.py` | Builds the code train JSONL and a 256-row held-out eval JSONL from Dolci. |
+| `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol (`CODE_BENCH=1`). |
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`). |
 | `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
 | `model_args.sh` | `MODEL_ARGS=(...)` + `MOE_LAYER_FREQ` (layer 0 dense, 1–26 MoE). MLA + `--gated-attention` + `--use-simple-farskip-layer`. **No `--spec`** (this Megatron forbids it for MoE; FarSkip is config-driven). |
@@ -193,6 +194,50 @@ contributing; if it collapses, the filter is starving the update.
 `SINGLE_NODE=1` splits the node into 4 trainer GPUs (EP4) and 4 rollout GPUs (one sglang
 engine). For 3 nodes: bring up all three, run `env_setup.sh` on each, `ray_head.sh` on the
 head, `cluster/ray_worker.sh $HEAD_IP` on the other two, then launch without `SINGLE_NODE`.
+
+### OLMo 3 code benchmarks (`CODE_BENCH=1`)
+
+`CODE_BENCH=1` adds HumanEval+, MBPP+ and LiveCodeBench v3 to every eval, next to
+`code-heldout`, logged as `eval/humanevalplus`, `eval/mbppplus` and `eval/lcb_v3`. Prompts,
+answer extraction, program assembly, tests and timeouts are oe-eval's `::olmo3:adapt` tasks.
+Sampling is OLMo 3 Think's: 10 samples, temperature 0.6, top_p 0.95, 32768 tokens. So each
+value is their pass@1 and compares directly with the paper (arXiv 2512.13961, Table 16):
+
+| | OLMo 3 Think 7B (SFT / DPO / final) | 32B (SFT / DPO / final) |
+|---|---|---|
+| HumanEval+ | 88.2 / 91.4 / 89.9 | 90.0 / 91.6 / 91.4 |
+| MBPP+ | 63.2 / 63.0 / 64.7 | 66.7 / 67.2 / 68.0 |
+| LiveCodeBench v3 | 67.8 / 75.1 / 75.2 | 75.8 / 81.9 / 83.5 |
+
+```bash
+# Once: pinned dataset revisions, sha256-checked. LiveCodeBench's ~5 GB of tests go to
+# $CODE_BENCH_DIR/tests, which the sandbox host must be able to read.
+python3 examples/instella_think/prepare_code_benchmarks.py --out-dir "$CODE_BENCH_DIR"
+# Login node: a second sandbox instance (port 18951; makes a numpy venv on first start).
+examples/instella_think/cluster/code_exec.sh start bench
+# Launch as usual, with:
+... CODE_BENCH=1 EVAL_INTERVAL=20
+```
+
+The sandbox reproduces two oe-eval behaviours on purpose:
+- A response with no `</think>` is still graded. oe-eval searches the whole text, while
+  `code-heldout` scores it 0.
+- Model-written `if __name__ == "__main__":` blocks don't run for HumanEval+, MBPP+ or
+  LiveCodeBench call-based problems.
+
+Every canonical solution passes except three that fail under oe-eval too, so those are the
+same ceilings as the paper's: HumanEval/32 (its own test fails the canonical solution), and
+MBPP/4 and MBPP/6 (oe-eval's prompt cuts the type-annotated signature into a syntax error).
+
+**Cost.** That's 1,154 problems x 10 samples = 11,540 generations at up to 32k tokens, and
+training waits for the eval. The reference run's engine decodes ~6,900 tokens/s in total on
+1 node (128 running requests). At an assumed 7-11k tokens per response (unmeasured on these
+sets) that's 80-130M tokens, about **3-5 hours per eval on 1 node**, or 12-20 training steps.
+`CODE_BENCH_N=1` costs about a tenth (roughly 40-60 min including the 32k-token tail) and is
+the practical in-training setting. Keep `CODE_BENCH_N=10` for reported numbers, e.g. on
+saved checkpoints. `CODE_BENCH_SETS` picks a subset. Watch `cluster/code_exec.sh status bench`: it
+shares the CPU host with the training sandbox, and if `timeouts` climb, CPU contention is
+failing correct LiveCodeBench solutions (6 s per test).
 
 ### 7. Watch it
 

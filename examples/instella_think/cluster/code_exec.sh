@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Run the code RL sandbox (../code_exec_server.py) on a CPU host. Run on the login node.
 #
-#   cluster/code_exec.sh start     # start it on $CODE_EXEC_HOST (idempotent)
-#   cluster/code_exec.sh status    # process + /health from this node
-#   cluster/code_exec.sh stop
-#   cluster/code_exec.sh url       # prints CODE_EXEC_API_URL for the training run
+#   cluster/code_exec.sh start [bench]   # start it on $CODE_EXEC_HOST (idempotent)
+#   cluster/code_exec.sh status [bench]  # process + /health from this node
+#   cluster/code_exec.sh stop [bench]
+#   cluster/code_exec.sh url [bench]     # prints CODE_EXEC_API_URL (or CODE_BENCH_API_URL)
+#
+# `bench` is a second instance for the HumanEval+/MBPP+/LiveCodeBench evals
+# (prepare_code_benchmarks.py) on $CODE_BENCH_PORT: their tests need numpy, 20 s, up to
+# 103 tests and on-disk test files, and they should not queue behind training rewards.
 #
 # The host must be reachable by ssh from here and by HTTP from the GPU nodes, and must
 # see this checkout (shared home). The URL embeds the secret in $CODE_EXEC_TOKEN_FILE
@@ -15,12 +19,25 @@ INSTELLA_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)
 source "${INSTELLA_DIR}/paths.sh"
 
 HOST="${CODE_EXEC_HOST:?set CODE_EXEC_HOST (a CPU host), e.g. in ~/.instella-env.sh}"
-PORT="${CODE_EXEC_PORT}"
-# Leave headroom on shared CPU hosts: default to all but 4 cores, at least 4 workers.
-WORKERS="${CODE_EXEC_WORKERS:-}"
 SERVER="${INSTELLA_DIR}/code_exec_server.py"
 TOKEN_FILE="${CODE_EXEC_TOKEN_FILE}"
-LOG="${USER_HOME}/logs/code-exec-${HOST%%.*}.log"
+
+if [ "${2:-}" = "bench" ]; then
+  PORT="${CODE_BENCH_PORT}"
+  # Shares the host with the training instance, so it takes fewer cores by default.
+  WORKERS="${CODE_BENCH_WORKERS:-8}"
+  VENV="${CODE_BENCH_VENV}"
+  PY="${VENV}/bin/python"
+  EXTRA="--python $PY --max-tests 128 --max-timeout 20 --mem-mb 4096 \
+         --tests-dir ${CODE_BENCH_DIR}/tests --scratch /tmp/code-exec-bench-\$(id -u)"
+  LOG="${USER_HOME}/logs/code-exec-bench-${HOST%%.*}.log"
+else
+  PORT="${CODE_EXEC_PORT}"
+  # Leave headroom on shared CPU hosts: default to all but 4 cores, at least 4 workers.
+  WORKERS="${CODE_EXEC_WORKERS:-}"
+  EXTRA=""
+  LOG="${USER_HOME}/logs/code-exec-${HOST%%.*}.log"
+fi
 
 if [ ! -s "$TOKEN_FILE" ]; then
   ( umask 077; python3 -c 'import secrets; print(secrets.token_hex(16))' > "$TOKEN_FILE" )
@@ -49,8 +66,15 @@ case "${1:-status}" in
       echo "already running on $HOST (pid $(pid_on_host))"
     else
       mkdir -p "$(dirname "$LOG")"
+      if [ "${2:-}" = "bench" ]; then
+        # numpy for the EvalPlus tests. The host's python3 may lack ensurepip, hence get-pip.
+        timeout 600 ssh -o BatchMode=yes "$HOST" "test -x $PY && $PY -c 'import numpy' 2>/dev/null || {
+            python3 -m venv --without-pip $VENV &&
+            curl -sS https://bootstrap.pypa.io/get-pip.py | $PY - -q &&
+            $PY -m pip install -q numpy; }"
+      fi
       [ -n "$WORKERS" ] || WORKERS="$(remote nproc | awk '{n=$1-4; print (n<4?4:n)}')"
-      remote "setsid nohup python3 -u $SERVER --port $PORT --workers $WORKERS --token-file $TOKEN_FILE \
+      remote "setsid nohup python3 -u $SERVER --port $PORT --workers $WORKERS --token-file $TOKEN_FILE $EXTRA \
               >> $LOG 2>&1 < /dev/null & disown"
       for _ in 1 2 3 4 5 6 7 8 9 10; do health >/dev/null 2>&1 && break; sleep 1; done
       echo "started on $HOST:$PORT (pid $(pid_on_host), $WORKERS workers), log $LOG"
@@ -71,5 +95,5 @@ case "${1:-status}" in
     echo "$URL"
     ;;
   *)
-    sed -n '2,11p' "$0"; exit 1 ;;
+    sed -n '2,15p' "$0"; exit 1 ;;
 esac

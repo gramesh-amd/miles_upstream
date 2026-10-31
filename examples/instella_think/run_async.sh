@@ -203,7 +203,11 @@ ROLLOUT_ARGS=(
 # Eval sets. EVAL_PROMPT_DATA overrides with space-separated "name path name path" pairs
 # (the CLI form miles wants, arguments.py:995-1003); safe to word-split because none of
 # these paths contain spaces. run_if.sh points this at the IFEval/IFBench sets.
-if [ -n "${EVAL_PROMPT_DATA:-}" ]; then
+if [ -n "${EVAL_CONFIG:-}" ]; then
+   # A miles eval YAML (eval.datasets with per-set n/temperature/length); run_code.sh
+   # writes one for CODE_BENCH=1. It replaces EVAL_PROMPT_DATA.
+   EVAL_DATA_ARGS=(--eval-config "${EVAL_CONFIG}")
+elif [ -n "${EVAL_PROMPT_DATA:-}" ]; then
    # shellcheck disable=SC2206  # deliberate word-splitting into name/path pairs
    EVAL_DATA_ARGS=(--eval-prompt-data ${EVAL_PROMPT_DATA})
 else
@@ -875,6 +879,7 @@ RUNTIME_ENV_JSON="{
     \"NETRC\": \"${NETRC:-}\",
     \"NLTK_DATA\": \"${NLTK_DATA}\",
     \"CODE_EXEC_API_URL\": \"${CODE_EXEC_API_URL:-}\",
+    \"CODE_BENCH_API_URL\": \"${CODE_BENCH_API_URL:-}\",
     \"CODE_EXEC_TIMEOUT\": \"${CODE_EXEC_TIMEOUT:-5}\",
     \"CODE_MAX_TESTS\": \"${CODE_MAX_TESTS:-32}\",
     \"CODE_PARTIAL_CREDIT\": \"${CODE_PARTIAL_CREDIT:-1}\",

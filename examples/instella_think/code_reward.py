@@ -7,6 +7,8 @@ against the row's tests. Test formats, all JSON in `label`:
     ["assert f(1) == 2", ...]              each assert appended to the program
     {"test": "def test_x(): ...", ...}     pytest-style functions, each called once
     {"test": "def check(c): ...", "entry_point": "f"}   HumanEval-style check(f)
+    {"bench": ..., "route": ..., ...}      a benchmark row from prepare_code_benchmarks.py,
+                                           graded by oe-eval's rules (see _score_bench)
 
 Programs run on the code-exec service (code_exec_server.py) at CODE_EXEC_API_URL, never
 on the training node. Set CODE_EXEC_API_URL=local only for offline debugging.
@@ -51,7 +53,14 @@ _CONCURRENCY = int(os.environ.get("CODE_REWARD_CONCURRENCY", "64"))
 _LOG_EVERY = int(os.environ.get("CODE_LOG_EVERY", "200"))
 _HTTP_RETRIES = int(os.environ.get("CODE_EXEC_API_RETRIES", "2"))
 
+# Benchmark rows (prepare_code_benchmarks.py) can go to their own service, so their heavy
+# tests never queue behind training rewards.
+_BENCH_API_URL = os.environ.get("CODE_BENCH_API_URL", "").strip().rstrip("/") or _API_URL
+
 _FENCE_RE = re.compile(r"```(?:python|py|Python)?[ \t]*\n?(.*?)```", re.DOTALL)
+# oe-eval codex_humanevalplus / mbppplus ::olmo3:adapt answer_format_regex and answer_regexes.
+_OLMES_FORMAT_RE = re.compile(r"(?s)Here is the completed function:\n*```(?:python\n)?\n*(.*?)\s*```")
+_OLMES_ANSWER_RE = re.compile(r"(?s)```(?:python\n)?\n*(.*?)\s*```")
 _SPECIAL_TOKEN_RE = re.compile(r"<｜[^｜]*｜>")
 _TEST_FUNC_RE = re.compile(r"^def (test_\w+)\s*\(", re.MULTILINE)
 _ASSERT_FUNC_RE = re.compile(r"assert\s+(\w+)\s*\(")
@@ -152,13 +161,16 @@ def _run_remote(program: str, tests: list, stdio: bool):
     """0/1 per test, or None if the service could not be reached."""
     path = "/test_program_stdio" if stdio else "/test_program"
     body = {"program": program, "tests": tests, "max_execution_time": _TIMEOUT}
-    read_timeout = min(300.0, _TIMEOUT * len(tests) + 30.0)
+    return _post(_API_URL, path, body, len(tests), min(300.0, _TIMEOUT * len(tests) + 30.0))
+
+
+def _post(url: str, path: str, body: dict, n_tests: int, read_timeout: float):
     for attempt in range(_HTTP_RETRIES + 1):
         try:
-            r = _http().post(_API_URL + path, json=body, timeout=(3.0, read_timeout))
+            r = _http().post(url + path, json=body, timeout=(3.0, read_timeout))
             if r.status_code == 200:
                 res = r.json().get("results")
-                if isinstance(res, list) and len(res) == len(tests):
+                if isinstance(res, list) and len(res) == n_tests:
                     return [1 if x in (1, True) else 0 for x in res]
                 logger.warning("code-exec %s returned a malformed body: %r", path, r.text[:200])
                 return None
@@ -250,6 +262,68 @@ def pass_rate(code: str, tests) -> float | None:
     return None if res is None else sum(res) / len(cases)
 
 
+# --- benchmarks (oe-eval ::olmo3:adapt protocol) ------------------------------------
+def _bench_answer(response: str) -> str:
+    """oe-eval's r1_style output processor: drop everything up to the LAST </think>. With no
+    </think> at all the whole response is searched, so there is no think gate here."""
+    answer = re.sub(r"(?ms).*</think>", "", response)
+    answer = re.sub(r"(?ms)^\s*<answer>\s*", "", answer)
+    answer = re.sub(r"(?ms)</answer>\s*$", "", answer)
+    return _SPECIAL_TOKEN_RE.sub("", answer)
+
+
+def _bench_code(answer: str, style: str) -> str:
+    if style == "lcb":
+        # lcb_runner extract_code (OpenAIChat style): lines between the last two ``` lines
+        lines = answer.split("\n")
+        fences = [i for i, line in enumerate(lines) if "```" in line]
+        return "\n".join(lines[fences[-2] + 1:fences[-1]]) if len(fences) >= 2 else ""
+    # oe_eval.tasks.utils.extract_answer: last format match, else last plain fence
+    found = _OLMES_FORMAT_RE.findall(answer)
+    code = found[-1] if found else ""
+    if code == "":
+        found = _OLMES_ANSWER_RE.findall(answer)
+        code = found[-1] if found else ""
+    return code
+
+
+def bench_pass(code: str, label: dict) -> bool | None:
+    """All-tests verdict for a benchmark row, or None when the service could not answer."""
+    timeout = float(label["timeout"])
+    body = {"program": label.get("prefix", "") + code, "max_execution_time": timeout, "stop_on_fail": True}
+    route = label["route"]
+    if route == "script":
+        # oe-eval exec()s HumanEval+/MBPP+ programs with fresh globals, so __name__ is not
+        # "__main__" and a model's own `if __name__ == "__main__":` block never runs.
+        path, n_tests = "/test_program", 1
+        body.update(tests=[label["test"]], name="tmp_sol")
+    else:
+        path = "/test_program_call" if route == "call" else "/test_program_stdio"
+        n_tests = int(label["n_tests"])
+        body["tests_ref"] = label["tests_ref"]
+        if route == "call":
+            body["fn_name"] = label["fn_name"]
+    if _LOCAL or not _BENCH_API_URL:
+        return None
+    res = _post(_BENCH_API_URL, path, body, n_tests, min(3600.0, (timeout + 1.0) * n_tests + 60.0))
+    return None if res is None else all(res)
+
+
+def _score_bench(response: str, label: dict) -> float:
+    code = _bench_code(_bench_answer(response), label.get("extract", "olmes"))
+    if not code.strip():
+        STATS.note("no_code")
+        STATS.note_sample(0.0, False)
+        return 0.0
+    ok = bench_pass(code, label)
+    if ok is None:
+        STATS.note("api_error")
+        STATS.note_sample(0.0, False)
+        return 0.0
+    STATS.note_sample(float(ok), ok)
+    return float(ok) * REWARD_SCALE
+
+
 # --- scoring --------------------------------------------------------------------
 def _is_eval(meta: dict, evaluation_kwarg: bool) -> bool:
     return evaluation_kwarg or str(meta.get("split", "")).lower() == "eval"
@@ -265,6 +339,8 @@ def _score_one(sample, evaluation: bool = False) -> float:
         STATS.note("no_tests")
         STATS.note_sample(0.0, False)
         return 0.0
+    if isinstance(tests, dict) and "bench" in tests:
+        return _score_bench(response, tests)
 
     if _REQUIRE_THINK:
         ok = ("</think>" in response) if evaluation else _has_clean_think(response)

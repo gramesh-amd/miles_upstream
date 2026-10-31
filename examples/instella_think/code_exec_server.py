@@ -5,8 +5,16 @@ Implements the API the Instella reward client already speaks:
 
     POST <prefix>/test_program        {"program", "tests": [str], "max_execution_time"}
     POST <prefix>/test_program_stdio  {"program", "tests": [{"input","output"}], "max_execution_time"}
+    POST <prefix>/test_program_call   {"program", "tests": [{"input","output"}], "fn_name", ...}
         -> {"results": [0|1, ...]}   one entry per test, in order
     GET  <prefix>/health              -> {"ok": true, ...}
+
+Optional request fields, used by the benchmark evals (prepare_code_benchmarks.py):
+    "tests_ref": path under --tests-dir, sent instead of "tests"
+    "stop_on_fail": skip (and fail) tests not yet started once one has failed
+    "name": the program's __name__ (default "__main__")
+/test_program_call follows LiveCodeBench's call-based grading: the program is imported as
+a module and fn_name (on Solution() if the code defines it) is called per test.
 
 Standard library only, so it runs on a bare CPU host (python3 >= 3.8).
 
@@ -29,6 +37,7 @@ hooks), so do not expose this service beyond the training cluster.
 """
 
 import argparse
+import functools
 import json
 import os
 import resource
@@ -51,6 +60,8 @@ import os, sys, builtins
 
 _SCRATCH = os.path.realpath(os.environ.get("CODE_EXEC_SCRATCH", "/nonexistent"))
 _NO_READ = ("/home", "/shared_nfs", "/root", "/mnt")
+# The interpreter's own tree (a venv under /home, say) must stay readable or imports fail.
+_OWN = tuple({os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix)})
 _BLOCKED = {
     "socket.connect", "socket.bind", "socket.sendto", "socket.sendmsg",
     "socket.getaddrinfo", "socket.gethostbyname", "socket.__new__",
@@ -70,6 +81,10 @@ def _inside(path, root):
     return path == root or path.startswith(root + os.sep)
 
 def _hook(event, args):
+    # `import ctypes` (and so `import numpy`) dlopens the running process itself. That
+    # loads nothing new, and symbol lookup and foreign calls stay blocked.
+    if event == "ctypes.dlopen" and args and args[0] is None:
+        return
     if event in _BLOCKED or event.startswith("os.exec") or event.startswith("os.spawn"):
         raise PermissionError("sandbox: %s is not allowed" % event)
     if event == "open":
@@ -83,7 +98,8 @@ def _hook(event, args):
                   (isinstance(flags, int) and flags & _WRITE_FLAGS)
         if writing and not _inside(real, _SCRATCH) and real not in ("/dev/null",):
             raise PermissionError("sandbox: write outside scratch: %s" % real)
-        if any(_inside(real, p) for p in _NO_READ) and not _inside(real, _SCRATCH):
+        if any(_inside(real, p) for p in _NO_READ) and not _inside(real, _SCRATCH) \
+                and not any(_inside(real, p) for p in _OWN):
             raise PermissionError("sandbox: read not allowed: %s" % real)
 
 sys.addaudithook(_hook)
@@ -94,7 +110,8 @@ with open(_prog) as _f:
     _src = _f.read()
 sys.argv = [_prog]
 _code = compile(_src, "solution.py", "exec")
-_g = {"__name__": "__main__", "__file__": "solution.py", "__builtins__": builtins}
+_g = {"__name__": os.environ.get("CODE_EXEC_NAME", "__main__"), "__file__": "solution.py",
+      "__builtins__": builtins}
 exec(_code, _g)
 '''
 
@@ -164,8 +181,9 @@ class Runner:
 
         return apply
 
-    def run_one(self, program: str, stdin: str, timeout: float):
-        """Returns (returncode or None on timeout, stdout)."""
+    def run_one(self, program: str, stdin: str, timeout: float, name: str = "__main__", case=None):
+        """Returns (returncode or None on timeout, stdout). `name` is the program's
+        __name__; `case`, if given, is written to _case.json beside it."""
         with self.sem:
             t0 = time.monotonic()
             d = tempfile.mkdtemp(prefix="t-", dir=self.scratch_root)
@@ -173,7 +191,10 @@ class Runner:
                 prog = os.path.join(d, "solution.py")
                 with open(prog, "w") as f:
                     f.write(program)
-                env = dict(self.env, HOME=d, TMPDIR=d, CODE_EXEC_SCRATCH=d)
+                if case is not None:
+                    with open(os.path.join(d, "_case.json"), "w") as f:
+                        json.dump(case, f)
+                env = dict(self.env, HOME=d, TMPDIR=d, CODE_EXEC_SCRATCH=d, CODE_EXEC_NAME=name)
                 p = subprocess.Popen(
                     [self.python, "-I", self.guard, prog],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -197,24 +218,98 @@ class Runner:
                 shutil.rmtree(d, ignore_errors=True)
                 _bump(busy_s=time.monotonic() - t0)
 
-    def assert_tests(self, program, tests, timeout):
+    def _map(self, one, tests, stop_on_fail):
+        """Runs one(tc) per test. With stop_on_fail, tests not yet started once any test
+        has failed are reported failed without running: same all-pass verdict, less work."""
+        if not stop_on_fail:
+            return list(self.pool.map(one, tests))
+        failed = threading.Event()
+
+        def guarded(tc):
+            if failed.is_set():
+                return 0
+            r = one(tc)
+            if not r:
+                failed.set()
+            return r
+
+        return list(self.pool.map(guarded, tests))
+
+    def assert_tests(self, program, tests, timeout, name="__main__", stop_on_fail=False):
         def one(tc):
-            rc, _ = self.run_one(f"{program}\n\n{tc}\n", "", timeout)
+            rc, _ = self.run_one(f"{program}\n\n{tc}\n", "", timeout, name=name)
             return 1 if rc == 0 else 0
 
-        return list(self.pool.map(one, tests))
+        return self._map(one, tests, stop_on_fail)
 
-    def stdio_tests(self, program, tests, timeout):
+    def stdio_tests(self, program, tests, timeout, stop_on_fail=False):
         def one(tc):
             if not isinstance(tc, dict):
                 return 0
             rc, out = self.run_one(program, str(tc.get("input", "")), timeout)
             return 1 if rc == 0 and _lines_equal_with_decimal(out, str(tc.get("output", ""))) else 0
 
-        return list(self.pool.map(one, tests))
+        return self._map(one, tests, stop_on_fail)
+
+    def call_tests(self, program, tests, timeout, fn_name, stop_on_fail=False):
+        """LiveCodeBench call-based grading (lcb_runner testing_util.grade_call_based): the
+        program is imported, not run as __main__; inputs are one JSON value per line."""
+        target = "Solution()" if "class Solution" in program else None
+        program = program + "\n\n" + CALL_HARNESS.format(fn=fn_name, target=target)
+
+        def one(tc):
+            if not isinstance(tc, dict):
+                return 0
+            case = {"input": str(tc.get("input", "")), "output": str(tc.get("output", ""))}
+            rc, _ = self.run_one(program, "", timeout, name="tmp_sol", case=case)
+            return 1 if rc == 0 else 0
+
+        return self._map(one, tests, stop_on_fail)
 
 
-def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float, started: float):
+# Appended to call-based programs. Names are dunder-prefixed so the solution's own
+# globals (it may star-import json, sys, io...) cannot shadow them.
+CALL_HARNESS = r'''
+def __grade():
+    import json as __j
+    import builtins as __b
+    with __b.open("_case.json") as __f:
+        __c = __j.load(__f)
+    __obj = {target}
+    __m = getattr(__obj, {fn!r}) if __obj is not None else globals()[{fn!r}]
+    __p = __m(*[__j.loads(__l) for __l in __c["input"].split("\n")])
+    if isinstance(__p, tuple):
+        __p = list(__p)
+    if not (__p == __j.loads(__c["output"])):
+        raise SystemExit(1)
+__grade()
+'''
+
+
+def make_tests_loader(tests_dir):
+    """Resolves a request's "tests_ref" (a path relative to --tests-dir) to its test list.
+    Benchmarks like LiveCodeBench carry up to ~150 MB of tests per problem, too much to
+    send with every sample, so they stay on disk here."""
+    if not tests_dir:
+        return None
+    root = os.path.realpath(tests_dir)
+
+    @functools.lru_cache(maxsize=8)
+    def load(ref):
+        path = os.path.realpath(os.path.join(root, ref))
+        if not path.startswith(root + os.sep):
+            raise ValueError("tests_ref escapes --tests-dir")
+        with open(path) as f:
+            tests = json.load(f)
+        if not isinstance(tests, list):
+            raise ValueError("tests_ref file must hold a JSON list")
+        return tests
+
+    return load
+
+
+def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float, started: float,
+                 load_tests=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -244,7 +339,7 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
 
         def do_POST(self):
             route = self._route()
-            if route not in ("/test_program", "/test_program_stdio"):
+            if route not in ("/test_program", "/test_program_stdio", "/test_program_call"):
                 return self._send(404, {"error": "not found"})
             try:
                 n = int(self.headers.get("Content-Length", "0"))
@@ -252,21 +347,34 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
                     return self._send(413, {"error": "payload too large"})
                 req = json.loads(self.rfile.read(n))
                 program = req["program"]
-                tests = req["tests"]
+                if "tests_ref" in req:
+                    if load_tests is None:
+                        raise ValueError("tests_ref needs the server's --tests-dir")
+                    tests = load_tests(str(req["tests_ref"]))
+                else:
+                    tests = req["tests"]
                 if not isinstance(program, str) or not isinstance(tests, list):
                     raise ValueError("program must be str, tests a list")
                 timeout = min(float(req.get("max_execution_time", 10)), max_timeout)
-            except (ValueError, KeyError, TypeError) as e:
+                stop_on_fail = bool(req.get("stop_on_fail", False))
+                fn_name = req.get("fn_name")
+                if route == "/test_program_call" and not (isinstance(fn_name, str) and fn_name.isidentifier()):
+                    raise ValueError("/test_program_call needs an identifier fn_name")
+                name = req.get("name", "__main__")
+                if not (isinstance(name, str) and name.isidentifier()):
+                    raise ValueError("name must be an identifier")
+            except (OSError, ValueError, KeyError, TypeError) as e:
                 return self._send(400, {"error": f"bad request: {e}"})
-            if len(tests) > max_tests:
+            total = len(tests)
+            if total > max_tests:
                 tests = tests[:max_tests]
-                padded = len(req["tests"]) - max_tests
-            else:
-                padded = 0
+            padded = total - len(tests)
             if route == "/test_program":
-                res = runner.assert_tests(program, [str(t) for t in tests], timeout)
+                res = runner.assert_tests(program, [str(t) for t in tests], timeout, name, stop_on_fail)
+            elif route == "/test_program_stdio":
+                res = runner.stdio_tests(program, tests, timeout, stop_on_fail)
             else:
-                res = runner.stdio_tests(program, tests, timeout)
+                res = runner.call_tests(program, tests, timeout, fn_name, stop_on_fail)
             _bump(requests=1, tests=len(res), passed=sum(res))
             # Tests beyond the cap count as failed so the client's length check holds.
             self._send(200, {"results": res + [0] * padded})
@@ -285,6 +393,8 @@ def main():
     ap.add_argument("--max-tests", type=int, default=64, help="tests run per request; the rest count as failed")
     ap.add_argument("--max-timeout", type=float, default=10.0, help="cap on per-test seconds")
     ap.add_argument("--python", default=sys.executable)
+    ap.add_argument("--tests-dir", default="",
+                    help="root for requests that name their tests by tests_ref (benchmark evals)")
     ap.add_argument("--scratch", default=os.path.join(tempfile.gettempdir(), f"code-exec-{os.getuid()}"))
     ap.add_argument("--stats-every", type=float, default=60.0)
     args = ap.parse_args()
@@ -300,7 +410,8 @@ def main():
     runner = Runner(args.workers, args.mem_mb, args.python, args.scratch)
     started = time.time()
     srv = ThreadingHTTPServer((args.host, args.port),
-                              make_handler(runner, prefix, args.max_tests, args.max_timeout, started))
+                              make_handler(runner, prefix, args.max_tests, args.max_timeout, started,
+                                           make_tests_loader(args.tests_dir)))
     srv.daemon_threads = True
 
     def report():
