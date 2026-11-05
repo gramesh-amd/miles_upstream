@@ -37,6 +37,7 @@ hooks), so do not expose this service beyond the training cluster.
 """
 
 import argparse
+import collections
 import functools
 import json
 import os
@@ -208,7 +209,13 @@ class Runner:
                         os.killpg(p.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    p.communicate()
+                    # Bounded: a process that survives SIGKILL (e.g. stuck in uninterruptible I/O)
+                    # would otherwise pin this worker forever, and a sandbox that loses workers this
+                    # way stalls every request queued behind them.
+                    try:
+                        p.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        _bump(errors=1)
                     _bump(timeouts=1)
                     return None, ""
             except Exception:
@@ -293,17 +300,29 @@ def make_tests_loader(tests_dir):
     if not tests_dir:
         return None
     root = os.path.realpath(tests_dir)
+    locks = collections.defaultdict(threading.Lock)
+    locks_guard = threading.Lock()
 
-    @functools.lru_cache(maxsize=8)
-    def load(ref):
-        path = os.path.realpath(os.path.join(root, ref))
-        if not path.startswith(root + os.sep):
-            raise ValueError("tests_ref escapes --tests-dir")
+    # Parsing one of these files holds the GIL for seconds and stalls the whole server, so a
+    # cache that misses under load (several nodes scoring many problems at once) starves every
+    # request and they time out. Keep plenty of them: the sandbox host has the memory.
+    @functools.lru_cache(maxsize=int(os.environ.get("CODE_EXEC_TESTS_CACHE", "256")))
+    def parse(path):
         with open(path) as f:
             tests = json.load(f)
         if not isinstance(tests, list):
             raise ValueError("tests_ref file must hold a JSON list")
         return tests
+
+    def load(ref):
+        path = os.path.realpath(os.path.join(root, ref))
+        if not path.startswith(root + os.sep):
+            raise ValueError("tests_ref escapes --tests-dir")
+        # One parse per file: concurrent misses on the same file wait for the first.
+        with locks_guard:
+            lock = locks[path]
+        with lock:
+            return parse(path)
 
     return load
 

@@ -75,7 +75,8 @@ fi
 if [ -z "${EVAL_CONFIG:-}" ]; then
    [ "${DRY_RUN:-0}" = "1" ] && _cfg_dir=/tmp || _cfg_dir="${LOG_DIR}/eval-configs"
    mkdir -p "${_cfg_dir}"
-   export EVAL_CONFIG="${_cfg_dir}/code-bench-$(date +%Y%m%d_%H%M%S).yaml"
+   # Hostname too: runs launched in the same second on several nodes share this directory.
+   export EVAL_CONFIG="${_cfg_dir}/code-bench-$(hostname -s)-$(date +%Y%m%d_%H%M%S).yaml"
    {
       echo "eval:"
       echo "  datasets:"
