@@ -19,13 +19,15 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol. |
 | `difficulty_filter.py` | OLMo 3 offline difficulty filter: 8 rollouts per prompt from the starting checkpoint, graded by the run's own reward, drops prompts solved more than 62.5% of the time. `--task code` or `--task math`. Resumable. |
 | `prefilter.sh` | Runs the filter on a node: `serve` (sglang with the rollout engine's settings), `filter`, `status`, `stop`. See "Optional: difficulty-prefilter the training set". |
-| `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`). |
+| `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`); `OVERLONG_FILTER_DROP_UNCLOSED=1` also drops samples that stopped without closing `</think>`. |
+| `router_log_hook.py` | Optional trainer-side router telemetry (`ROUTER_LOG=1`): router weight and expert-bias drift from step 0, as JSONL. |
 | `adaptive_difficulty_filter.py` | Optional online difficulty filter (`ADAPTIVE_FILTER=1`): drops groups the current policy has already mastered. See "Other launch knobs". |
 | `per_domain_logger.py` | Per-source W&B metrics (`domain/<dataset_source>/*`), on by default (`PER_DOMAIN_METRICS=0` disables). |
 | `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
 | `model_args.sh` | `MODEL_ARGS=(...)` + `MOE_LAYER_FREQ` (layer 0 dense, 1–26 MoE). MLA + `--gated-attention` + `--use-simple-farskip-layer`. **No `--spec`** (this Megatron forbids it for MoE; FarSkip is config-driven). |
 | `run_async.sh` | Main launcher. `PHASE=prepare` (HF→torch_dist) then `PHASE=train` (submit async DAPO-Math job to Ray). `SINGLE_NODE=1` for the 1-node smoke. |
 | `investigate_megatron.sh` | Assemble a FarSkip-capable Megatron at `MEGATRON_PATH` (clone NVIDIA pin `847781764` + overlay patch tree + `pip install -e`). |
+| `patch_megatron_r3.sh` | Add miles' routing-replay hooks to that Megatron, which lacks them. Needed for `USE_ROUTING_REPLAY=1`; `cluster/env_setup.sh` runs it, and `run_async.sh` refuses R3 without it. |
 | `setup_farskip.sh` | Per-node: overlay the verified sglang515 FarSkip files onto the container sglang. |
 | `patch_mbridge_gate_proj.sh` | Add the gated-attention `linear_gate_proj` mapping to the stock `DeepseekV3` mbridge (once per container). |
 | `patch_megatron_compat.sh` | Stub newer-Megatron symbols latest miles imports at load (e.g. `optimizer.muon`) but this pin lacks. |
@@ -103,7 +105,7 @@ ls ~/.miles/status-<JOBID>/           # one <node>.ready per node when done
 
 ```bash
 NODE=<node>; J=<JOBID>
-$I/cluster/on_node.sh $J $NODE cluster/env_setup.sh      # sglang FarSkip overlay, Megatron shims, mbridge patch
+$I/cluster/on_node.sh $J $NODE cluster/env_setup.sh      # sglang FarSkip overlay, Megatron shims + R3 hooks, mbridge patch
 ```
 
 Expect `ALL OK`. Spur allows one interactive step per node, so run `on_node.sh` calls one
@@ -116,6 +118,7 @@ the shell prelude above):
 
 ```bash
 bash $I/investigate_megatron.sh                     # FarSkip Megatron into ~/Primus-Instella-Internal
+bash $I/patch_megatron_r3.sh                        # its routing-replay hooks (env_setup.sh also runs this)
 PHASE=prepare bash $I/run_async.sh                  # HF -> torch_dist (8 GPU), only if REF_LOAD is unset
 HF_HOME=$NFS_ROOT/hf_cache python3 $I/prepare_code_data.py build   # -> $DATA_ROOT, only if CODE_TRAIN is unset
 python3 $I/prepare_code_benchmarks.py --out-dir $CODE_BENCH_DIR     # eval sets, skip if step 0 points CODE_BENCH_DIR at the shared copy
@@ -281,6 +284,10 @@ All are `VAR=VALUE` overrides to `cluster/launch.sh`; defaults leave the recipe 
 | `OBSERVE_ENTROPY` | 1 | Logs the policy entropy (`train/entropy_loss`). With `--entropy-coef 0`, miles otherwise logs it as 0. |
 | `PER_DOMAIN_METRICS` | 1 | Per-source metrics under `domain/<dataset_source>/`, see "Watch it". |
 | `DUMP_TRAIN_DATA` | 0 | Trainer-side per-rank tensors per step, next to the rollout dumps. One file per rank per step, so use it for a few steps only. |
+| `OVERLONG_FILTER_DROP_UNCLOSED` | 0 | With `OVERLONG_FILTER=1`, also drop samples that finished under the cap without closing `</think>` (a stray low-probability EOS, always scored 0). See `overlong_filter._is_unclosed`. |
+| `ROUTER_OFF` | 0 | No router training signal: aux loss 0, no load balancing, frozen expert bias. |
+| `ROUTER_LOG` | 0 | Router telemetry to `ROUTER_LOG_PATH` (default `$LOG_DIR/router_log_<SAVE_TAG>.jsonl`) every `ROUTER_LOG_EVERY` (5) steps. |
+| `WANDB_BASE_URL` | | Self-hosted W&B endpoint, e.g. `https://api.forge.coreweave.com`. |
 | `EXTRA_ARGS` | | Any `train_async.py` flags, appended last so they win, e.g. `EXTRA_ARGS="--lr 2e-6 --save-interval 10"`. Values can't contain spaces. |
 
 **W&B credentials** reach the workers as `WANDB_API_KEY` through the Ray runtime env (from
@@ -450,6 +457,36 @@ bash examples/instella_think/run_async.sh
 RAY_ADDRESS=http://<HEAD_IP>:8265 MASTER_ADDR=<HEAD_IP> \
 WANDB_KEY=... bash examples/instella_think/run_async.sh
 ```
+
+### Math: the MI325X R1/R2 recipe
+
+`run_async.sh` with no task overrides is the math run (DAPO-style prompts, `deepscaler`
+grader, AIME eval). R1 is Dr. GRPO plus overlong filtering at a 56k cap with the router
+frozen; R2 is R1 plus dropping unclosed-`</think>` samples. On this branch:
+
+```bash
+PROMPT_DATA=$DATA_ROOT/mix_v5_math.jsonl EVAL_CONFIG=<math eval yaml> SAVE_TAG=<fresh tag> \
+DRGRPO=1 DRGRPO_DIVISOR=21680.0 PER_TOKEN_LOSS=0 OVERLONG_FILTER=1 OVERLONG_FILTER_DROP_UNCLOSED=1 \
+ROLLOUT_MAX_RESPONSE_LEN=57344 CONTEXT_LEN=61440 ROLLOUT_TEMPERATURE=0.8 \
+ROLLOUT_BATCH_SIZE=32 N_SAMPLES_PER_PROMPT=16 GLOBAL_BATCH_SIZE=512 MAX_TOKENS_PER_GPU=16384 \
+DISABLE_STD_NORM=1 USE_ROUTING_REPLAY=1 ROUTER_OFF=1 ROUTER_LOG=1 \
+NUM_ROLLOUT=220 EVAL_INTERVAL=25 SAVE_INTERVAL=20 \
+EXTRA_ARGS="--log-passrate" bash examples/instella_think/run_async.sh
+```
+
+- `DRGRPO_DIVISOR=21680` is the step-0 mean response length of the DPO-64k checkpoint at
+  this cap. Measure it again for another checkpoint or cap (see "Dr. GRPO loss").
+- `mix_v5_math.jsonl` and the `*-olmes.jsonl` eval sets aren't built by this repo; copy them
+  from the MI325X share. R1/R2's eval YAML covered AIME 2024/2025, HMMT Feb 2025 and
+  BeyondAIME at n=16, temperature 0.6, top_p 0.95, 65536 tokens.
+- The async "retry" (`--async-unused-samples-handler retry` on MI325X's newer miles) is built
+  in here: `examples/fully_async` always returns aborted and over-stale groups to the buffer.
+  Don't pass that flag, or `--async-data-buffer-capacity-factor`; this miles has neither.
+- R1 ran 40 rollout GPUs and R2 24; the 3-node layout here has 16. Add rollout nodes and
+  `EXTRA_ARGS="--rollout-num-gpus <n>"` to match.
+- Through `cluster/launch.sh`, pass the same variables as `VAR=VALUE` arguments plus
+  `RUN_SCRIPT=run_async.sh` (its default is `run_code.sh`).
+- Confirm with `DRY_RUN=1` first: it prints the resolved loss, filter and router settings.
 
 ## Instruction-following run (32k, same hyperparams as `rytwnj5z`)
 

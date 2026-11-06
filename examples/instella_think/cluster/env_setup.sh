@@ -37,6 +37,8 @@ say "python=$(python3 -V 2>&1)  torch=$(python3 -c 'import torch; print(torch.__
 step "setup_farskip.sh" bash "${INSTELLA_DIR}/setup_farskip.sh"
 # 2. Megatron import shims (writes into MEGATRON_PATH on NFS).
 step "patch_megatron_compat.sh" bash "${INSTELLA_DIR}/patch_megatron_compat.sh"
+# 2b. Routing-replay hooks (USE_ROUTING_REPLAY=1, the run_code.sh / run_if.sh default).
+step "patch_megatron_r3.sh" bash "${INSTELLA_DIR}/patch_megatron_r3.sh"
 # 3. mbridge gate_proj mapping (patches the container's installed mbridge).
 step "patch_mbridge_gate_proj.sh" bash "${INSTELLA_DIR}/patch_mbridge_gate_proj.sh"
 # 4. IF checker deps + nltk corpus (runs its own --verify at the end).

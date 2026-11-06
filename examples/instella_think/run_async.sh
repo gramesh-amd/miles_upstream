@@ -403,6 +403,12 @@ GRPO_ARGS=(
 #      remaining one. The lesson is that conditioning on a suspect while a larger error source
 #      is still in the signal cannot exonerate the suspect.
 if [ "${USE_ROUTING_REPLAY:-0}" = "1" ]; then
+   # The FarSkip Megatron has no routing-replay hooks of its own; without them miles'
+   # replay_list stays empty and the first train step dies with an IndexError.
+   grep -q "routing_replay_manager" "${MEGATRON_PATH}/megatron/core/transformer/moe/router.py" 2>/dev/null || {
+      echo "ERROR: USE_ROUTING_REPLAY=1 but ${MEGATRON_PATH} lacks the R3 hooks." >&2
+      echo "       Run: MEGATRON_PATH=${MEGATRON_PATH} bash ${SCRIPT_DIR}/patch_megatron_r3.sh" >&2
+      exit 1; }
    GRPO_ARGS+=(--use-rollout-routing-replay)
 fi
 
@@ -523,6 +529,24 @@ fi
 # right answer is a soft length penalty (DAPO's soft overlong punishment) rather than a hard drop.
 if [ "${OVERLONG_FILTER:-0}" = "1" ]; then
    GRPO_ARGS+=(--custom-reward-post-process-path overlong_filter.overlong_filter_post_process)
+fi
+# OVERLONG_FILTER_DROP_UNCLOSED=1 (needs OVERLONG_FILTER=1) also drops samples that finished
+# under the cap without closing </think>: a stray low-probability EOS, not an answer. See
+# overlong_filter._is_unclosed. Read in the rollout actor, so it travels in the runtime env.
+if [ "${OVERLONG_FILTER_DROP_UNCLOSED:-0}" = "1" ] && [ "${OVERLONG_FILTER:-0}" != "1" ]; then
+   echo "ERROR: OVERLONG_FILTER_DROP_UNCLOSED=1 has no effect without OVERLONG_FILTER=1." >&2; exit 1
+fi
+
+# ROUTER_OFF=1: no router training signal at all -- aux loss 0, no load balancing, frozen
+# expert bias. Appended to MODEL_ARGS so they win over model_args.sh's pretraining values
+# (argparse keeps the last occurrence); DRY_RUN prints the resolved values.
+if [ "${ROUTER_OFF:-0}" = "1" ]; then
+   MODEL_ARGS+=(--moe-aux-loss-coeff 0.0 --moe-router-load-balancing-type none --moe-router-bias-update-rate 0.0)
+fi
+# ROUTER_LOG=1: router weight / expert-bias stats and drift from step 0, every ROUTER_LOG_EVERY
+# train steps, as JSONL at ROUTER_LOG_PATH (router_log_hook.py). Rank 0 only; never raises.
+if [ "${ROUTER_LOG:-0}" = "1" ]; then
+   GRPO_ARGS+=(--custom-megatron-before-train-step-hook-path router_log_hook.log_router_stats)
 fi
 
 # DUMP_ROLLOUTS=1: per-step rollout dump, so the two covariances that drive this whole argument
@@ -897,6 +921,13 @@ echo "NCCL_SOCKET_IFNAME=${NET_IF}"
 # is why halving the response length did not help. HSA_NO_SCRATCH_RECLAIM is deliberately
 # unset (neither reference recipe sets it); pinning scratch compounds the same failure.
 # Canonical name is PYTORCH_ALLOC_CONF; PYTORCH_HIP_ALLOC_CONF is deprecated and warns.
+# Self-hosted W&B (e.g. WANDB_BASE_URL=https://api.forge.coreweave.com); omitted when unset so
+# wandb falls back to its default host rather than to an empty URL.
+WANDB_BASE_URL_ENV=""
+if [ -n "${WANDB_BASE_URL:-}" ]; then
+   WANDB_BASE_URL_ENV="    \"WANDB_BASE_URL\": \"${WANDB_BASE_URL}\",
+"
+fi
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"${MEGATRON_PATH}:${FULLY_ASYNC_DIR}:${INSTELLA_DIR}\",
@@ -933,7 +964,10 @@ RUNTIME_ENV_JSON="{
     \"CODE_REWARD_CONCURRENCY\": \"${CODE_REWARD_CONCURRENCY:-64}\",
     \"CODE_LOG_EVERY\": \"${CODE_LOG_EVERY:-200}\",
     \"DRGRPO_DIVISOR\": \"${DRGRPO_DIVISOR:-}\",
-    \"ADAPTIVE_FILTER_MAX_PASS\": \"${ADAPTIVE_FILTER_MAX_PASS:-0.75}\",
+    \"OVERLONG_FILTER_DROP_UNCLOSED\": \"${OVERLONG_FILTER_DROP_UNCLOSED:-0}\",
+    \"ROUTER_LOG_PATH\": \"${ROUTER_LOG_PATH:-${LOG_DIR}/router_log_${SAVE_TAG}.jsonl}\",
+    \"ROUTER_LOG_EVERY\": \"${ROUTER_LOG_EVERY:-5}\",
+${WANDB_BASE_URL_ENV}    \"ADAPTIVE_FILTER_MAX_PASS\": \"${ADAPTIVE_FILTER_MAX_PASS:-0.75}\",
     \"SOLVED_REWARD\": \"${SOLVED_REWARD:-1.0}\",
     \"WANDB_API_KEY\": \"${WANDB_KEY:-${WANDB_API_KEY:-}}\",
     \"NCCL_SOCKET_IFNAME\": \"${NET_IF}\",
@@ -990,7 +1024,10 @@ for k in ("advantage_estimator", "rollout_temperature", "rollout_batch_size", "o
           "n_samples_per_prompt", "global_batch_size", "max_tokens_per_gpu", "max_weight_staleness",
           "rollout_max_response_len", "calculate_per_token_loss", "grpo_std_normalization",
           "use_rollout_routing_replay", "fp32_lm_head", "observe_training_entropy", "use_tis",
-          "eps_clip", "eps_clip_high", "kl_coef", "lr", "prompt_data", "wandb_key"):
+          "eps_clip", "eps_clip_high", "kl_coef", "lr", "prompt_data", "wandb_key",
+          "custom_reward_post_process_path", "custom_pg_loss_reducer_function_path",
+          "dynamic_sampling_filter_path", "moe_aux_loss_coeff", "moe_router_load_balancing_type",
+          "moe_router_bias_update_rate", "seq_length", "rollout_num_gpus"):
     print(f"  {k:34} = {getattr(args, k, '<absent>')}")
 print("DRY_RUN OK: miles parsed the full argument set")
 PYEOF

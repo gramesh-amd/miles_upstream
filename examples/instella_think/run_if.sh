@@ -307,6 +307,11 @@ if [ "${CHECK_ONLY:-0}" = "1" ]; then
    exit 0
 fi
 
+if [ "${DRY_RUN:-0}" = "1" ]; then
+   cd "${REPO_DIR}" || exit 1
+   exec bash "${TARGET}"
+fi
+
 cd "${REPO_DIR}" || exit 1
 mkdir -p "${LOG_DIR}" "${WANDB_LOCAL_DIR}"
 TS="$(date +%Y%m%d_%H%M%S)"
@@ -338,7 +343,7 @@ nohup bash "${FROZEN}" > "${OUT}" 2>&1 &
 TRAIN_PID=$!
 echo "LAUNCHED pid=${TRAIN_PID} frozen=${FROZEN} log=${OUT}"
 
-# Pruner alongside the run, since miles will not do it (see prune_checkpoints.sh).
+# Pruner alongside the run, since miles will not do it (see prune_checkpoints.py).
 if [ "${PRUNE_CHECKPOINTS:-1}" = "1" ]; then
    PRUNE_LOG="${LOG_DIR}/prune-${SAVE_TAG}-${TS}.log"
    # --tag SAVE_TAG so it reads THIS run's logs; the metric keys are eval/<dataset name>,

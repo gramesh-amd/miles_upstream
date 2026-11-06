@@ -45,12 +45,18 @@ removes, and the answer is a soft length penalty (DAPO's +3 component) instead o
 """
 
 import logging
+import os
 
 import torch
 
 logger = logging.getLogger(__name__)
 
 _TRUNCATED = "truncated"
+_THINK_CLOSE = "</think>"
+
+# Opt-in so a resumed run keeps its objective: the filter is re-imported on every restart,
+# so flipping the default would silently change a live experiment mid-run.
+_DROP_UNCLOSED = os.environ.get("OVERLONG_FILTER_DROP_UNCLOSED", "0") == "1"
 
 
 def _is_truncated(sample) -> bool:
@@ -59,6 +65,36 @@ def _is_truncated(sample) -> bool:
     # turning this filter into a no-op that still looks like it ran.
     status = getattr(sample, "status", None)
     return getattr(status, "value", status) == _TRUNCATED
+
+
+def _is_unclosed(sample) -> bool:
+    """Finished under the cap, but never closed the think block -> no answer was delivered.
+
+    THE FAILURE. Rollouts run with top_p 1.0 and top_k -1, so nothing truncates the tail and
+    a vanishingly improbable EOS is reachable at every step. On long traces it eventually
+    gets drawn: measured over 15,294 finished samples (T=0.8), 5.3% end mid-sentence having
+    never emitted </think>, and a sampling A/B on the DPO base put the median probability of
+    that final token at 0.00015 (against 1.0000 for every properly terminated trace). The
+    model did not decide to stop. The hazard compounds per token, so the rate tracks the
+    share of long traces at r = 0.96.
+
+    WHY THIS TEST AND NOT "no \\boxed". Both flag zero correct samples, but the think test
+    catches 98 more and misses one. The boxed test is fooled by traces that die mid-sentence
+    yet contain an earlier \\boxed -- in one case the prompt's own "\\boxed{Your answer}"
+    template echoed back during reasoning. Of 10,170 correct samples, 100.0000% close
+    </think>, so closing it is a necessary condition for being right and its absence is
+    zero-false-positive.
+
+    WHY DROP RATHER THAN LEAVE IT SCORED WRONG. These samples always score 0, which drags the
+    group mean down and hands every survivor an advantage more positive than it earned -- a
+    uniform positive push, the sharpening pressure this file's header identifies as the
+    failure mode. Measured: 9.4% of |advantage| mass across 33.6% of groups, displacing the
+    baseline by a median 0.107. Dropping them also removes a LENGTH-BIASED penalty, since the
+    artifact only strikes long traces.
+    """
+    if not _DROP_UNCLOSED or _is_truncated(sample):
+        return False
+    return _THINK_CLOSE not in (getattr(sample, "response", "") or "")
 
 
 def _to_groups(args, samples):
@@ -93,11 +129,16 @@ def overlong_filter_post_process(args, samples):
     n_groups_usable = 0
     n_dropped = 0
     n_groups_emptied = 0
+    n_unclosed = 0
 
     for group in groups:
         rewards = torch.tensor([s.get_reward_value(args) for s in group], dtype=torch.float)
-        keep = torch.tensor([not _is_truncated(s) for s in group], dtype=torch.bool)
+        unclosed = [_is_unclosed(s) for s in group]
+        keep = torch.tensor(
+            [not (_is_truncated(s) or u) for s, u in zip(group, unclosed, strict=True)], dtype=torch.bool
+        )
         n_dropped += int((~keep).sum())
+        n_unclosed += sum(unclosed)
 
         # A lone survivor centres to exactly 0, so <2 survivors means the group cannot produce
         # any gradient no matter what we do. Drop it whole so the loss mask reflects reality.
@@ -122,12 +163,13 @@ def overlong_filter_post_process(args, samples):
         advantages.extend(centred.tolist())
 
     logger.info(
-        "overlong_filter: groups=%d usable=%d emptied=%d | samples=%d dropped=%d (%.1f%%)",
+        "overlong_filter: groups=%d usable=%d emptied=%d | samples=%d dropped=%d (%.1f%%) unclosed=%d",
         len(groups),
         n_groups_usable,
         n_groups_emptied,
         len(flat),
         n_dropped,
         100.0 * n_dropped / max(len(flat), 1),
+        n_unclosed,
     )
     return raw_rewards, advantages
