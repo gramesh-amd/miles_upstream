@@ -23,7 +23,29 @@ its own `faked` daemon; a process left in the background after its command retur
 its first file operation once that daemon exits. `run_code.sh` backgrounds the run, so follow
 it with a wait (below).
 
-## Steps
+## One run, one job: `run.sbatch`
+
+The usual way to run. The arguments are the run spec, the same `VAR=VALUE` overrides
+`cluster/launch.sh` takes on Crusoe; node 0 of the job runs the sandboxes and the rest are GPU
+nodes (`-N 2` for the 1-node layout, `-N 4` for the 3-node recipe). From `~/miles`:
+
+```bash
+sbatch -A ven136 -N 4 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/run.sbatch \
+  CONTEXT_LEN=32768 DRGRPO=1 DRGRPO_DIVISOR=17400 OVERLONG_FILTER=1 SAVE_TAG=code32k_drgrpo
+```
+
+The job sets up every container, starts the sandboxes and the Ray cluster, runs the spec and ends
+when the run does. Metrics go to W&B live (team `genaiamd` unless the spec sets `WANDB_ENTITY`;
+`WANDB_MODE=offline` logs locally). W&B alone uses the ORNL proxy (`WANDB_HTTPS_PROXY`), so
+traffic between nodes stays direct. Per job, `$LUX_ROOT/shared/jobs/<jobid>/` holds the spec, each
+node's setup log, the sandbox log, `run.log` (the run's own log) and `run.status`. Prerequisites:
+the once-only steps below (SIF, checkpoint, data, Megatron) and `wandb login` on the login node.
+
+Cross-node collectives use RCCL's socket transport over `bond0` (the container's verbs stack
+cannot drive the Pollara NICs); see `/lustre/orion/ven136/proj-shared/models/scripts/netenv.sh`
+for the RoCE setup if weight sync becomes the bottleneck.
+
+## Steps by hand (debugging)
 
 ```bash
 L=examples/instella_think/cluster/lux; X="--export=ALL,LUX_DIR=$PWD/$L"
@@ -46,6 +68,3 @@ $L/on_node.sh -b $J - 'cd $USER_HOME/miles && source /opt/venv/bin/activate && S
 Stop with `$L/on_node.sh $J - 'source /opt/venv/bin/activate; RAY_ADDRESS=http://127.0.0.1:8265 ray job stop <id>'`,
 then `scancel` both jobs: nodes are charged until the job ends.
 
-Not yet done on Lux: multi-node. Cross-node RCCL needs the host's rdma-core and ionic provider
-bound into the container plus OLCF's RoCE variables (see
-`/lustre/orion/ven136/proj-shared/models/scripts/netenv.sh`), and Ray workers on the other nodes.

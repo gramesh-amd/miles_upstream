@@ -20,4 +20,7 @@ MAILBOX_ROOT="${MAILBOX_ROOT:-${LUX_HOME}/.miles/lux-mailbox}"
 # Host of the code-exec sandbox job (sandbox.sbatch writes it; ~/.instella-env.sh reads it).
 CODE_EXEC_HOST_FILE="${CODE_EXEC_HOST_FILE:-${LUX_HOME}/.miles/code-exec-host}"
 
-export LUX_ACCOUNT LUX_USER LUX_HOME LUX_ROOT IMAGE SIF LUX_PROXY MAILBOX_ROOT CODE_EXEC_HOST_FILE
+# W&B team that run.sbatch runs log to (WANDB_ENTITY in a run spec overrides it).
+LUX_WANDB_ENTITY="${LUX_WANDB_ENTITY:-genaiamd}"
+
+export LUX_WANDB_ENTITY LUX_ACCOUNT LUX_USER LUX_HOME LUX_ROOT IMAGE SIF LUX_PROXY MAILBOX_ROOT CODE_EXEC_HOST_FILE

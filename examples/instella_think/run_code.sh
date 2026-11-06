@@ -151,7 +151,11 @@ else _n+=("persample"); fi
 [ "${CODE_REQUIRE_THINK}" = "1" ]   || _n+=("nothink")
 [ "${EVAL_MAX_RESPONSE_LEN}" = "${ROLLOUT_MAX_RESPONSE_LEN}" ] || _n+=("evallen${EVAL_MAX_RESPONSE_LEN}")
 [ "${CONTEXT_LEN}" = "32768" ] || _n+=("ctx${CONTEXT_LEN}")
-export WANDB_GROUP="${WANDB_GROUP:-$(IFS=-; printf '%s' "${_n[*]}")}"
+_g="$(IFS=-; printf '%s' "${_n[*]}")"
+# W&B rejects groups over 128 characters, and run_async.sh appends "-1node-smoke"/"-3node". A
+# DRGRPO or OVERLONG_FILTER name gets past that, so keep the readable start and end with a hash.
+[ "${#_g}" -le 116 ] || _g="${_g:0:107}-$(printf '%s' "${_g}" | md5sum | cut -c1-8)"
+export WANDB_GROUP="${WANDB_GROUP:-${_g}}"
 
 # --- preflight: loss config ---------------------------------------------------------
 if [ "${DRGRPO}" = "1" ]; then
