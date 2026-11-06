@@ -44,7 +44,8 @@ source "${SCRIPT_DIR}/paths.sh"
 export RAY_ADDRESS="${RAY_ADDRESS:-}"
 export MASTER_ADDR="${MASTER_ADDR:-}"
 
-# wandb: same netrc fallback as run_if.sh (HOME is /root inside the container).
+# wandb: WANDB_KEY reaches the workers as WANDB_API_KEY (never as a flag); otherwise the
+# same netrc fallback as run_if.sh (HOME is /root inside the container).
 export WANDB_KEY="${WANDB_KEY:-}"
 if [ -z "${WANDB_KEY}" ]; then
    if [ -f "${NETRC_PATH}" ]; then
@@ -101,6 +102,9 @@ export CODE_MAX_TESTS="${CODE_MAX_TESTS:-32}"
 export CODE_PARTIAL_CREDIT="${CODE_PARTIAL_CREDIT:-1}"
 export CODE_REQUIRE_THINK="${CODE_REQUIRE_THINK:-1}"
 export CODE_REWARD_SCALE="${CODE_REWARD_SCALE:-1.0}"
+# Full reward = all tests pass; the adaptive filter and per-domain solve_rate count only
+# those, since with partial credit reward > 0 means one passing test.
+export SOLVED_REWARD="${SOLVED_REWARD:-${CODE_REWARD_SCALE}}"
 
 # --- run identity -----------------------------------------------------------------
 # Fresh tag: run_async.sh points --load at SAVE_DIR, so reusing a tag RESUMES that run.
@@ -152,6 +156,8 @@ else _n+=("persample"); fi
 [ "${CODE_REQUIRE_THINK}" = "1" ]   || _n+=("nothink")
 [ "${EVAL_MAX_RESPONSE_LEN}" = "${ROLLOUT_MAX_RESPONSE_LEN}" ] || _n+=("evallen${EVAL_MAX_RESPONSE_LEN}")
 [ "${CONTEXT_LEN}" = "32768" ] || _n+=("ctx${CONTEXT_LEN}")
+[ "${ROLLOUT_TEMPERATURE:-1}" = "1" ] || _n+=("temp${ROLLOUT_TEMPERATURE}")
+[ "${ADAPTIVE_FILTER:-0}" = "1" ]   && _n+=("adaptive${ADAPTIVE_FILTER_MAX_PASS:-0.75}")
 export WANDB_GROUP="${WANDB_GROUP:-$(IFS=-; printf '%s' "${_n[*]}")}"
 
 # --- preflight: loss config ---------------------------------------------------------
@@ -240,8 +246,9 @@ echo "=== code RL $(( ROLLOUT_MAX_RESPONSE_LEN / 1024 ))k arm ==="
 echo "  wandb: ${WANDB_PROJECT} / ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
 for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_PARTIAL_CREDIT CODE_REQUIRE_THINK \
          SAVE_INTERVAL EVAL_INTERVAL ROLLOUT_MAX_RESPONSE_LEN DISABLE_STD_NORM USE_ROUTING_REPLAY \
-         CONTEXT_LEN PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER; do
-   echo "  ${V}=${!V}"
+         CONTEXT_LEN PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER SOLVED_REWARD \
+         ADAPTIVE_FILTER ADAPTIVE_FILTER_MAX_PASS ROLLOUT_TEMPERATURE EXTRA_ARGS; do
+   echo "  ${V}=${!V:-}"
 done
 echo "  eval: ${CODE_BENCH_SETS} (n=${CODE_BENCH_N}) config ${EVAL_CONFIG}"
 echo "  PROMPT_DATA=${PROMPT_DATA} ($(wc -l < "${PROMPT_DATA}") prompts)"

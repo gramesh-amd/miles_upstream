@@ -20,6 +20,8 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `difficulty_filter.py` | OLMo 3 offline difficulty filter: 8 rollouts per prompt from the starting checkpoint, graded by the run's own reward, drops prompts solved more than 62.5% of the time. `--task code` or `--task math`. Resumable. |
 | `prefilter.sh` | Runs the filter on a node: `serve` (sglang with the rollout engine's settings), `filter`, `status`, `stop`. See "Optional: difficulty-prefilter the training set". |
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`). |
+| `adaptive_difficulty_filter.py` | Optional online difficulty filter (`ADAPTIVE_FILTER=1`): drops groups the current policy has already mastered. See "Other launch knobs". |
+| `per_domain_logger.py` | Per-source W&B metrics (`domain/<dataset_source>/*`), on by default (`PER_DOMAIN_METRICS=0` disables). |
 | `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
 | `model_args.sh` | `MODEL_ARGS=(...)` + `MOE_LAYER_FREQ` (layer 0 dense, 1–26 MoE). MLA + `--gated-attention` + `--use-simple-farskip-layer`. **No `--spec`** (this Megatron forbids it for MoE; FarSkip is config-driven). |
 | `run_async.sh` | Main launcher. `PHASE=prepare` (HF→torch_dist) then `PHASE=train` (submit async DAPO-Math job to Ray). `SINGLE_NODE=1` for the 1-node smoke. |
@@ -206,9 +208,14 @@ $I/cluster/on_node.sh $J $NODE cluster/launch.sh $HEAD_IP SINGLE_NODE=1 SAVE_TAG
 `run_code.sh` by default (`RUN_SCRIPT=run_if.sh` for the IF arm). It prints the log path:
 `$NFS_ROOT/rl-logs/launch-code<N>k-<node>-<ts>.out`.
 
-`DRY_RUN=1` prints the runtime env and every `train_async.py` flag, then exits without touching
-Ray or the GPUs. Some flags appear twice (e.g. from `model_args.sh` and an override); argparse
-keeps the last one, so check the printed list rather than reading the scripts.
+`DRY_RUN=1` prints the runtime env (with `HF_TOKEN` and `WANDB_API_KEY` redacted) and every
+`train_async.py` flag. It then runs miles' own `parse_args` on them and imports every custom
+function path (reward, filter, loggers, rollout), and exits without touching Ray or the GPUs.
+That parse is the only check that sees the `--sglang-*` flags, which come from the installed
+sglang, so a bad flag fails here instead of after the cluster is up. It needs the training
+container; `DRY_RUN_PARSE=0` skips it elsewhere. Some flags appear twice (e.g. from
+`model_args.sh` and an override); argparse keeps the last one, and the parse prints the
+resolved values of the important ones.
 
 The reference run below is exactly:
 
@@ -259,6 +266,43 @@ without `</think>`, so the math recipe's extra unclosed-think filter is not need
 Check `train/grad_norm` in the first 3 steps: it should be the same order as the reference
 run's ~0.04-0.06. `overlong_filter: ... usable=` in the log is the number of groups still
 contributing; if it collapses, the filter is starving the update.
+
+### Other launch knobs
+
+All are `VAR=VALUE` overrides to `cluster/launch.sh`; defaults leave the recipe unchanged.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ROLLOUT_TEMPERATURE` | 1 | Training sampling temperature. On math, the DPO base fell from pass@1 0.771 at 0.8 to 0.454 at 1.1. |
+| `OVER_SAMPLING_BATCH_SIZE` | 64 | Must be at least `ROLLOUT_BATCH_SIZE`; miles refuses to start otherwise. |
+| `MAX_TOKENS_PER_GPU` | 8192 | Trainer dynamic-batching budget per microbatch. |
+| `ADVANTAGE_ESTIMATOR` | grpo | `gspo` only differs when there is more than one optimizer step per rollout. |
+| `ADAPTIVE_FILTER` | 0 | Online difficulty filter, see below. |
+| `OBSERVE_ENTROPY` | 1 | Logs the policy entropy (`train/entropy_loss`). With `--entropy-coef 0`, miles otherwise logs it as 0. |
+| `PER_DOMAIN_METRICS` | 1 | Per-source metrics under `domain/<dataset_source>/`, see "Watch it". |
+| `DUMP_TRAIN_DATA` | 0 | Trainer-side per-rank tensors per step, next to the rollout dumps. One file per rank per step, so use it for a few steps only. |
+| `EXTRA_ARGS` | | Any `train_async.py` flags, appended last so they win, e.g. `EXTRA_ARGS="--lr 2e-6 --save-interval 10"`. Values can't contain spaces. |
+
+**W&B credentials** reach the workers as `WANDB_API_KEY` through the Ray runtime env (from
+`WANDB_KEY`), or via the netrc. They are never passed as `--wandb-key`, because miles uploads
+every parsed argument into the run's W&B config, where anyone with project access can read
+it. Runs launched before this change have the key in their config, so rotate it.
+
+**Online difficulty filter (`ADAPTIVE_FILTER=1`).** The default dynamic filter only drops
+groups whose 8 rewards are identical, so a 7/8 group still trains at full generation cost.
+`adaptive_difficulty_filter.py` also drops groups where more than `ADAPTIVE_FILTER_MAX_PASS`
+of the samples are fully solved by the *current* policy, so prompts graduate out as training
+masters them. The offline prefilter (5b) can't do this, because it only sees the starting
+checkpoint; on math, 22% of groups had drifted back above its threshold by step ~339.
+- *Solved* means the full reward (`SOLVED_REWARD`, which `run_code.sh` and `run_if.sh` set to
+  their reward scale), i.e. every test or constraint passes. Partial credit doesn't count, or
+  one passing test would make a group look mastered.
+- The default threshold 0.75 drops 7/8 groups. 0.625 (the offline number) also drops 6/8, and
+  on math that discarded 19-29% of groups every step, including the difficulty band AIME
+  sits in. 0.875 drops nothing beyond the default filter at 8 samples.
+- Cost: more groups are dropped, so each step pulls more prompts and takes longer. Watch
+  `rollout/dynamic_filter/frac_kept`; if it collapses, the data has become too easy for the
+  policy.
 
 `SINGLE_NODE=1` splits the node into 4 trainer GPUs (EP4) and 4 rollout GPUs (one sglang
 engine). For 3 nodes: bring up all three, run `env_setup.sh` on each, `ray_head.sh` on the
@@ -312,7 +356,19 @@ grep "CODE_REWARD scored" $L | tail -1     # api_error must stay 0
 grep -o "'rollout/[a-z_]*': [0-9.e-]*" $L | tail -4
 grep -o "'eval/\(humanevalplus\|mbppplus\|lcb_v3\)': [0-9.]*" $L
 $I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench
+grep "domain metrics" $L | tail -1          # per-source solve rate, length, truncation
 ```
+
+In W&B, besides miles' own `rollout/*`, `eval/*` and `train/*`:
+- `domain/<dataset_source>/*`: one panel per training source. `solve_rate` counts full solves
+  and `nonzero_rate` any partial credit; `resp_len_solved` and `resp_len_unsolved` show
+  whether failures are long, and `truncation_rate` comes from the engine's finish status.
+- `rollout/dynamic_filter/frac_<reason>`: the share of groups dropped by the dynamic filter
+  for each reason (`zero_std_0.0` all wrong, `zero_std_1.0` all solved, `mastered_7of8` with
+  `ADAPTIVE_FILTER=1`), plus `frac_kept`. These are comparable across steps; the raw counts
+  in `rollout/async/*` are not.
+- `train/entropy_loss`: the policy entropy on training tokens. A steady fall is the
+  sharpening that preceded collapse in the math runs.
 
 Stop a run from inside the container: `RAY_ADDRESS=http://$HEAD_IP:8265 ray job list`, then
 `ray job stop <id>`. **Relaunching with the same `SAVE_TAG` resumes** from the newest

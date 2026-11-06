@@ -4,6 +4,7 @@ import logging
 import queue
 import threading
 import time
+from collections import defaultdict
 
 import aiohttp
 
@@ -244,6 +245,7 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
     stale_groups_recycled = 0
     aborted_groups_returned = 0
     dynamic_filter_dropped = 0
+    dynamic_filter_drop_reasons = defaultdict(int)
     staleness_values = []
 
     use_staleness_filter = getattr(args, "max_weight_staleness", None) is not None
@@ -347,6 +349,7 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
                 filter_output = call_dynamic_filter(dynamic_filter, args, group)
                 if not filter_output.keep:
                     dynamic_filter_dropped += 1
+                    dynamic_filter_drop_reasons[filter_output.reason or "unspecified"] += 1
                     logger.info(f"Dropped group {group_id} by dynamic filter (reason={filter_output.reason})")
                     continue
 
@@ -412,6 +415,18 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
         "perf/async/queue_size_end": worker.get_queue_size(),
         "perf/async/rollout_duration_s": duration,
     }
+    # Per-reason shares of the groups that reached the dynamic filter (stale and aborted
+    # groups are recycled before it). Raw counts are not comparable across steps because
+    # the number of groups pulled per step varies; fractions are. Under the adaptive filter,
+    # frac_mastered rising is the progress signal, since raw_reward is pinned by the filter.
+    filtered = accepted_groups + dynamic_filter_dropped
+    if dynamic_filter is not None and filtered > 0:
+        metrics["rollout/dynamic_filter/frac_kept"] = accepted_groups / filtered
+        for reason, count in dynamic_filter_drop_reasons.items():
+            metrics[f"rollout/dynamic_filter/frac_{reason}"] = count / filtered
+        mastered = sum(c for r, c in dynamic_filter_drop_reasons.items() if r.startswith("mastered"))
+        if mastered:
+            metrics["rollout/dynamic_filter/frac_mastered"] = mastered / filtered
     if staleness_values:
         metrics["rollout/async/avg_staleness"] = sum(staleness_values) / len(staleness_values)
         metrics["rollout/async/max_staleness"] = max(staleness_values)
