@@ -1,0 +1,37 @@
+diff --git a/python/sglang/kernels/ops/attention/metadata.py b/python/sglang/kernels/ops/attention/metadata.py
+index 88230f5e31..4795573bc9 100644
+--- a/python/sglang/kernels/ops/attention/metadata.py
++++ b/python/sglang/kernels/ops/attention/metadata.py
+@@ -1,3 +1,11 @@
++# Copyright 2023-2024 SGLang Team
++# Modifications Copyright © 2026 Advanced Micro Devices, Inc.
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
+ from typing import TYPE_CHECKING, Optional
+ 
+ import torch
+@@ -18,6 +26,8 @@ def get_num_kv_splits_triton(
+     num_kv_head,
+     max_kv_splits,
+     device_core_count,
++    force_splits,
++    force_seqlen_threshold,
+     MAX_NUM_SEQ: tl.constexpr,
+ ):
+     # TODO: this method is tunable, we need more online serving data to tune it
+@@ -48,6 +58,11 @@ def get_num_kv_splits_triton(
+     max_kv_splits_2 = tl.minimum(
+         tl.cdiv(ext_device_core_count, token_grid), max_kv_splits
+     )
++    if force_splits > 0:
++        if max_seq_len > force_seqlen_threshold:
++            max_kv_splits_2 = tl.minimum(force_splits, max_kv_splits)
++        else:
++            max_kv_splits_2 = tl.minimum(max_kv_splits_2, 16)
+     kv_chunk_size_2 = tl.cdiv(max_seq_len, max_kv_splits_2)
+ 
+     num_kv_splits = tl.maximum(

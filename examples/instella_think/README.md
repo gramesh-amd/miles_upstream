@@ -26,6 +26,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `model_args.sh` | `MODEL_ARGS=(...)` + `MOE_LAYER_FREQ` (layer 0 dense, 1–26 MoE). MLA + `--gated-attention` + `--use-simple-farskip-layer`. **No `--spec`** (this Megatron forbids it for MoE; FarSkip is config-driven). |
 | `run_async.sh` | Main launcher. `PHASE=prepare` (HF→torch_dist) then `PHASE=train` (submit async DAPO-Math job to Ray). `SINGLE_NODE=1` for the 1-node smoke. |
 | `investigate_megatron.sh` | Assemble a FarSkip-capable Megatron at `MEGATRON_PATH` (clone NVIDIA pin `847781764` + overlay patch tree + `pip install -e`). |
+| `mi325/` | MI325X (gfx942, sglang 0.5.21) node bringup: FarSkip sglang patches, Megatron build plus R3 and resume patches, verifier and Ray join check. See `mi325/README.md`. |
 | `setup_farskip.sh` | Per-node: overlay the verified sglang515 FarSkip files onto the container sglang. |
 | `patch_mbridge_gate_proj.sh` | Add the gated-attention `linear_gate_proj` mapping to the stock `DeepseekV3` mbridge (once per container). |
 | `patch_megatron_compat.sh` | Stub newer-Megatron symbols latest miles imports at load (e.g. `optimizer.muon`) but this pin lacks. |

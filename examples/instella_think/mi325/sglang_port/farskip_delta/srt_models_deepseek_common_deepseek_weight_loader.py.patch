@@ -1,0 +1,60 @@
+diff --git a/python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py b/python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py
+index df11ddcae0..21c0dd6baf 100644
+--- a/python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py
++++ b/python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py
+@@ -1,4 +1,5 @@
+ # Copyright 2026 SGLang Team
++# Modifications Copyright © 2026 Advanced Micro Devices, Inc.
+ # Licensed under the Apache License, Version 2.0 (the "License");
+ # you may not use this file except in compliance with the License.
+ # You may obtain a copy of the License at
+@@ -163,7 +164,11 @@ def _load_fused_expert_tensor(
+         param = params_dict.get(param_name)
+         if param is None:
+             return False
+-        weight_loader = param.weight_loader
++        # getattr, not attribute access: the aiter MoE path re-attaches a wrapped
++        # weight_loader, and some params carry none at all.
++        weight_loader = getattr(param, "weight_loader", None)
++        if weight_loader is None:
++            return False
+         for expert_id, expert_weight in enumerate(loaded_weight):
+             if shard_id == "w13":
+                 gate, up = expert_weight.chunk(2, dim=0)
+@@ -329,6 +334,8 @@ class DeepseekV2WeightLoaderMixin:
+                         continue
+                     if _is_npu:
+                         name = name.replace("weight_packed", "weight")
++                    if "self_attn" in name: # to load gated attention parameters correctly
++                        continue
+                     # We have mlp.experts[0].gate_proj in the checkpoint.
+                     # Since we handle the experts below in expert_params_mapping,
+                     # we need to skip here BEFORE we update the name, otherwise
+@@ -346,7 +353,14 @@ class DeepseekV2WeightLoaderMixin:
+                     if name.endswith(".bias") and name not in params_dict:
+                         continue
+                     param = params_dict[name]
+-                    weight_loader = param.weight_loader
++                    weight_loader = getattr(param, "weight_loader", None)
++                    if weight_loader is None:
++                        # Param was likely replaced by process_weights_after_loading
++                        # (e.g. AMD aiter MoE shuffle swap). Restore original name
++                        # and continue so we try the next mapping / fall through to
++                        # the safe getattr-with-default path below.
++                        name = name.replace(param_name, weight_name)
++                        continue
+                     maybe_executor_submit(
+                         executor=executor,
+                         futures=futures,
+@@ -366,7 +380,10 @@ class DeepseekV2WeightLoaderMixin:
+                         if name not in params_dict:
+                             continue
+                         param = params_dict[name]
+-                        weight_loader = param.weight_loader
++                        weight_loader = getattr(param, "weight_loader", None)
++                        if weight_loader is None:
++                            name = name.replace(param_name, weight_name)
++                            continue
+                         maybe_executor_submit(
+                             executor=executor,
+                             futures=futures,

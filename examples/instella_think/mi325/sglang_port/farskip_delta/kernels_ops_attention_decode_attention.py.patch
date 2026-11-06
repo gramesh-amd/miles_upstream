@@ -1,0 +1,24 @@
+diff --git a/python/sglang/kernels/ops/attention/decode_attention.py b/python/sglang/kernels/ops/attention/decode_attention.py
+index f711172ea3..1baa6ba6df 100644
+--- a/python/sglang/kernels/ops/attention/decode_attention.py
++++ b/python/sglang/kernels/ops/attention/decode_attention.py
+@@ -1,4 +1,5 @@
+ # Copyright 2023-2024 SGLang Team
++# Modifications Copyright © 2026 Advanced Micro Devices, Inc.
+ # Licensed under the Apache License, Version 2.0 (the "License");
+ # you may not use this file except in compliance with the License.
+ # You may obtain a copy of the License at
+@@ -797,6 +798,13 @@ def _decode_grouped_att_m_fwd(
+     if Lk == 576:
+         BLOCK_DMODEL = 512
+         BLOCK_DPE = 64
++    elif Lk == 544:
++        # Instella-MoE MLA: kv_lora_rank 512 + qk_rope_head_dim 32. Without this
++        # case Lk falls to next_power_of_2 -> BLOCK_DMODEL 1024 / BLOCK_DPE 0, and
++        # the HAS_MLA path (v = trans(k)) then produces a [BLOCK_N, 1024] v against
++        # a [BLOCK_H, 512] acc, which fails to compile.
++        BLOCK_DMODEL = 512
++        BLOCK_DPE = 32
+     elif Lk == 288:
+         BLOCK_DMODEL = 256
+         BLOCK_DPE = 32

@@ -1,0 +1,101 @@
+diff --git a/python/sglang/srt/distributed/device_communicators/pynccl.py b/python/sglang/srt/distributed/device_communicators/pynccl.py
+index 46aef5b945..81600f7cc9 100644
+--- a/python/sglang/srt/distributed/device_communicators/pynccl.py
++++ b/python/sglang/srt/distributed/device_communicators/pynccl.py
+@@ -1,8 +1,24 @@
++# Copyright 2023-2024 SGLang Team
++# Modifications Copyright © 2026 Advanced Micro Devices, Inc.
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/distributed/device_communicators/pynccl.py
+ 
+ import logging
++import os
+ from contextlib import contextmanager
+ from typing import Optional, Union
+ 
+@@ -47,6 +63,8 @@ class PyNcclCommunicator:
+         It is the caller's responsibility to make sure each communicator
+         is bind to a unique device.
+         """
++        # set by change_state(stream=...); None means use the ambient device stream
++        self._stream_override = None
+         if not isinstance(group, StatelessProcessGroup):
+             assert dist.is_initialized()
+             assert dist.get_backend(group) != dist.Backend.NCCL, (
+@@ -123,12 +141,19 @@ class PyNcclCommunicator:
+                     self.world_size, self.unique_id, self.rank
+                 )
+             warmup_stream = torch.cuda.Stream()
++            # FarSkip overlapped decoder layer: put collectives on a
++            # high-priority stream so they actually overlap compute.
++            comm_high_priority = os.environ.get("FARSKIP_OVERLAPPED_DECODER_LAYER", "0")
++            self.stream = torch.cuda.Stream(
++                priority=-1 if comm_high_priority == "1" else 0
++            )
+ 
+-            # A small all_reduce for warmup.
+-            with torch.cuda.stream(warmup_stream):
++            # A small all_reduce for warmup. Runs on self.stream so NCCL channels are
++            # initialized on the very stream FarSkip will later submit on.
++            with torch.cuda.stream(self.stream):
+                 data = torch.zeros(1, device=device)
+                 self.all_reduce(data)
+-            warmup_stream.synchronize()
++            self.stream.synchronize()
+             del data
+ 
+         # by default it is disabled, e.g. in profiling models and prefill phase.
+@@ -138,6 +163,8 @@ class PyNcclCommunicator:
+ 
+     def _resolve_stream(self) -> torch.cuda.Stream:
+         """Return the current device stream used for NCCL calls."""
++        if self._stream_override is not None:
++            return self._stream_override
+         return get_current_device_stream_fast()
+ 
+     def all_reduce(self, tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM):
+@@ -407,17 +434,28 @@ class PyNcclCommunicator:
+         self.nccl.ncclGroupEnd()
+ 
+     @contextmanager
+-    def change_state(self, enable: Optional[bool] = None):
++    def change_state(
++        self,
++        enable: Optional[bool] = None,
++        stream: Optional[torch.cuda.Stream] = None,
++    ):
+         """
+-        A context manager to change the enabled state of the communicator.
++        A context manager to change the enabled state and the stream of the communicator.
++
++        Upstream callers pass no stream and keep using the ambient one; FarSkip passes
++        self.stream explicitly so only its collectives land on the high priority stream.
+         """
+         if enable is None:
+             # guess a default value when not specified
+             enable = self.available
+ 
+         old_disable = self.disabled
++        old_stream_override = self._stream_override
+         self.disabled = not enable
++        if stream is not None:
++            self._stream_override = stream
+         try:
+             yield
+         finally:
+             self.disabled = old_disable
++            self._stream_override = old_stream_override

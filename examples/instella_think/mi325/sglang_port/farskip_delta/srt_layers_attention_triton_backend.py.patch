@@ -1,0 +1,63 @@
+diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
+index 33f76e2a6f..9f577ea3e7 100644
+--- a/python/sglang/srt/layers/attention/triton_backend.py
++++ b/python/sglang/srt/layers/attention/triton_backend.py
+@@ -1,5 +1,14 @@
++# Copyright 2023-2024 SGLang Team
++# Modifications Copyright © 2026 Advanced Micro Devices, Inc.
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
+ from __future__ import annotations
+ 
++import os
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, List, Optional
+ 
+@@ -440,6 +449,11 @@ class TritonAttnBackend(AttentionBackend):
+         else:
+             SCHEDULE_SEQ = triton.next_power_of_2(num_seq)
+ 
++        force_splits = int(os.environ.get("SGLANG_FORCE_KV_SPLITS", "0"))
++        force_seqlen_threshold = int(
++            os.environ.get("SGLANG_FORCE_KV_SPLITS_MIN_SEQ", "512")
++        )
++
+         get_num_kv_splits_triton[(1,)](
+             num_kv_splits,
+             seq_lens,
+@@ -449,8 +463,17 @@ class TritonAttnBackend(AttentionBackend):
+             self.num_kv_head,
+             self.max_kv_splits,
+             self.device_core_count,
++            force_splits,
++            force_seqlen_threshold,
+             MAX_NUM_SEQ=SCHEDULE_SEQ,
+         )
++        if not getattr(self, "_kv_splits_realized_logged", False):
++            print(
++                f"[KV_SPLITS_REALIZED] realized_unique={torch.unique(num_kv_splits).tolist()} "
++                f"force_splits={force_splits} max_seq_len={int(seq_lens.max())}",
++                flush=True,
++            )
++            self._kv_splits_realized_logged = True
+ 
+     def _dcp_lens(self, lens: torch.Tensor, start: Optional[torch.Tensor] = None):
+         return get_dcp_lens(lens, self.dcp_size, self.dcp_rank, start)
+@@ -1619,6 +1642,13 @@ class TritonAttnBackend(AttentionBackend):
+         ):
+             causal = False
+ 
++        # Mixed batches across independent DP engines can hand this rank an
++        # empty k; o is uninitialized memory, so zero it rather than running
++        # a kernel over nothing (AMD mi355x fix).
++        if k is not None and k.shape[0] == 0:
++            o.zero_()
++            return o
++
+         # Dense one-shot MLA prefill (AttnForwardMethod.MHA_ONE_SHOT): k/v were
+         # up-projected out of the latent cache and span prefix + current chunk,
+         # so they no longer line up row-for-row with q the way

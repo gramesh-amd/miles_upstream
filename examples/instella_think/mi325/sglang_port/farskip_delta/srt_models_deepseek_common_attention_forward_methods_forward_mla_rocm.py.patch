@@ -1,0 +1,41 @@
+diff --git a/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla_rocm.py b/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla_rocm.py
+index 91b3bc9297..519a92488c 100644
+--- a/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla_rocm.py
++++ b/python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla_rocm.py
+@@ -376,6 +376,11 @@ class DeepseekMLARocmForwardMixin:
+         llama_4_scaling: Optional[torch.Tensor] = None,
+         prev_topk_indices: Optional[torch.Tensor] = None,
+     ):
++        gate = (
++            self.prepare_attention_output_gate(hidden_states)
++            if hasattr(self, "prepare_attention_output_gate")
++            else None
++        )
+         from sglang.srt.model_executor.runner import get_is_capture_mode
+ 
+         q_replicate_active = (
+@@ -664,6 +669,7 @@ class DeepseekMLARocmForwardMixin:
+             positions,
+             topk_indices,
+             llama_4_scaling,
++            gate,
+         )
+ 
+     def forward_absorb_rocm_core(
+@@ -677,6 +683,7 @@ class DeepseekMLARocmForwardMixin:
+         positions,
+         topk_indices,
+         llama_4_scaling,
++        gate=None,
+     ):
+         save_kv_cache = True
+ 
+@@ -924,6 +931,8 @@ class DeepseekMLARocmForwardMixin:
+             attn_bmm_output = apply_kv_b_lora_v_correction(
+                 self, attn_output, attn_bmm_output
+             )
++        if gate is not None:
++            attn_bmm_output = self._apply_gated(attn_bmm_output, gate)
+         output, _ = self.o_proj(attn_bmm_output)
+ 
+         if self.next_skip_topk is None:

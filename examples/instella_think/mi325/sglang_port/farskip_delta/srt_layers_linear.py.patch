@@ -1,0 +1,69 @@
+diff --git a/python/sglang/srt/layers/linear.py b/python/sglang/srt/layers/linear.py
+index af000e1085..14d8bda2ba 100644
+--- a/python/sglang/srt/layers/linear.py
++++ b/python/sglang/srt/layers/linear.py
+@@ -1,3 +1,6 @@
++# Modifications Copyright © 2026 Advanced Micro Devices, Inc.
++# Licensed under the Apache License, Version 2.0 (the "License");
++# Adapted from SGLang (https://github.com/sgl-project/sglang), Copyright 2023-2024 SGLang Team.
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/model_executor/layers/linear.py"""
+@@ -1758,6 +1761,57 @@ class RowParallelLinear(LinearBase):
+         return s
+ 
+ 
++class AsyncRowParallelLinear(RowParallelLinear):
++    """Async version of RowParallelLinear. Returns (output, output_bias, handle).
++    handle is a collective async work handle following the pytorch API:
++    https://pytorch.org/docs/stable/distributed.html#torch.distributed.Work
++    """
++
++    def forward(self, input_, skip_all_reduce=False, add_to_linear_output=None):
++        """
++        To coalesce multiple all-reduce calls, we may optionally pass un-reduced add_to_linear_output values.
++        values are added to the linear output before all-reducing the combined result.
++        """
++        assert (
++            not self.use_dp_attention_reduce
++        ), "attn-tp reduce not supported by AsyncRowParallelLinear"
++
++        if self.input_is_parallel:
++            input_parallel = input_
++        else:
++            splitted_input = split_tensor_along_last_dim(
++                input_, num_partitions=self.tp_size
++            )
++            input_parallel = splitted_input[self.tp_rank].contiguous()
++
++        # Matrix multiply.
++        assert self.quant_method is not None
++        # Only fuse bias add into GEMM for rank 0 (this ensures that
++        # bias will not get added more than once in TP>1 case)
++        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
++        assert not should_use_tp_invariant_row_linear(
++            input_parallel.shape[-1]
++        ), "tp-invariant row linear not supported by AsyncRowParallelLinear"
++        with use_symmetric_memory(
++            get_tp_group(), disabled=not is_allocation_symmetric()
++        ):
++            output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
++
++        if add_to_linear_output is not None:
++            output_parallel += add_to_linear_output
++
++        if self.reduce_results and self.tp_size > 1 and not skip_all_reduce:
++            from sglang.srt.distributed.communication_op import async_tensor_model_parallel_all_reduce
++            output, handle = async_tensor_model_parallel_all_reduce(output_parallel)
++        else:
++            output = output_parallel
++            handle = None
++
++        output_bias = self.bias if self.skip_bias_add else None
++
++        return output, output_bias, handle
++
++
+ class MergedColumnParallelRepeatedLinear(LinearBase):
+     """Merged column parallel linear and repeated linear layer.
+ 
