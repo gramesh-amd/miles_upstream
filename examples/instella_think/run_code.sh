@@ -160,7 +160,7 @@ else _n+=("persample"); fi
 [ "${ROLLOUT_TEMPERATURE:-1}" = "1" ] || _n+=("temp${ROLLOUT_TEMPERATURE}")
 [ "${ADAPTIVE_FILTER:-0}" = "1" ]   && _n+=("adaptive${ADAPTIVE_FILTER_MAX_PASS:-0.75}")
 _g="$(IFS=-; printf '%s' "${_n[*]}")"
-# W&B rejects groups over 128 characters, and run_async.sh appends "-1node-smoke"/"-3node". A
+# W&B rejects groups over 128 characters, and run_async.sh appends "-1node-smoke"/"-<N>node". A
 # DRGRPO or OVERLONG_FILTER name gets past that, so keep the readable start and end with a hash.
 [ "${#_g}" -le 116 ] || _g="${_g:0:107}-$(printf '%s' "${_g}" | md5sum | cut -c1-8)"
 export WANDB_GROUP="${WANDB_GROUP:-${_g}}"
@@ -227,7 +227,7 @@ if [ "${CHECK_ONLY:-0}" = "1" ]; then
    echo
    echo "=== CHECK_ONLY=1: all preflights passed, NOT submitting ==="
    echo "  project    : ${WANDB_PROJECT}"
-   echo "  run name   : ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
+   echo "  run name   : ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo "$(( ${ROLLOUT_NODES:-2} + 1 ))node")"
    echo "  train data : ${PROMPT_DATA} ($(wc -l < "${PROMPT_DATA}") prompts)"
    echo "  eval       : ${CODE_BENCH_SETS} (n=${CODE_BENCH_N}, ${CODE_BENCH_MAX_LEN} tokens) via ${EVAL_CONFIG}"
    echo "  save dir   : ${SAVE_DIR} (every ${SAVE_INTERVAL} steps)"
@@ -248,7 +248,7 @@ FROZEN="${SCRIPT_DIR}/.run-frozen-${TS}.sh"
 cp "${TARGET}" "${FROZEN}" || exit 1
 
 echo "=== code RL $(( ROLLOUT_MAX_RESPONSE_LEN / 1024 ))k arm ==="
-echo "  wandb: ${WANDB_PROJECT} / ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
+echo "  wandb: ${WANDB_PROJECT} / ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo "$(( ${ROLLOUT_NODES:-2} + 1 ))node")"
 for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_PARTIAL_CREDIT CODE_REQUIRE_THINK \
          SAVE_INTERVAL EVAL_INTERVAL ROLLOUT_MAX_RESPONSE_LEN DISABLE_STD_NORM USE_ROUTING_REPLAY \
          CONTEXT_LEN PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER SOLVED_REWARD \

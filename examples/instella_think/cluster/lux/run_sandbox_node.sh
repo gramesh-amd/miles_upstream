@@ -47,5 +47,6 @@ for port in "${CODE_EXEC_PORT}" "${CODE_BENCH_PORT}"; do
    say ":${port} health: ${h}"
 done
 echo "${HOST}" > "${READY_FILE}"
-say "sandbox host ${HOST} written to ${READY_FILE}"
+[ -z "${BENCH_READY_FILE:-}" ] || echo "${HOST}" > "${BENCH_READY_FILE}"
+say "sandbox host ${HOST} written to ${READY_FILE} ${BENCH_READY_FILE:-}"
 wait

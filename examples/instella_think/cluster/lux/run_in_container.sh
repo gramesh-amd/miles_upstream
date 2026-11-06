@@ -2,9 +2,9 @@
 # Inside the container of one GPU node of a run.sbatch job (see run_gpu_node.sh): set the
 # container up, then take this node's role.
 #   1 GPU node : run the spec with SINGLE_NODE=1 (run_async.sh starts its own Ray head)
-#   3 GPU nodes: rank 0 starts the Ray head, waits for the workers and runs the spec;
-#                ranks 1-2 join as Ray workers until the head stops
-# Coordination is through files in $JOB_DIR: setup.<host>, head_ip, sandbox.ready, failed, run.status.
+#   N GPU nodes: rank 0 starts the Ray head, waits for the workers and runs the spec;
+#                ranks 1..N-1 join as Ray workers until the head stops
+# Coordination is through files in $JOB_DIR: setup.<host>, head_ip, sandbox[-bench].ready, failed, run.status.
 set -uo pipefail
 source /opt/venv/bin/activate
 cd "${USER_HOME}/miles" || exit 1
@@ -44,10 +44,11 @@ if [ "${NODE_RANK}" != 0 ]; then
 fi
 
 # --- 2b. head: the sandbox, the Ray cluster, then the run -----------------------------------
-await "${JOB_DIR}/sandbox.ready" 900 "the sandbox (see ${JOB_DIR}/sandbox.log)"
+await "${JOB_DIR}/sandbox.ready" 900 "the reward sandbox (see ${JOB_DIR}/sandbox.log)"
+await "${JOB_DIR}/sandbox-bench.ready" 900 "the benchmark sandbox (see ${JOB_DIR}/sandbox*.log)"
 TOK="$(tr -d '[:space:]' < "${CODE_EXEC_TOKEN_FILE}")"
-export CODE_EXEC_API_URL="http://${SANDBOX_HOST}:${CODE_EXEC_PORT}/${TOK}"
-export CODE_BENCH_API_URL="http://${SANDBOX_HOST}:${CODE_BENCH_PORT}/${TOK}"
+export CODE_EXEC_API_URL="http://$(cat "${JOB_DIR}/sandbox.ready"):${CODE_EXEC_PORT}/${TOK}"
+export CODE_BENCH_API_URL="http://$(cat "${JOB_DIR}/sandbox-bench.ready"):${CODE_BENCH_PORT}/${TOK}"
 
 if [ "${GPU_NODE_COUNT}" = 1 ]; then
    export SINGLE_NODE=1

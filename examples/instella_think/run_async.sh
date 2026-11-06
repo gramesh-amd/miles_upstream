@@ -286,12 +286,14 @@ if [ "${SINGLE_NODE}" = "1" ]; then
    EP_SIZE=4
    ROLLOUT_ENGINE_GPUS=4
 else
-   # 3 nodes: trainer node (8 GPU, EP8) + 2 rollout nodes (16 GPU, 2 engines EP8/DP8).
+   # Trainer node (8 GPU, EP8) + ROLLOUT_NODES rollout nodes, one engine (EP8/DP8) per node.
+   # The default 2 is the 3-node recipe (16 rollout GPUs, 2 engines).
+   ROLLOUT_NODES="${ROLLOUT_NODES:-2}"
    TOPOLOGY_ARGS=(
       --actor-num-nodes 1
       --actor-num-gpus-per-node 8
       --num-gpus-per-node 8
-      --rollout-num-gpus 16
+      --rollout-num-gpus $(( ROLLOUT_NODES * 8 ))
    )
    EP_SIZE=8
    ROLLOUT_ENGINE_GPUS=8
@@ -607,7 +609,7 @@ OPTIMIZER_ARGS=(
    --adam-beta2 0.98
 )
 
-RUN_TAG="$([ "${SINGLE_NODE}" = "1" ] && echo 1node-smoke || echo 3node)"
+RUN_TAG="$([ "${SINGLE_NODE}" = "1" ] && echo 1node-smoke || echo "$(( ROLLOUT_NODES + 1 ))node")"
 WANDB_ARGS=(
    --use-wandb
    # Separate projects keep unrelated tasks' eval axes apart: the math runs log
