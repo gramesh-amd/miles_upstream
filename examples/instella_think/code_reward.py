@@ -329,6 +329,41 @@ def _is_eval(meta: dict, evaluation_kwarg: bool) -> bool:
     return evaluation_kwarg or str(meta.get("split", "")).lower() == "eval"
 
 
+def _gated_pass_rate(response: str, tests, evaluation: bool) -> tuple[float | None, str | None]:
+    """Pass rate of a non-benchmark response behind the reward's gates.
+
+    Returns (rate, None) when the program ran, (0.0, reason) when a gate rejected it, and
+    (None, "api_error") when the sandbox did not answer.
+    """
+    if _REQUIRE_THINK:
+        ok = ("</think>" in response) if evaluation else _has_clean_think(response)
+        if not ok:
+            return 0.0, "think_gate_fail"
+    code = extract_code(_answer_of(response))
+    if not code:
+        return 0.0, "no_code"
+    rate = pass_rate(code, tests)
+    if rate is None:
+        return None, "api_error"
+    return rate, None
+
+
+def train_all_pass(response: str, label) -> tuple[bool | None, str | None]:
+    """Whether a training response passes every test, under the training reward's gates.
+
+    Used by difficulty_filter.py to count solves. (None, "api_error") means the sandbox did
+    not answer, which a caller must retry rather than count as a failure; (False, "no_tests")
+    means the row itself is ungradable.
+    """
+    tests = _parse_tests(label)
+    if tests is None:
+        return False, "no_tests"
+    rate, reason = _gated_pass_rate(response or "", tests, evaluation=False)
+    if rate is None:
+        return None, reason
+    return rate >= 1.0 - 1e-9, reason
+
+
 def _score_one(sample, evaluation: bool = False) -> float:
     meta = sample.metadata if isinstance(getattr(sample, "metadata", None), dict) else {}
     response = getattr(sample, "response", None) or ""
@@ -342,22 +377,9 @@ def _score_one(sample, evaluation: bool = False) -> float:
     if isinstance(tests, dict) and "bench" in tests:
         return _score_bench(response, tests)
 
-    if _REQUIRE_THINK:
-        ok = ("</think>" in response) if evaluation else _has_clean_think(response)
-        if not ok:
-            STATS.note("think_gate_fail")
-            STATS.note_sample(0.0, False)
-            return 0.0
-
-    code = extract_code(_answer_of(response))
-    if not code:
-        STATS.note("no_code")
-        STATS.note_sample(0.0, False)
-        return 0.0
-
-    rate = pass_rate(code, tests)
-    if rate is None:
-        STATS.note("api_error")
+    rate, reason = _gated_pass_rate(response, tests, evaluation)
+    if reason is not None:
+        STATS.note(reason)
         STATS.note_sample(0.0, False)
         return 0.0
 

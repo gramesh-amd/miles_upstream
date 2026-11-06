@@ -17,6 +17,8 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol. |
+| `difficulty_filter.py` | OLMo 3 offline difficulty filter: 8 rollouts per prompt from the starting checkpoint, graded by the run's own reward, drops prompts solved more than 62.5% of the time. `--task code` or `--task math`. Resumable. |
+| `prefilter.sh` | Runs the filter on a node: `serve` (sglang with the rollout engine's settings), `filter`, `status`, `stop`. See "Optional: difficulty-prefilter the training set". |
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`). |
 | `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
 | `model_args.sh` | `MODEL_ARGS=(...)` + `MOE_LAYER_FREQ` (layer 0 dense, 1–26 MoE). MLA + `--gated-attention` + `--use-simple-farskip-layer`. **No `--spec`** (this Megatron forbids it for MoE; FarSkip is config-driven). |
@@ -124,6 +126,71 @@ $I/cluster/code_exec.sh start         # training reward; creates ~/.code-exec-to
 $I/cluster/code_exec.sh start bench   # benchmark evals, port 18951; builds ~/.code-exec-venv (numpy) on first start
 $I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench   # /health must answer
 ```
+
+### 5b. Optional: difficulty-prefilter the training set
+
+OLMo 3's offline difficulty filter (arXiv 2512.13961, "Step 2"): sample 8 rollouts per prompt
+from the checkpoint RL starts from, at the rollout's own sampling settings (T=1.0, top_p=1.0),
+and drop every prompt solved more than 62.5% of the time (6, 7 or 8 of 8). Those prompts give
+almost no gradient while still costing full generations. Never-solved prompts (0/8) are kept,
+as in the paper. In-training, `check_reward_nonzero_std` still drops groups that come back
+all-right or all-wrong.
+
+`difficulty_filter.py` takes everything that decides a reward from the training path, so a
+pass rate here describes the run you will launch:
+- **Prompt:** rendered with miles' `apply_chat_template` and sent to sglang as `input_ids`,
+  as `sglang_rollout.py` sends it.
+- **Sampling:** the rollout's sampling params, with special tokens kept and no stop trimming.
+- **Grading:** `code_reward.train_all_pass`, which applies the reward's think gate, code
+  extraction and sandbox. A solve means every test passes. Training gives partial credit, and
+  counting reward > 0 as a solve would treat one passing test as solved.
+
+Run it on a node that is not training: the server takes all 8 GPUs. It needs step 3's
+container setup and the training sandbox from step 5.
+
+```bash
+$I/cluster/on_node.sh $J $NODE prefilter.sh serve                   # sglang on HF_CKPT, detached
+$I/cluster/on_node.sh $J $NODE prefilter.sh status                  # wait for "health OK" (a few minutes)
+$I/cluster/on_node.sh $J $NODE prefilter.sh LIMIT=200 filter        # pilot: read the histogram first
+$I/cluster/on_node.sh $J $NODE prefilter.sh filter                  # full set; resumes from the pilot's cache
+$I/cluster/on_node.sh $J $NODE prefilter.sh status                  # graded N / total, log tails
+$I/cluster/on_node.sh $J $NODE prefilter.sh stop
+```
+
+The output goes to `$DATA_ROOT/prefilter/<input name>.filtered.jsonl`. Train on it with
+`CODE_TRAIN=$DATA_ROOT/prefilter/dolci-code-train.filtered.jsonl` (a `launch.sh` override, or
+`~/.instella-env.sh`). Each kept row gains `metadata.prefilter = {n, n_correct, n_truncated}`,
+so a different threshold can be applied later without regenerating. The histogram, drop
+counts and truncation audit are in `<output>.stats.json` and at the end of the log
+(`$NFS_ROOT/rl-logs/prefilter/`).
+
+**Settings that must match the run.** `MAX_NEW_TOKENS` defaults to `ROLLOUT_MAX_RESPONSE_LEN`
+(32768), and `HF_CKPT` to the same DPO checkpoint as `run_async.sh`. Change them together with
+the run: at a shorter budget, truncated rollouts score 0 and every pass rate is understated. The
+filter warns when more than 20% of rollouts truncate. `CODE_REQUIRE_THINK`, `CODE_MAX_TESTS` and
+`CODE_EXEC_TIMEOUT` take `run_code.sh`'s defaults. All of these are recorded in the cache's
+first line, and a rerun under different settings refuses to reuse the cache (use a new
+`OUTPUT=` or `RESET_CACHE=1`).
+
+**Failures are retried, never banked.** If generation fails or the sandbox returns
+`api_error`, the prompt is retried after the server answers again. It is not recorded as 0/8,
+because 0/8 prompts are kept and an outage would otherwise fill the set with prompts that only
+looked hard. After 32 consecutive failed prompts the filter exits; `prefilter.sh filter` then
+resumes from `<output>.cache.jsonl`.
+
+**Cost.** This has not been run at full scale yet. 21k prompts x 8 rollouts is ~170k
+generations at up to 32k tokens. At 11k tokens per response, the step-0 mean at a 16k cap
+(responses at 32k run longer), that is at least 2B tokens: 1.5-2 days on one node if decode
+runs at twice the 4-GPU rollout engine's ~6,900 tokens/s. The pilot's log prints prompts/hour, so measure it before committing
+a node. `CONCURRENCY` (default 16 prompts, i.e. 128 sequences) is bounded by KV memory and by
+sandbox capacity: each finished prompt sends 8 programs at up to 32 tests each to the sandbox.
+
+Math sets: `TASK=math INPUT=<PROMPT_DATA> RM_TYPE=<the run's --rm-type>` grades with miles'
+`rm_hub`, the same function `--rm-type` selects in training.
+
+`FARSKIP_SETUP=<script>` applies the FarSkip sglang patches before serving. It is unset here
+because step 3's `env_setup.sh` already ran `setup_farskip.sh` in this container; set it for
+containers set up another way (e.g. the MI325X patch set).
 
 ### 6. Ray head, then launch
 

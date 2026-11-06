@@ -27,6 +27,8 @@
 #                        python3 examples/instella_think/prepare_code_benchmarks.py --out-dir "$CODE_BENCH_DIR"
 #   Sandboxes:           examples/instella_think/cluster/code_exec.sh start         (login node)
 #                        examples/instella_think/cluster/code_exec.sh start bench
+#   Optional prefilter:  prefilter.sh serve, then prefilter.sh filter (README "difficulty-prefilter"),
+#                        then train with CODE_TRAIN=$DATA_ROOT/prefilter/dolci-code-train.filtered.jsonl
 #   Smoke on 1 node:     SINGLE_NODE=1 NUM_ROLLOUT=8 bash examples/instella_think/run_code.sh
 #   Preflight only:      CHECK_ONLY=1 bash examples/instella_think/run_code.sh
 #   3-node train:        bash examples/instella_think/run_code.sh
