@@ -73,8 +73,8 @@ source "${SCRIPT_DIR}/paths.sh"
 export RAY_ADDRESS="${RAY_ADDRESS:-}"
 export MASTER_ADDR="${MASTER_ADDR:-}"
 
-# wandb credentials: WANDB_KEY if exported, else the wandb SDK's own netrc auth. An empty
-# --wandb-key is not fatal; wandb then resolves WANDB_API_KEY or the netrc itself.
+# wandb credentials: WANDB_KEY if exported (it reaches the workers as WANDB_API_KEY through
+# run_async.sh's runtime env, never as a flag), else the wandb SDK's own netrc auth.
 export WANDB_KEY="${WANDB_KEY:-}"
 if [ -z "${WANDB_KEY}" ]; then
    # Do NOT test "${HOME}/.netrc": inside the training container everything runs as root,
@@ -121,6 +121,9 @@ export CUSTOM_RM_PATH="${CUSTOM_RM_PATH:-if_reward.batched_reward}"
 export IF_REWARD_SCALE="${IF_REWARD_SCALE:-1.0}"
 export IF_PARTIAL_CREDIT="${IF_PARTIAL_CREDIT:-1}"
 export IF_REQUIRE_THINK="${IF_REQUIRE_THINK:-1}"
+# Full reward = every constraint met; the adaptive filter and per-domain solve_rate count
+# only those, not partial credit.
+export SOLVED_REWARD="${SOLVED_REWARD:-${IF_REWARD_SCALE}}"
 export NLTK_DATA
 
 # Fresh tag is mandatory: run_async.sh points --load at SAVE_DIR, so reusing an existing
@@ -232,6 +235,8 @@ _n+=("lr${LR}" "clip${EPS_CLIP}_${EPS_CLIP_HIGH}" "tis")
 [ "${IF_PARTIAL_CREDIT}" = "1" ]    && _n+=("partial")   || _n+=("strict")
 [ "${IF_REQUIRE_THINK}" = "1" ]     || _n+=("nothink")
 [ "${EVAL_MAX_RESPONSE_LEN}" = "${ROLLOUT_MAX_RESPONSE_LEN}" ] || _n+=("evallen${EVAL_MAX_RESPONSE_LEN}")
+[ "${ROLLOUT_TEMPERATURE:-1}" = "1" ] || _n+=("temp${ROLLOUT_TEMPERATURE}")
+[ "${ADAPTIVE_FILTER:-0}" = "1" ]   && _n+=("adaptive${ADAPTIVE_FILTER_MAX_PASS:-0.75}")
 _joined="$(IFS=-; printf '%s' "${_n[*]}")"
 export WANDB_GROUP="${WANDB_GROUP:-${_joined}}"
 
@@ -302,6 +307,11 @@ if [ "${CHECK_ONLY:-0}" = "1" ]; then
    exit 0
 fi
 
+if [ "${DRY_RUN:-0}" = "1" ]; then
+   cd "${REPO_DIR}" || exit 1
+   exec bash "${TARGET}"
+fi
+
 cd "${REPO_DIR}" || exit 1
 mkdir -p "${LOG_DIR}" "${WANDB_LOCAL_DIR}"
 TS="$(date +%Y%m%d_%H%M%S)"
@@ -320,8 +330,9 @@ for V in SAVE_TAG WANDB_PROJECT WANDB_GROUP WANDB_RANDOM_SUFFIX CUSTOM_RM_PATH I
          IF_REQUIRE_THINK SAVE_INTERVAL EVAL_INTERVAL N_SAMPLES_PER_EVAL_PROMPT \
          EVAL_TEMPERATURE ROLLOUT_MAX_RESPONSE_LEN EVAL_MAX_RESPONSE_LEN \
          SGLANG_MAX_RUNNING_REQUESTS PER_TOKEN_LOSS OVERLONG_FILTER \
-         DISABLE_STD_NORM USE_ROUTING_REPLAY; do
-   echo "  ${V}=${!V}"
+         DISABLE_STD_NORM USE_ROUTING_REPLAY SOLVED_REWARD ADAPTIVE_FILTER ADAPTIVE_FILTER_MAX_PASS \
+         ROLLOUT_TEMPERATURE EXTRA_ARGS; do
+   echo "  ${V}=${!V:-}"
 done
 echo "  PROMPT_DATA=${PROMPT_DATA} ($(wc -l < "${PROMPT_DATA}") prompts)"
 echo "  EVAL_PROMPT_DATA=${EVAL_PROMPT_DATA}"
@@ -332,7 +343,7 @@ nohup bash "${FROZEN}" > "${OUT}" 2>&1 &
 TRAIN_PID=$!
 echo "LAUNCHED pid=${TRAIN_PID} frozen=${FROZEN} log=${OUT}"
 
-# Pruner alongside the run, since miles will not do it (see prune_checkpoints.sh).
+# Pruner alongside the run, since miles will not do it (see prune_checkpoints.py).
 if [ "${PRUNE_CHECKPOINTS:-1}" = "1" ]; then
    PRUNE_LOG="${LOG_DIR}/prune-${SAVE_TAG}-${TS}.log"
    # --tag SAVE_TAG so it reads THIS run's logs; the metric keys are eval/<dataset name>,

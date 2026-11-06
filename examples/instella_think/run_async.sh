@@ -175,6 +175,18 @@ else
    RM_ARGS=(--rm-type "${RM_TYPE:-deepscaler}")
 fi
 
+# Online difficulty filter. The stock check_reward_nonzero_std drops only groups whose
+# rewards are all identical, so a 7/8 group trains at full generation cost for a nearly
+# zero gradient. ADAPTIVE_FILTER=1 swaps in adaptive_difficulty_filter.py, which also drops
+# groups whose fully-solved fraction exceeds ADAPTIVE_FILTER_MAX_PASS against the CURRENT
+# policy, so prompts graduate out as they are mastered. Off by default: it drops strictly
+# more groups, so step time rises (see that file for the threshold choice).
+if [ "${ADAPTIVE_FILTER:-0}" = "1" ]; then
+   DYNAMIC_FILTER_PATH=adaptive_difficulty_filter.adaptive_difficulty_filter
+else
+   DYNAMIC_FILTER_PATH=miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+fi
+
 ROLLOUT_ARGS=(
    --rollout-function-path fully_async_rollout.generate_rollout_fully_async
    # PROMPT_DATA lets an offline difficulty-filtered subset be swapped in. Unfiltered
@@ -190,9 +202,12 @@ ROLLOUT_ARGS=(
    --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-32}"
    --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-8}"
    --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN}"
-   --rollout-temperature 1
-   --dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
-   --over-sampling-batch-size 64
+   # The DPO checkpoint's measured robust zone is T=0.6-0.8 and it collapses above 1.1
+   # (math pass@1 0.771 -> 0.454 -> 0.144 at 0.8/1.1/1.2), so this is worth sweeping.
+   --rollout-temperature "${ROLLOUT_TEMPERATURE:-1}"
+   --dynamic-sampling-filter-path "${DYNAMIC_FILTER_PATH}"
+   # Must be >= --rollout-batch-size (miles raises otherwise), so raise it with that.
+   --over-sampling-batch-size "${OVER_SAMPLING_BATCH_SIZE:-64}"
    --global-batch-size "${GLOBAL_BATCH_SIZE:-256}"
    --balance-data
    --async-max-concurrent-samples "${ASYNC_MAX_CONCURRENT:-512}"
@@ -299,7 +314,7 @@ PERF_ARGS=(
    --recompute-method uniform
    --recompute-num-layers 1
    --use-dynamic-batch-size
-   --max-tokens-per-gpu 8192
+   --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-8192}"
    # Peak VRAM in the log-prob pass is the fp32 logits tensor [tokens, padded_vocab/TP]:
    # 16384 x 128896 x 4B = 8.4 GB at TP1. The pass itself is @torch.no_grad (no activations
    # retained), so these two flags target the remaining transients: chunk bounds the
@@ -311,7 +326,9 @@ PERF_ARGS=(
 )
 
 GRPO_ARGS=(
-   --advantage-estimator grpo
+   # gspo swaps the per-token importance ratio for a per-sequence one. It only differs from
+   # grpo with more than one optimizer pass per rollout; at gbs == rbs*nspp the ratio is 1.
+   --advantage-estimator "${ADVANTAGE_ESTIMATOR:-grpo}"
    # No KL anchor (matches Instella-MoE/rl if_rl + mopd, which pass --kl-coef 0 and never
    # --use-kl-loss). Both must stay off: miles allocates a reference model whenever
    # `kl_coef != 0 or use_kl_loss` (miles/ray/placement_group.py:157), which costs ~10 GB of
@@ -386,6 +403,12 @@ GRPO_ARGS=(
 #      remaining one. The lesson is that conditioning on a suspect while a larger error source
 #      is still in the signal cannot exonerate the suspect.
 if [ "${USE_ROUTING_REPLAY:-0}" = "1" ]; then
+   # The FarSkip Megatron has no routing-replay hooks of its own; without them miles'
+   # replay_list stays empty and the first train step dies with an IndexError.
+   grep -q "routing_replay_manager" "${MEGATRON_PATH}/megatron/core/transformer/moe/router.py" 2>/dev/null || {
+      echo "ERROR: USE_ROUTING_REPLAY=1 but ${MEGATRON_PATH} lacks the R3 hooks." >&2
+      echo "       Run: MEGATRON_PATH=${MEGATRON_PATH} bash ${SCRIPT_DIR}/patch_megatron_r3.sh" >&2
+      exit 1; }
    GRPO_ARGS+=(--use-rollout-routing-replay)
 fi
 
@@ -507,6 +530,24 @@ fi
 if [ "${OVERLONG_FILTER:-0}" = "1" ]; then
    GRPO_ARGS+=(--custom-reward-post-process-path overlong_filter.overlong_filter_post_process)
 fi
+# OVERLONG_FILTER_DROP_UNCLOSED=1 (needs OVERLONG_FILTER=1) also drops samples that finished
+# under the cap without closing </think>: a stray low-probability EOS, not an answer. See
+# overlong_filter._is_unclosed. Read in the rollout actor, so it travels in the runtime env.
+if [ "${OVERLONG_FILTER_DROP_UNCLOSED:-0}" = "1" ] && [ "${OVERLONG_FILTER:-0}" != "1" ]; then
+   echo "ERROR: OVERLONG_FILTER_DROP_UNCLOSED=1 has no effect without OVERLONG_FILTER=1." >&2; exit 1
+fi
+
+# ROUTER_OFF=1: no router training signal at all -- aux loss 0, no load balancing, frozen
+# expert bias. Appended to MODEL_ARGS so they win over model_args.sh's pretraining values
+# (argparse keeps the last occurrence); DRY_RUN prints the resolved values.
+if [ "${ROUTER_OFF:-0}" = "1" ]; then
+   MODEL_ARGS+=(--moe-aux-loss-coeff 0.0 --moe-router-load-balancing-type none --moe-router-bias-update-rate 0.0)
+fi
+# ROUTER_LOG=1: router weight / expert-bias stats and drift from step 0, every ROUTER_LOG_EVERY
+# train steps, as JSONL at ROUTER_LOG_PATH (router_log_hook.py). Rank 0 only; never raises.
+if [ "${ROUTER_LOG:-0}" = "1" ]; then
+   GRPO_ARGS+=(--custom-megatron-before-train-step-hook-path router_log_hook.log_router_stats)
+fi
 
 # DUMP_ROLLOUTS=1: per-step rollout dump, so the two covariances that drive this whole argument
 # can be measured on the ACTUAL training batches instead of on AIME probes standing in for them.
@@ -532,6 +573,31 @@ if [ "${DUMP_ROLLOUTS:-0}" = "1" ]; then
    echo "DUMP_ROLLOUTS=1 -> ${DUMP_DIR}/rollout_data/"
 fi
 
+# DUMP_TRAIN_DATA=1: the trainer-side per-rank tensors DUMP_ROLLOUTS declines to write. Only
+# needed for the per-token |trainer - rollout| logprob gap and how its distribution varies
+# with length; rollout_log_probs alone is one side of that subtraction. It is one .pt per
+# rank per step, so keep NUM_ROLLOUT in the low tens and watch free space.
+if [ "${DUMP_TRAIN_DATA:-0}" = "1" ]; then
+   DUMP_DIR="${DUMP_DIR:-${DUMP_ROOT}/${SAVE_TAG}}"
+   [ "${DRY_RUN:-0}" = "1" ] || mkdir -p "${DUMP_DIR}/train_data"
+   GRPO_ARGS+=(--save-debug-train-data "${DUMP_DIR}/train_data/{rollout_id}_{rank}.pt")
+   echo "DUMP_TRAIN_DATA=1 -> ${DUMP_DIR}/train_data/"
+fi
+
+# Observability; neither changes the objective.
+# With --entropy-coef 0 miles skips the entropy computation and logs entropy_loss as a
+# constant 0 (loss_hub/losses.py), which is how the math runs' sharpening collapse (mean
+# token prob 0.448 -> 0.743 over 410 steps) went unseen. --observe-training-entropy computes
+# it without a gradient.
+if [ "${OBSERVE_ENTROPY:-1}" = "1" ]; then
+   GRPO_ARGS+=(--observe-training-entropy)
+fi
+# per_domain_logger.py adds domain/<dataset_source>/* (solve rate, reward spread, solved vs
+# unsolved length, truncation) on top of miles' own rollout metrics, which it leaves running.
+if [ "${PER_DOMAIN_METRICS:-1}" = "1" ]; then
+   GRPO_ARGS+=(--custom-rollout-log-function-path per_domain_logger.log_per_domain_metrics)
+fi
+
 OPTIMIZER_ARGS=(
    --optimizer adam
    --lr "${LR:-1e-6}"
@@ -549,7 +615,10 @@ WANDB_ARGS=(
    # every chart half-empty. Default is unchanged for the math recipes.
    --wandb-project "${WANDB_PROJECT:-miles-mis}"
    --wandb-group "${WANDB_GROUP:-instella-moe-16b-async-s4}-${RUN_TAG}"
-   --wandb-key "${WANDB_KEY:-}"
+   # No --wandb-key: miles uploads every parsed argument into the W&B run config, so the key
+   # would be readable by anyone with access to the project. wandb_utils.py only calls
+   # wandb.login when the arg is set; otherwise the SDK reads WANDB_API_KEY (runtime env
+   # below) or the netrc at NETRC.
    --wandb-dir "${WANDB_LOCAL_DIR}"
 )
 # miles appends a random id AND "-RANK_0" to the run name when the suffix is on
@@ -852,6 +921,13 @@ echo "NCCL_SOCKET_IFNAME=${NET_IF}"
 # is why halving the response length did not help. HSA_NO_SCRATCH_RECLAIM is deliberately
 # unset (neither reference recipe sets it); pinning scratch compounds the same failure.
 # Canonical name is PYTORCH_ALLOC_CONF; PYTORCH_HIP_ALLOC_CONF is deprecated and warns.
+# Self-hosted W&B (e.g. WANDB_BASE_URL=https://api.forge.coreweave.com); omitted when unset so
+# wandb falls back to its default host rather than to an empty URL.
+WANDB_BASE_URL_ENV=""
+if [ -n "${WANDB_BASE_URL:-}" ]; then
+   WANDB_BASE_URL_ENV="    \"WANDB_BASE_URL\": \"${WANDB_BASE_URL}\",
+"
+fi
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"${MEGATRON_PATH}:${FULLY_ASYNC_DIR}:${INSTELLA_DIR}\",
@@ -888,37 +964,80 @@ RUNTIME_ENV_JSON="{
     \"CODE_REWARD_CONCURRENCY\": \"${CODE_REWARD_CONCURRENCY:-64}\",
     \"CODE_LOG_EVERY\": \"${CODE_LOG_EVERY:-200}\",
     \"DRGRPO_DIVISOR\": \"${DRGRPO_DIVISOR:-}\",
+    \"OVERLONG_FILTER_DROP_UNCLOSED\": \"${OVERLONG_FILTER_DROP_UNCLOSED:-0}\",
+    \"ROUTER_LOG_PATH\": \"${ROUTER_LOG_PATH:-${LOG_DIR}/router_log_${SAVE_TAG}.jsonl}\",
+    \"ROUTER_LOG_EVERY\": \"${ROUTER_LOG_EVERY:-5}\",
+${WANDB_BASE_URL_ENV}    \"ADAPTIVE_FILTER_MAX_PASS\": \"${ADAPTIVE_FILTER_MAX_PASS:-0.75}\",
+    \"SOLVED_REWARD\": \"${SOLVED_REWARD:-1.0}\",
+    \"WANDB_API_KEY\": \"${WANDB_KEY:-${WANDB_API_KEY:-}}\",
     \"NCCL_SOCKET_IFNAME\": \"${NET_IF}\",
     \"GLOO_SOCKET_IFNAME\": \"${NET_IF}\"${SERIALIZE_ENV}
   }
 }"
 
+# EXTRA_ARGS: free-form train_async.py flags appended LAST, so they override anything above
+# (argparse keeps the last occurrence). Word-split on whitespace; values cannot contain spaces.
+# shellcheck disable=SC2206  # deliberate word-splitting
+EXTRA_ARGV=(${EXTRA_ARGS:-})
+TRAIN_ARGV=(
+   "${MODEL_ARGS[@]}" "${TOPOLOGY_ARGS[@]}" "${CKPT_ARGS[@]}" "${ROLLOUT_ARGS[@]}"
+   "${ASYNC_ARGS[@]}" "${OPTIMIZER_ARGS[@]}" "${GRPO_ARGS[@]}" "${WANDB_ARGS[@]}" "${PERF_ARGS[@]}"
+   "${EVAL_ARGS[@]}" "${SGLANG_ARGS[@]}" "${MISC_ARGS[@]}" "${EXTRA_ARGV[@]}"
+)
+
+# The runtime env carries HF_TOKEN and WANDB_API_KEY; this is what the log gets instead.
+redacted_runtime_env() {
+   python3 -c '
+import json, sys
+env = json.loads(sys.argv[1])
+for k in ("HF_TOKEN", "WANDB_API_KEY"):
+    if env["env_vars"].get(k):
+        env["env_vars"][k] = "<redacted>"
+print(json.dumps(env, indent=2))' "${RUNTIME_ENV_JSON}"
+}
+
 if [ "${DRY_RUN:-0}" = "1" ]; then
-   python3 -c 'import json,sys; json.loads(sys.argv[1])' "${RUNTIME_ENV_JSON}" \
-      || { echo "DRY_RUN: RUNTIME_ENV_JSON is not valid JSON" >&2; exit 1; }
    echo "=== DRY_RUN: runtime env ==="
-   echo "${RUNTIME_ENV_JSON}"
+   redacted_runtime_env || { echo "DRY_RUN: RUNTIME_ENV_JSON is not valid JSON" >&2; exit 1; }
    echo "=== DRY_RUN: train_async.py argv (argparse keeps the LAST occurrence of a repeated flag) ==="
-   printf '%s\n' "${MODEL_ARGS[@]}" "${TOPOLOGY_ARGS[@]}" "${CKPT_ARGS[@]}" "${ROLLOUT_ARGS[@]}" \
-      "${ASYNC_ARGS[@]}" "${OPTIMIZER_ARGS[@]}" "${GRPO_ARGS[@]}" "${WANDB_ARGS[@]}" "${PERF_ARGS[@]}" \
-      "${EVAL_ARGS[@]}" "${SGLANG_ARGS[@]}" "${MISC_ARGS[@]}" | sed -e 's/^--/\n--/' | tr '\n' ' ' | sed -e 's/ --/\n--/g'
+   printf '%s\n' "${TRAIN_ARGV[@]}" | sed -e 's/^--/\n--/' | tr '\n' ' ' | sed -e 's/ --/\n--/g'
    echo
+   # Parse with miles' own parser, which is the only check that sees the --sglang-* flags
+   # (generated from the installed sglang's ServerArgs) and the HF-config validation, then
+   # import every custom function path so a typo fails here instead of mid-run. Needs the
+   # training container; DRY_RUN_PARSE=0 skips it elsewhere.
+   if [ "${DRY_RUN_PARSE:-1}" = "1" ]; then
+      echo "=== DRY_RUN: miles parse_args + custom function imports ==="
+      DEPRECATED_MEGATRON_COMPATIBLE=1 \
+      PYTHONPATH="${REPO_DIR}:${MEGATRON_PATH}:${FULLY_ASYNC_DIR}:${INSTELLA_DIR}:${PYTHONPATH:-}" \
+      python3 - "${TRAIN_ARGV[@]}" <<'PYEOF' || { echo "DRY_RUN: miles rejected the arguments" >&2; exit 1; }
+from miles.utils.arguments import parse_args
+from miles.utils.misc import load_function
+
+args = parse_args()
+for k, v in sorted(vars(args).items()):
+    is_fn = k.endswith("_path") and k.startswith(("custom_", "rollout_function", "eval_function", "dynamic_"))
+    if is_fn and k != "custom_config_path" and v:
+        load_function(v)
+        print(f"  import ok  {k} = {v}")
+for k in ("advantage_estimator", "rollout_temperature", "rollout_batch_size", "over_sampling_batch_size",
+          "n_samples_per_prompt", "global_batch_size", "max_tokens_per_gpu", "max_weight_staleness",
+          "rollout_max_response_len", "calculate_per_token_loss", "grpo_std_normalization",
+          "use_rollout_routing_replay", "fp32_lm_head", "observe_training_entropy", "use_tis",
+          "eps_clip", "eps_clip_high", "kl_coef", "lr", "prompt_data", "wandb_key",
+          "custom_reward_post_process_path", "custom_pg_loss_reducer_function_path",
+          "dynamic_sampling_filter_path", "moe_aux_loss_coeff", "moe_router_load_balancing_type",
+          "moe_router_bias_update_rate", "seq_length", "rollout_num_gpus"):
+    print(f"  {k:34} = {getattr(args, k, '<absent>')}")
+print("DRY_RUN OK: miles parsed the full argument set")
+PYEOF
+   fi
    exit 0
 fi
 
-set -x
+echo "=== runtime env ==="
+redacted_runtime_env
+echo "+ ray job submit --address=${RAY_ADDRESS} -- python3 ${REPO_DIR}/train_async.py ${TRAIN_ARGV[*]}"
 ray job submit --address="${RAY_ADDRESS}" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
-   -- python3 "${REPO_DIR}/train_async.py" \
-   "${MODEL_ARGS[@]}" \
-   "${TOPOLOGY_ARGS[@]}" \
-   "${CKPT_ARGS[@]}" \
-   "${ROLLOUT_ARGS[@]}" \
-   "${ASYNC_ARGS[@]}" \
-   "${OPTIMIZER_ARGS[@]}" \
-   "${GRPO_ARGS[@]}" \
-   "${WANDB_ARGS[@]}" \
-   "${PERF_ARGS[@]}" \
-   "${EVAL_ARGS[@]}" \
-   "${SGLANG_ARGS[@]}" \
-   "${MISC_ARGS[@]}"
+   -- python3 "${REPO_DIR}/train_async.py" "${TRAIN_ARGV[@]}"

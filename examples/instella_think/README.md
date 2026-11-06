@@ -17,11 +17,17 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol. |
-| `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`). |
+| `difficulty_filter.py` | OLMo 3 offline difficulty filter: 8 rollouts per prompt from the starting checkpoint, graded by the run's own reward, drops prompts solved more than 62.5% of the time. `--task code` or `--task math`. Resumable. |
+| `prefilter.sh` | Runs the filter on a node: `serve` (sglang with the rollout engine's settings), `filter`, `status`, `stop`. See "Optional: difficulty-prefilter the training set". |
+| `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`); `OVERLONG_FILTER_DROP_UNCLOSED=1` also drops samples that stopped without closing `</think>`. |
+| `router_log_hook.py` | Optional trainer-side router telemetry (`ROUTER_LOG=1`): router weight and expert-bias drift from step 0, as JSONL. |
+| `adaptive_difficulty_filter.py` | Optional online difficulty filter (`ADAPTIVE_FILTER=1`): drops groups the current policy has already mastered. See "Other launch knobs". |
+| `per_domain_logger.py` | Per-source W&B metrics (`domain/<dataset_source>/*`), on by default (`PER_DOMAIN_METRICS=0` disables). |
 | `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
 | `model_args.sh` | `MODEL_ARGS=(...)` + `MOE_LAYER_FREQ` (layer 0 dense, 1–26 MoE). MLA + `--gated-attention` + `--use-simple-farskip-layer`. **No `--spec`** (this Megatron forbids it for MoE; FarSkip is config-driven). |
 | `run_async.sh` | Main launcher. `PHASE=prepare` (HF→torch_dist) then `PHASE=train` (submit async DAPO-Math job to Ray). `SINGLE_NODE=1` for the 1-node smoke. |
 | `investigate_megatron.sh` | Assemble a FarSkip-capable Megatron at `MEGATRON_PATH` (clone NVIDIA pin `847781764` + overlay patch tree + `pip install -e`). |
+| `patch_megatron_r3.sh` | Add miles' routing-replay hooks to that Megatron, which lacks them. Needed for `USE_ROUTING_REPLAY=1`; `cluster/env_setup.sh` runs it, and `run_async.sh` refuses R3 without it. |
 | `setup_farskip.sh` | Per-node: overlay the verified sglang515 FarSkip files onto the container sglang. |
 | `patch_mbridge_gate_proj.sh` | Add the gated-attention `linear_gate_proj` mapping to the stock `DeepseekV3` mbridge (once per container). |
 | `patch_megatron_compat.sh` | Stub newer-Megatron symbols latest miles imports at load (e.g. `optimizer.muon`) but this pin lacks. |
@@ -99,7 +105,7 @@ ls ~/.miles/status-<JOBID>/           # one <node>.ready per node when done
 
 ```bash
 NODE=<node>; J=<JOBID>
-$I/cluster/on_node.sh $J $NODE cluster/env_setup.sh      # sglang FarSkip overlay, Megatron shims, mbridge patch
+$I/cluster/on_node.sh $J $NODE cluster/env_setup.sh      # sglang FarSkip overlay, Megatron shims + R3 hooks, mbridge patch
 ```
 
 Expect `ALL OK`. Spur allows one interactive step per node, so run `on_node.sh` calls one
@@ -112,6 +118,7 @@ the shell prelude above):
 
 ```bash
 bash $I/investigate_megatron.sh                     # FarSkip Megatron into ~/Primus-Instella-Internal
+bash $I/patch_megatron_r3.sh                        # its routing-replay hooks (env_setup.sh also runs this)
 PHASE=prepare bash $I/run_async.sh                  # HF -> torch_dist (8 GPU), only if REF_LOAD is unset
 HF_HOME=$NFS_ROOT/hf_cache python3 $I/prepare_code_data.py build   # -> $DATA_ROOT, only if CODE_TRAIN is unset
 python3 $I/prepare_code_benchmarks.py --out-dir $CODE_BENCH_DIR     # eval sets, skip if step 0 points CODE_BENCH_DIR at the shared copy
@@ -124,6 +131,71 @@ $I/cluster/code_exec.sh start         # training reward; creates ~/.code-exec-to
 $I/cluster/code_exec.sh start bench   # benchmark evals, port 18951; builds ~/.code-exec-venv (numpy) on first start
 $I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench   # /health must answer
 ```
+
+### 5b. Optional: difficulty-prefilter the training set
+
+OLMo 3's offline difficulty filter (arXiv 2512.13961, "Step 2"): sample 8 rollouts per prompt
+from the checkpoint RL starts from, at the rollout's own sampling settings (T=1.0, top_p=1.0),
+and drop every prompt solved more than 62.5% of the time (6, 7 or 8 of 8). Those prompts give
+almost no gradient while still costing full generations. Never-solved prompts (0/8) are kept,
+as in the paper. In-training, `check_reward_nonzero_std` still drops groups that come back
+all-right or all-wrong.
+
+`difficulty_filter.py` takes everything that decides a reward from the training path, so a
+pass rate here describes the run you will launch:
+- **Prompt:** rendered with miles' `apply_chat_template` and sent to sglang as `input_ids`,
+  as `sglang_rollout.py` sends it.
+- **Sampling:** the rollout's sampling params, with special tokens kept and no stop trimming.
+- **Grading:** `code_reward.train_all_pass`, which applies the reward's think gate, code
+  extraction and sandbox. A solve means every test passes. Training gives partial credit, and
+  counting reward > 0 as a solve would treat one passing test as solved.
+
+Run it on a node that is not training: the server takes all 8 GPUs. It needs step 3's
+container setup and the training sandbox from step 5.
+
+```bash
+$I/cluster/on_node.sh $J $NODE prefilter.sh serve                   # sglang on HF_CKPT, detached
+$I/cluster/on_node.sh $J $NODE prefilter.sh status                  # wait for "health OK" (a few minutes)
+$I/cluster/on_node.sh $J $NODE prefilter.sh LIMIT=200 filter        # pilot: read the histogram first
+$I/cluster/on_node.sh $J $NODE prefilter.sh filter                  # full set; resumes from the pilot's cache
+$I/cluster/on_node.sh $J $NODE prefilter.sh status                  # graded N / total, log tails
+$I/cluster/on_node.sh $J $NODE prefilter.sh stop
+```
+
+The output goes to `$DATA_ROOT/prefilter/<input name>.filtered.jsonl`. Train on it with
+`CODE_TRAIN=$DATA_ROOT/prefilter/dolci-code-train.filtered.jsonl` (a `launch.sh` override, or
+`~/.instella-env.sh`). Each kept row gains `metadata.prefilter = {n, n_correct, n_truncated}`,
+so a different threshold can be applied later without regenerating. The histogram, drop
+counts and truncation audit are in `<output>.stats.json` and at the end of the log
+(`$NFS_ROOT/rl-logs/prefilter/`).
+
+**Settings that must match the run.** `MAX_NEW_TOKENS` defaults to `ROLLOUT_MAX_RESPONSE_LEN`
+(32768), and `HF_CKPT` to the same DPO checkpoint as `run_async.sh`. Change them together with
+the run: at a shorter budget, truncated rollouts score 0 and every pass rate is understated. The
+filter warns when more than 20% of rollouts truncate. `CODE_REQUIRE_THINK`, `CODE_MAX_TESTS` and
+`CODE_EXEC_TIMEOUT` take `run_code.sh`'s defaults. All of these are recorded in the cache's
+first line, and a rerun under different settings refuses to reuse the cache (use a new
+`OUTPUT=` or `RESET_CACHE=1`).
+
+**Failures are retried, never banked.** If generation fails or the sandbox returns
+`api_error`, the prompt is retried after the server answers again. It is not recorded as 0/8,
+because 0/8 prompts are kept and an outage would otherwise fill the set with prompts that only
+looked hard. After 32 consecutive failed prompts the filter exits; `prefilter.sh filter` then
+resumes from `<output>.cache.jsonl`.
+
+**Cost.** This has not been run at full scale yet. 21k prompts x 8 rollouts is ~170k
+generations at up to 32k tokens. At 11k tokens per response, the step-0 mean at a 16k cap
+(responses at 32k run longer), that is at least 2B tokens: 1.5-2 days on one node if decode
+runs at twice the 4-GPU rollout engine's ~6,900 tokens/s. The pilot's log prints prompts/hour, so measure it before committing
+a node. `CONCURRENCY` (default 16 prompts, i.e. 128 sequences) is bounded by KV memory and by
+sandbox capacity: each finished prompt sends 8 programs at up to 32 tests each to the sandbox.
+
+Math sets: `TASK=math INPUT=<PROMPT_DATA> RM_TYPE=<the run's --rm-type>` grades with miles'
+`rm_hub`, the same function `--rm-type` selects in training.
+
+`FARSKIP_SETUP=<script>` applies the FarSkip sglang patches before serving. It is unset here
+because step 3's `env_setup.sh` already ran `setup_farskip.sh` in this container; set it for
+containers set up another way (e.g. the MI325X patch set).
 
 ### 6. Ray head, then launch
 
@@ -139,9 +211,14 @@ $I/cluster/on_node.sh $J $NODE cluster/launch.sh $HEAD_IP SINGLE_NODE=1 SAVE_TAG
 `run_code.sh` by default (`RUN_SCRIPT=run_if.sh` for the IF arm). It prints the log path:
 `$NFS_ROOT/rl-logs/launch-code<N>k-<node>-<ts>.out`.
 
-`DRY_RUN=1` prints the runtime env and every `train_async.py` flag, then exits without touching
-Ray or the GPUs. Some flags appear twice (e.g. from `model_args.sh` and an override); argparse
-keeps the last one, so check the printed list rather than reading the scripts.
+`DRY_RUN=1` prints the runtime env (with `HF_TOKEN` and `WANDB_API_KEY` redacted) and every
+`train_async.py` flag. It then runs miles' own `parse_args` on them and imports every custom
+function path (reward, filter, loggers, rollout), and exits without touching Ray or the GPUs.
+That parse is the only check that sees the `--sglang-*` flags, which come from the installed
+sglang, so a bad flag fails here instead of after the cluster is up. It needs the training
+container; `DRY_RUN_PARSE=0` skips it elsewhere. Some flags appear twice (e.g. from
+`model_args.sh` and an override); argparse keeps the last one, and the parse prints the
+resolved values of the important ones.
 
 The reference run below is exactly:
 
@@ -192,6 +269,47 @@ without `</think>`, so the math recipe's extra unclosed-think filter is not need
 Check `train/grad_norm` in the first 3 steps: it should be the same order as the reference
 run's ~0.04-0.06. `overlong_filter: ... usable=` in the log is the number of groups still
 contributing; if it collapses, the filter is starving the update.
+
+### Other launch knobs
+
+All are `VAR=VALUE` overrides to `cluster/launch.sh`; defaults leave the recipe unchanged.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ROLLOUT_TEMPERATURE` | 1 | Training sampling temperature. On math, the DPO base fell from pass@1 0.771 at 0.8 to 0.454 at 1.1. |
+| `OVER_SAMPLING_BATCH_SIZE` | 64 | Must be at least `ROLLOUT_BATCH_SIZE`; miles refuses to start otherwise. |
+| `MAX_TOKENS_PER_GPU` | 8192 | Trainer dynamic-batching budget per microbatch. |
+| `ADVANTAGE_ESTIMATOR` | grpo | `gspo` only differs when there is more than one optimizer step per rollout. |
+| `ADAPTIVE_FILTER` | 0 | Online difficulty filter, see below. |
+| `OBSERVE_ENTROPY` | 1 | Logs the policy entropy (`train/entropy_loss`). With `--entropy-coef 0`, miles otherwise logs it as 0. |
+| `PER_DOMAIN_METRICS` | 1 | Per-source metrics under `domain/<dataset_source>/`, see "Watch it". |
+| `DUMP_TRAIN_DATA` | 0 | Trainer-side per-rank tensors per step, next to the rollout dumps. One file per rank per step, so use it for a few steps only. |
+| `OVERLONG_FILTER_DROP_UNCLOSED` | 0 | With `OVERLONG_FILTER=1`, also drop samples that finished under the cap without closing `</think>` (a stray low-probability EOS, always scored 0). See `overlong_filter._is_unclosed`. |
+| `ROUTER_OFF` | 0 | No router training signal: aux loss 0, no load balancing, frozen expert bias. |
+| `ROUTER_LOG` | 0 | Router telemetry to `ROUTER_LOG_PATH` (default `$LOG_DIR/router_log_<SAVE_TAG>.jsonl`) every `ROUTER_LOG_EVERY` (5) steps. |
+| `WANDB_BASE_URL` | | Self-hosted W&B endpoint, e.g. `https://api.forge.coreweave.com`. |
+| `EXTRA_ARGS` | | Any `train_async.py` flags, appended last so they win, e.g. `EXTRA_ARGS="--lr 2e-6 --save-interval 10"`. Values can't contain spaces. |
+
+**W&B credentials** reach the workers as `WANDB_API_KEY` through the Ray runtime env (from
+`WANDB_KEY`), or via the netrc. They are never passed as `--wandb-key`, because miles uploads
+every parsed argument into the run's W&B config, where anyone with project access can read
+it. Runs launched before this change have the key in their config, so rotate it.
+
+**Online difficulty filter (`ADAPTIVE_FILTER=1`).** The default dynamic filter only drops
+groups whose 8 rewards are identical, so a 7/8 group still trains at full generation cost.
+`adaptive_difficulty_filter.py` also drops groups where more than `ADAPTIVE_FILTER_MAX_PASS`
+of the samples are fully solved by the *current* policy, so prompts graduate out as training
+masters them. The offline prefilter (5b) can't do this, because it only sees the starting
+checkpoint; on math, 22% of groups had drifted back above its threshold by step ~339.
+- *Solved* means the full reward (`SOLVED_REWARD`, which `run_code.sh` and `run_if.sh` set to
+  their reward scale), i.e. every test or constraint passes. Partial credit doesn't count, or
+  one passing test would make a group look mastered.
+- The default threshold 0.75 drops 7/8 groups. 0.625 (the offline number) also drops 6/8, and
+  on math that discarded 19-29% of groups every step, including the difficulty band AIME
+  sits in. 0.875 drops nothing beyond the default filter at 8 samples.
+- Cost: more groups are dropped, so each step pulls more prompts and takes longer. Watch
+  `rollout/dynamic_filter/frac_kept`; if it collapses, the data has become too easy for the
+  policy.
 
 `SINGLE_NODE=1` splits the node into 4 trainer GPUs (EP4) and 4 rollout GPUs (one sglang
 engine). For 3 nodes: bring up all three, run `env_setup.sh` on each, `ray_head.sh` on the
@@ -245,7 +363,19 @@ grep "CODE_REWARD scored" $L | tail -1     # api_error must stay 0
 grep -o "'rollout/[a-z_]*': [0-9.e-]*" $L | tail -4
 grep -o "'eval/\(humanevalplus\|mbppplus\|lcb_v3\)': [0-9.]*" $L
 $I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench
+grep "domain metrics" $L | tail -1          # per-source solve rate, length, truncation
 ```
+
+In W&B, besides miles' own `rollout/*`, `eval/*` and `train/*`:
+- `domain/<dataset_source>/*`: one panel per training source. `solve_rate` counts full solves
+  and `nonzero_rate` any partial credit; `resp_len_solved` and `resp_len_unsolved` show
+  whether failures are long, and `truncation_rate` comes from the engine's finish status.
+- `rollout/dynamic_filter/frac_<reason>`: the share of groups dropped by the dynamic filter
+  for each reason (`zero_std_0.0` all wrong, `zero_std_1.0` all solved, `mastered_7of8` with
+  `ADAPTIVE_FILTER=1`), plus `frac_kept`. These are comparable across steps; the raw counts
+  in `rollout/async/*` are not.
+- `train/entropy_loss`: the policy entropy on training tokens. A steady fall is the
+  sharpening that preceded collapse in the math runs.
 
 Stop a run from inside the container: `RAY_ADDRESS=http://$HEAD_IP:8265 ray job list`, then
 `ray job stop <id>`. **Relaunching with the same `SAVE_TAG` resumes** from the newest
@@ -327,6 +457,36 @@ bash examples/instella_think/run_async.sh
 RAY_ADDRESS=http://<HEAD_IP>:8265 MASTER_ADDR=<HEAD_IP> \
 WANDB_KEY=... bash examples/instella_think/run_async.sh
 ```
+
+### Math: the MI325X R1/R2 recipe
+
+`run_async.sh` with no task overrides is the math run (DAPO-style prompts, `deepscaler`
+grader, AIME eval). R1 is Dr. GRPO plus overlong filtering at a 56k cap with the router
+frozen; R2 is R1 plus dropping unclosed-`</think>` samples. On this branch:
+
+```bash
+PROMPT_DATA=$DATA_ROOT/mix_v5_math.jsonl EVAL_CONFIG=<math eval yaml> SAVE_TAG=<fresh tag> \
+DRGRPO=1 DRGRPO_DIVISOR=21680.0 PER_TOKEN_LOSS=0 OVERLONG_FILTER=1 OVERLONG_FILTER_DROP_UNCLOSED=1 \
+ROLLOUT_MAX_RESPONSE_LEN=57344 CONTEXT_LEN=61440 ROLLOUT_TEMPERATURE=0.8 \
+ROLLOUT_BATCH_SIZE=32 N_SAMPLES_PER_PROMPT=16 GLOBAL_BATCH_SIZE=512 MAX_TOKENS_PER_GPU=16384 \
+DISABLE_STD_NORM=1 USE_ROUTING_REPLAY=1 ROUTER_OFF=1 ROUTER_LOG=1 \
+NUM_ROLLOUT=220 EVAL_INTERVAL=25 SAVE_INTERVAL=20 \
+EXTRA_ARGS="--log-passrate" bash examples/instella_think/run_async.sh
+```
+
+- `DRGRPO_DIVISOR=21680` is the step-0 mean response length of the DPO-64k checkpoint at
+  this cap. Measure it again for another checkpoint or cap (see "Dr. GRPO loss").
+- `mix_v5_math.jsonl` and the `*-olmes.jsonl` eval sets aren't built by this repo; copy them
+  from the MI325X share. R1/R2's eval YAML covered AIME 2024/2025, HMMT Feb 2025 and
+  BeyondAIME at n=16, temperature 0.6, top_p 0.95, 65536 tokens.
+- The async "retry" (`--async-unused-samples-handler retry` on MI325X's newer miles) is built
+  in here: `examples/fully_async` always returns aborted and over-stale groups to the buffer.
+  Don't pass that flag, or `--async-data-buffer-capacity-factor`; this miles has neither.
+- R1 ran 40 rollout GPUs and R2 24; the 3-node layout here has 16. Add rollout nodes and
+  `EXTRA_ARGS="--rollout-num-gpus <n>"` to match.
+- Through `cluster/launch.sh`, pass the same variables as `VAR=VALUE` arguments plus
+  `RUN_SCRIPT=run_async.sh` (its default is `run_code.sh`).
+- Confirm with `DRY_RUN=1` first: it prints the resolved loss, filter and router settings.
 
 ## Instruction-following run (32k, same hyperparams as `rytwnj5z`)
 
