@@ -31,8 +31,11 @@ srv() {  # <port> <workers> <log> [extra server args...]
       --token-file "${CODE_EXEC_TOKEN_FILE}" "$@" >> "${log}" 2>&1 < /dev/null &
 }
 say "nproc=${NCPU}: train ${TRAIN_WORKERS} workers on :${CODE_EXEC_PORT}, bench ${BENCH_WORKERS} on :${CODE_BENCH_PORT}"
-srv "${CODE_EXEC_PORT}" "${TRAIN_WORKERS}" "${USER_HOME}/logs/code-exec-${HOST}.log"
+# Several server processes per port: one process is GIL-bound well before its workers are busy.
+srv "${CODE_EXEC_PORT}" "${TRAIN_WORKERS}" "${USER_HOME}/logs/code-exec-${HOST}.log" \
+   --processes "${CODE_EXEC_PROCESSES:-4}"
 srv "${CODE_BENCH_PORT}" "${BENCH_WORKERS}" "${USER_HOME}/logs/code-exec-bench-${HOST}.log" \
+   --processes "${CODE_BENCH_PROCESSES:-$(( BENCH_WORKERS >= 16 ? 16 : 1 ))}" \
    --python /opt/venv/bin/python --max-tests 128 --max-timeout 20 --mem-mb 4096 \
    --tests-dir "${CODE_BENCH_DIR}/tests" --scratch "/tmp/code-exec-bench-$(id -u)"
 
