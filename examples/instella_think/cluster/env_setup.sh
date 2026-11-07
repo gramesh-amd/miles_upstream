@@ -39,6 +39,8 @@ step "setup_farskip.sh" bash "${INSTELLA_DIR}/setup_farskip.sh"
 step "patch_megatron_compat.sh" bash "${INSTELLA_DIR}/patch_megatron_compat.sh"
 # 2b. Routing-replay hooks (USE_ROUTING_REPLAY=1, the run_code.sh / run_if.sh default).
 step "patch_megatron_r3.sh" bash "${INSTELLA_DIR}/patch_megatron_r3.sh"
+# 2c. Resume from our own checkpoints (their .metadata has no mcore_data).
+step "patch_megatron_mcore_data.sh" bash "${INSTELLA_DIR}/patch_megatron_mcore_data.sh"
 # 3. mbridge gate_proj mapping (patches the container's installed mbridge).
 step "patch_mbridge_gate_proj.sh" bash "${INSTELLA_DIR}/patch_mbridge_gate_proj.sh"
 # 4. IF checker deps + nltk corpus (runs its own --verify at the end).
