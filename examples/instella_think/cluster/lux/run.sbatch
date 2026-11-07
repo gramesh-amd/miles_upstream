@@ -21,7 +21,13 @@ LUX_DIR="${LUX_DIR:-${SLURM_SUBMIT_DIR}/examples/instella_think/cluster/lux}"
 source "${LUX_DIR}/lux_env.sh"
 
 SANDBOX_NODES=1
-for kv in "$@"; do case "${kv}" in SANDBOX_NODES=*) SANDBOX_NODES="${kv#*=}" ;; esac; done
+for kv in "$@"; do
+   case "${kv}" in
+      SANDBOX_NODES=*) SANDBOX_NODES="${kv#*=}" ;;
+      # Sandbox sizing reaches the sandbox node(s) through this script's environment.
+      CODE_EXEC_WORKERS=*|CODE_BENCH_WORKERS=*) export "${kv?}" ;;
+   esac
+done
 [ "${SANDBOX_NODES}" = 1 ] || [ "${SANDBOX_NODES}" = 2 ] || { echo "FATAL: SANDBOX_NODES must be 1 or 2"; exit 1; }
 mapfile -t NODES < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
 SANDBOXES=("${NODES[@]:0:${SANDBOX_NODES}}")
