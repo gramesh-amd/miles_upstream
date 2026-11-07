@@ -45,6 +45,7 @@ import resource
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -327,6 +328,14 @@ def make_tests_loader(tests_dir):
     return load
 
 
+class ReusePortServer(ThreadingHTTPServer):
+    """Several processes can listen on one port; the kernel spreads connections across them."""
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        super().server_bind()
+
+
 def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float, started: float,
                  load_tests=None):
     class Handler(BaseHTTPRequestHandler):
@@ -416,6 +425,10 @@ def main():
                     help="root for requests that name their tests by tests_ref (benchmark evals)")
     ap.add_argument("--scratch", default=os.path.join(tempfile.gettempdir(), f"code-exec-{os.getuid()}"))
     ap.add_argument("--stats-every", type=float, default=60.0)
+    ap.add_argument("--processes", type=int, default=1,
+                    help="server processes sharing the port (SO_REUSEPORT), each with workers/processes "
+                         "workers. One process is GIL-bound: request parsing and output comparison for "
+                         "LiveCodeBench-sized tests pin one core long before the test workers are busy")
     args = ap.parse_args()
 
     if not os.path.exists(args.token_file):
@@ -426,11 +439,23 @@ def main():
     token = open(args.token_file).read().strip()
     prefix = "/" + token
 
-    runner = Runner(args.workers, args.mem_mb, args.python, args.scratch)
+    # The first process serves too; the others are forked before anything is shared, and each
+    # keeps its own workers, scratch dir, tests cache and STATS (so /health reports one process).
+    nproc = max(1, args.processes)
+    workers = max(1, -(-args.workers // nproc))
+    index = 0
+    for i in range(1, nproc):
+        if os.fork() == 0:
+            index = i
+            break
+    scratch = args.scratch if nproc == 1 else os.path.join(args.scratch, f"p{index}")
+    STATS["process"] = f"{index + 1}/{nproc}"
+
+    runner = Runner(workers, args.mem_mb, args.python, scratch)
     started = time.time()
-    srv = ThreadingHTTPServer((args.host, args.port),
-                              make_handler(runner, prefix, args.max_tests, args.max_timeout, started,
-                                           make_tests_loader(args.tests_dir)))
+    srv = ReusePortServer((args.host, args.port),
+                          make_handler(runner, prefix, args.max_tests, args.max_timeout, started,
+                                       make_tests_loader(args.tests_dir)))
     srv.daemon_threads = True
 
     def report():
@@ -443,7 +468,7 @@ def main():
                   f"busy={s['busy_s']:.0f}s", flush=True)
 
     threading.Thread(target=report, daemon=True).start()
-    print(f"[{time.strftime('%F %T')}] code-exec on {args.host}:{args.port} workers={args.workers} "
+    print(f"[{time.strftime('%F %T')}] code-exec on {args.host}:{args.port} process {index + 1}/{nproc} workers={workers} "
           f"mem={args.mem_mb}MB max_tests={args.max_tests} python={args.python}", flush=True)
     srv.serve_forever()
 
