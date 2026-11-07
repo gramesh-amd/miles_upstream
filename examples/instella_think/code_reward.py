@@ -27,6 +27,7 @@ api_error must stay at 0; if it is not, the reward is measuring the network.
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -389,18 +390,33 @@ def _score_one(sample, evaluation: bool = False) -> float:
     return raw * REWARD_SCALE
 
 
+# Grading blocks a thread for the whole sandbox round trip (tens of seconds for a LiveCodeBench
+# sample). asyncio.to_thread would share the loop's default pool, at most 32 threads, so miles'
+# per-sample calls could never grade more than 32 samples at once whatever CODE_REWARD_CONCURRENCY
+# says; evals then starve the engines. A pool of its own makes CODE_REWARD_CONCURRENCY the cap.
+_EXECUTOR = None
+
+
+def _executor():
+    global _EXECUTOR
+    if _EXECUTOR is None:
+        _EXECUTOR = concurrent.futures.ThreadPoolExecutor(max(1, _CONCURRENCY), thread_name_prefix="code-reward")
+    return _EXECUTOR
+
+
 async def batched_reward(args, samples, **kwargs):
     """Entry point for both call shapes miles uses (single Sample and list[Sample])."""
     evaluation = bool(kwargs.get("evaluation", False))
+    loop = asyncio.get_running_loop()
     if not isinstance(samples, (list, tuple)):
-        return await asyncio.to_thread(_score_one, samples, evaluation)
+        return await loop.run_in_executor(_executor(), _score_one, samples, evaluation)
     if not samples:
         return []
     sem = asyncio.Semaphore(max(1, _CONCURRENCY))
 
     async def _one(s):
         async with sem:
-            return await asyncio.to_thread(_score_one, s, evaluation)
+            return await loop.run_in_executor(_executor(), _score_one, s, evaluation)
 
     return await asyncio.gather(*[_one(s) for s in samples])
 
