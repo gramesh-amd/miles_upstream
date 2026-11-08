@@ -21,6 +21,9 @@ NODE_IP="$(ip -o -4 route get 1 | grep -oP '(?<=src )\S+')"
 WANDB_MODE="$(source "${JOB_DIR}/spec.env"; echo "${WANDB_MODE:-online}")"
 # miles passes no W&B entity, so without this runs land in the key owner's default team.
 WANDB_ENTITY="$(source "${JOB_DIR}/spec.env"; echo "${WANDB_ENTITY:-${LUX_WANDB_ENTITY}}")"
+# Eval-only jobs ramp their requests up (miles MILES_ROLLOUT_RAMP_S): thousands of requests at
+# once onto idle engines produced degenerate HumanEval+ generations.
+RAMP_S="$(source "${JOB_DIR}/spec.env"; [ "${EVAL_ONLY:-0}" = 1 ] && echo "${EVAL_RAMP_S:-900}" || echo 0)"
 
 # --cleanenv drops Slurm's GPU masks (all 8 GPUs stay visible) and the ORNL proxy, so traffic
 # between nodes (sandbox, Ray, router, RCCL) goes direct; W&B alone gets the proxy, through its
@@ -36,6 +39,7 @@ XDG_CACHE_HOME=${NL}/cache
 TMPDIR=${NL}/tmp
 WANDB_MODE=${WANDB_MODE}
 WANDB_ENTITY=${WANDB_ENTITY}
+MILES_ROLLOUT_RAMP_S=${RAMP_S}
 WANDB_HTTPS_PROXY=${LUX_PROXY}
 WANDB_HTTP_PROXY=${LUX_PROXY}
 SLURM_JOB_ID=${SLURM_JOB_ID}

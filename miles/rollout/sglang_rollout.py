@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import logging
+import os
 import uuid
 import weakref
 from argparse import Namespace
@@ -66,6 +67,19 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/generate")
     return f"http://{args.sglang_router_ip}:{args.sglang_router_port}{endpoint}"
 
 
+async def _ramp_semaphore(sem: asyncio.Semaphore, extra: int, ramp_s: float, tick_s: float = 5.0) -> None:
+    """Release `extra` permits on `sem` evenly over `ramp_s` seconds."""
+    steps = max(1, int(ramp_s / tick_s))
+    released = 0
+    for i in range(1, steps + 1):
+        await asyncio.sleep(tick_s)
+        target = extra * i // steps
+        for _ in range(target - released):
+            sem.release()
+        released = target
+    logger.info(f"rollout semaphore ramp done: +{released} permits over {ramp_s:.0f}s")
+
+
 class GenerateState(metaclass=SingletonMeta):
     """
     The global state for the generation process.
@@ -128,7 +142,16 @@ class GenerateState(metaclass=SingletonMeta):
         loop = asyncio.get_running_loop()
         sem = self._semaphores.get(loop)
         if sem is None:
-            sem = asyncio.Semaphore(self._semaphore_capacity)
+            ramp_s = float(os.environ.get("MILES_ROLLOUT_RAMP_S", "0") or 0)
+            if ramp_s > 0:
+                # Opt-in ramp: a burst of thousands of requests onto idle engines (an eval-only
+                # job) has produced corrupted generations; start at 1/16 of the capacity and
+                # release the rest evenly over ramp_s seconds.
+                start = max(1, self._semaphore_capacity // 16)
+                sem = asyncio.Semaphore(start)
+                loop.create_task(_ramp_semaphore(sem, self._semaphore_capacity - start, ramp_s))
+            else:
+                sem = asyncio.Semaphore(self._semaphore_capacity)
             self._semaphores[loop] = sem
         return sem
 
