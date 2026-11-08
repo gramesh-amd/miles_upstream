@@ -74,8 +74,14 @@ source "${JOB_DIR}/spec.env"
 # loads its base model (--ref-load + --ckpt-step, into a SAVE_DIR that does not exist yet).
 if [ "${EVAL_ONLY:-0}" = 1 ]; then
    : "${EVAL_STEP:?EVAL_ONLY needs EVAL_STEP}" "${EVAL_SOURCE_DIR:?EVAL_ONLY needs EVAL_SOURCE_DIR}"
-   [ -d "${EVAL_SOURCE_DIR}/iter_$(printf %07d "${EVAL_STEP}")" ] || fail "no checkpoint iter ${EVAL_STEP} in ${EVAL_SOURCE_DIR}"
-   export EXTRA_ARGS="${EXTRA_ARGS:-} --ref-load ${EVAL_SOURCE_DIR} --ckpt-step ${EVAL_STEP} --ref-ckpt-step ${EVAL_STEP} --no-load-optim --no-load-rng"
+   if [ "${EVAL_STEP}" = release ]; then
+      # A weights-only "release" checkpoint (e.g. REF_LOAD, the base model) has no iterations.
+      [ -d "${EVAL_SOURCE_DIR}/release" ] || fail "no release checkpoint in ${EVAL_SOURCE_DIR}"
+      export EXTRA_ARGS="${EXTRA_ARGS:-} --ref-load ${EVAL_SOURCE_DIR} --no-load-optim --no-load-rng"
+   else
+      [ -d "${EVAL_SOURCE_DIR}/iter_$(printf %07d "${EVAL_STEP}")" ] || fail "no checkpoint iter ${EVAL_STEP} in ${EVAL_SOURCE_DIR}"
+      export EXTRA_ARGS="${EXTRA_ARGS:-} --ref-load ${EVAL_SOURCE_DIR} --ckpt-step ${EVAL_STEP} --ref-ckpt-step ${EVAL_STEP} --no-load-optim --no-load-rng"
+   fi
    export SAVE_TAG="${SAVE_TAG}_eval${EVAL_STEP}" SKIP_EVAL_BEFORE_TRAIN=0 EVAL_INTERVAL=100000 \
       PRUNE_CHECKPOINTS=0 WANDB_GROUP="${WANDB_GROUP:-eval}-eval-iter${EVAL_STEP}"
 fi
