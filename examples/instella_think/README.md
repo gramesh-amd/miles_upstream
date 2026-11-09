@@ -285,7 +285,6 @@ All are `VAR=VALUE` overrides to `cluster/launch.sh`; defaults leave the recipe 
 | `PER_DOMAIN_METRICS` | 1 | Per-source metrics under `domain/<dataset_source>/`, see "Watch it". |
 | `DUMP_TRAIN_DATA` | 0 | Trainer-side per-rank tensors per step, next to the rollout dumps. One file per rank per step, so use it for a few steps only. |
 | `OVERLONG_FILTER_DROP_UNCLOSED` | 0 | With `OVERLONG_FILTER=1`, also drop samples that finished under the cap without closing `</think>` (a stray low-probability EOS, always scored 0). See `overlong_filter._is_unclosed`. |
-| `ROUTER_OFF` | 0 | No router training signal: aux loss 0, no load balancing, frozen expert bias. |
 | `ROUTER_LOG` | 0 | Router telemetry to `ROUTER_LOG_PATH` (default `$LOG_DIR/router_log_<SAVE_TAG>.jsonl`) every `ROUTER_LOG_EVERY` (5) steps. |
 | `WANDB_BASE_URL` | | Self-hosted W&B endpoint, e.g. `https://api.forge.coreweave.com`. |
 | `EXTRA_ARGS` | | Any `train_async.py` flags, appended last so they win, e.g. `EXTRA_ARGS="--lr 2e-6 --save-interval 10"`. Values can't contain spaces. |
@@ -469,7 +468,7 @@ PROMPT_DATA=$DATA_ROOT/mix_v5_math.jsonl EVAL_CONFIG=<math eval yaml> SAVE_TAG=<
 DRGRPO=1 DRGRPO_DIVISOR=21680.0 PER_TOKEN_LOSS=0 OVERLONG_FILTER=1 OVERLONG_FILTER_DROP_UNCLOSED=1 \
 ROLLOUT_MAX_RESPONSE_LEN=57344 CONTEXT_LEN=61440 ROLLOUT_TEMPERATURE=0.8 \
 ROLLOUT_BATCH_SIZE=32 N_SAMPLES_PER_PROMPT=16 GLOBAL_BATCH_SIZE=512 MAX_TOKENS_PER_GPU=16384 \
-DISABLE_STD_NORM=1 USE_ROUTING_REPLAY=1 ROUTER_OFF=1 ROUTER_LOG=1 \
+DISABLE_STD_NORM=1 USE_ROUTING_REPLAY=1 ROUTER_LOG=1 \
 NUM_ROLLOUT=220 EVAL_INTERVAL=25 SAVE_INTERVAL=20 \
 EXTRA_ARGS="--log-passrate" bash examples/instella_think/run_async.sh
 ```

@@ -19,7 +19,7 @@ trainable. Instella-MoE's own paper S2.8 traced a post-training regression to
 load-balancing left on, measuring top-1 expert flip at 54% (vs 5% healthy) and
 top-6 Jaccard at 0.42 (vs 0.94).
 
-With ROUTER_OFF=1 (aux loss 0, no load balancing, frozen expert bias) the task
+With the router off (model_args.sh: aux loss 0, no load balancing, frozen expert bias) the task
 gradient still moves the router weights, and nothing pulls load back into
 balance. Token routing is not visible from the weights alone, so this logs the
 router weights and expert bias and their drift from step 0; token-level routing

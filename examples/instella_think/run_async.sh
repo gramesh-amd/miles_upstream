@@ -537,12 +537,6 @@ if [ "${OVERLONG_FILTER_DROP_UNCLOSED:-0}" = "1" ] && [ "${OVERLONG_FILTER:-0}" 
    echo "ERROR: OVERLONG_FILTER_DROP_UNCLOSED=1 has no effect without OVERLONG_FILTER=1." >&2; exit 1
 fi
 
-# ROUTER_OFF=1: no router training signal at all -- aux loss 0, no load balancing, frozen
-# expert bias. Appended to MODEL_ARGS so they win over model_args.sh's pretraining values
-# (argparse keeps the last occurrence); DRY_RUN prints the resolved values.
-if [ "${ROUTER_OFF:-0}" = "1" ]; then
-   MODEL_ARGS+=(--moe-aux-loss-coeff 0.0 --moe-router-load-balancing-type none --moe-router-bias-update-rate 0.0)
-fi
 # ROUTER_LOG=1: router weight / expert-bias stats and drift from step 0, every ROUTER_LOG_EVERY
 # train steps, as JSONL at ROUTER_LOG_PATH (router_log_hook.py). Rank 0 only; never raises.
 if [ "${ROUTER_LOG:-0}" = "1" ]; then
