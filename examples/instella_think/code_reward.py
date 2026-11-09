@@ -452,14 +452,15 @@ if __name__ == "__main__":
     half = "<think>r</think>\n```python\na, b = map(int, input().split())\nprint(a + b if a != b else 0)\n```"
     asserts = json.dumps(["assert double(2) == 4", "assert double(0) == 0"])
     pytest_style = json.dumps({"test": "def test_a():\n    assert inc(1) == 2\n\ndef test_b():\n    assert inc(5) == 7\n"})
+    part = (lambda r: r) if _PARTIAL_CREDIT else (lambda r: 0.0)  # all-or-nothing scores a partial pass 0
     cases = [
         (good, stdio, {}, 1.0, "stdio all pass"),
-        (half, stdio, {}, 0.5, "stdio half pass, partial credit"),
+        (half, stdio, {}, part(0.5), "stdio half pass, partial credit"),
         (half, stdio, {"split": "eval"}, 0.0, "eval is all-or-nothing"),
-        ("```python\nprint(5)\n```", stdio, {}, 0.0 if _REQUIRE_THINK else 0.25, "think gate"),
+        ("```python\nprint(5)\n```", stdio, {}, 0.0 if _REQUIRE_THINK else part(0.25), "think gate"),
         ("<think>r</think>no code here", stdio, {}, 0.0, "prose is not a program"),
         ("<think>r</think>```python\ndef double(x): return 2*x\n```", asserts, {}, 1.0, "assert list"),
-        ("<think>r</think>```python\ndef inc(x): return x+1\n```", pytest_style, {}, 0.5, "pytest functions"),
+        ("<think>r</think>```python\ndef inc(x): return x+1\n```", pytest_style, {}, part(0.5), "pytest functions"),
         ("<think>r</think>```python\nwhile True: pass\n```", stdio, {}, 0.0, "infinite loop"),
         (good, json.dumps([stdio]), {}, 1.0, "Dolci shape: list holding one JSON string"),
     ]

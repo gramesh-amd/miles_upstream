@@ -14,13 +14,16 @@
 # (nd_flattened_tensor_reformulated_global_shape), the layouts agree, and apply_nd_flattened_
 # tensors_reformulation already loads such a tensor as-is ("Same shape - no need to reshard").
 # So in that case the missing entry is filled with this run's own global shape; any other shape
-# still raises, so a genuine reshard can never load misplaced moments.
+# still raises, so a genuine reshard can never load misplaced moments. The same holds for 1-D
+# tensors, which these checkpoints also store reformulated ([1, n]); without an entry Megatron
+# takes them for the legacy unreformulated format and fails with
+#   ValueError: Size mismatch between saved torch.Size([1, 2048]) and current: torch.Size([2048])
 set -euo pipefail
 [ -n "${MEGATRON_PATH:-}" ] || source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)/paths.sh"
 
 F="${MEGATRON_PATH}/megatron/core/dist_checkpointing/strategies/torch.py"
 [ -f "$F" ] || { echo "ERROR: $F not found" >&2; exit 1; }
-MARK="instella: same-layout N-D resume"
+MARK="instella: same-layout resume v2"
 if grep -q "${MARK}" "$F"; then
    echo "already patched: $F"
    exit 0
@@ -33,11 +36,8 @@ import sys
 
 src, dst, mark = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(src).read()
-old = """                continue
-            raise CheckpointingException(
-                f'Cannot find global shape metadata for N-D flattened tensor {sh_ten} '"""
-new = f"""                continue
-            # {mark}: without mcore_data, accept a tensor saved in exactly the layout this run
+# v1 of this patch handled only N-D tensors and sat after the 1-D branch; take it out first.
+v1 = """            # instella: same-layout N-D resume: without mcore_data, accept a tensor saved in exactly the layout this run
             # loads (no resharding needed); anything else still raises below.
             saved = ckpt_metadata.state_dict_metadata.get(sh_ten.key)
             if saved is not None and tuple(saved.size) == tuple(
@@ -47,8 +47,24 @@ new = f"""                continue
                     tuple(sh_ten.global_shape), saved.size
                 )
                 continue
-            raise CheckpointingException(
-                f'Cannot find global shape metadata for N-D flattened tensor {{sh_ten}} '"""
+"""
+text = text.replace(v1, "", 1)
+old = """        except KeyError as e:
+            if len(sh_ten.global_shape) == 1:"""
+new = f"""        except KeyError as e:
+            # {mark}: without mcore_data, accept a tensor saved in exactly the
+            # reformulated layout this run loads (no resharding needed). This covers 1-D
+            # tensors too: ours were saved reformulated ([1, n]), so the legacy 1-D path
+            # below would load them with the wrong shape. Anything else is handled as before.
+            saved = ckpt_metadata.state_dict_metadata.get(sh_ten.key)
+            if saved is not None and tuple(saved.size) == tuple(
+                nd_flattened_tensor_reformulated_global_shape(sh_ten)
+            ):
+                reformulation_metadata[sh_ten.key] = TensorReformulationMetadata(
+                    tuple(sh_ten.global_shape), saved.size
+                )
+                continue
+            if len(sh_ten.global_shape) == 1:"""
 if text.count(old) != 1:
     sys.exit("ERROR: anchor not found exactly once (run patch_megatron_mcore_data.sh first?); refusing to patch blindly")
 open(dst, "w").write(text.replace(old, new, 1))
