@@ -41,6 +41,8 @@ step "patch_megatron_compat.sh" bash "${INSTELLA_DIR}/patch_megatron_compat.sh"
 step "patch_megatron_r3.sh" bash "${INSTELLA_DIR}/patch_megatron_r3.sh"
 # 2c. Resume from our own checkpoints (their .metadata has no mcore_data).
 step "patch_megatron_mcore_data.sh" bash "${INSTELLA_DIR}/patch_megatron_mcore_data.sh"
+# 2d. ...including the optimizer state, when the parallel layout is unchanged.
+step "patch_megatron_nd_same_layout.sh" bash "${INSTELLA_DIR}/patch_megatron_nd_same_layout.sh"
 # 3. mbridge gate_proj mapping (patches the container's installed mbridge).
 step "patch_mbridge_gate_proj.sh" bash "${INSTELLA_DIR}/patch_mbridge_gate_proj.sh"
 # 4. IF checker deps + nltk corpus (runs its own --verify at the end).
