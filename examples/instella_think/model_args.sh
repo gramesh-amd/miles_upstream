@@ -79,18 +79,20 @@ MODEL_ARGS=(
     --moe-shared-expert-intermediate-size 2816
     --moe-router-pre-softmax
     --moe-router-score-function sigmoid
-    --moe-router-load-balancing-type seq_aux_loss
     --moe-token-dispatcher-type alltoall
-    # 0.001 is the pretraining load-balancing value. During RL it is a non-task gradient that
-    # moves the router every step, which both perturbs the DPO checkpoint's expert assignment
-    # and drifts training routing away from whatever the rollout engine used -- a candidate for
-    # why our train/rollout logprob gap GROWS in relative terms (14.2% -> 28.4%) instead of
-    # holding flat. The Qwen3.6-35B-A3B async-s4-3node baseline ran this at 0.
-    # Override with MOE_AUX_LOSS_COEFF=0 to test.
-    --moe-aux-loss-coeff "${MOE_AUX_LOSS_COEFF:-0.001}"
+    # Router load balancing is OFF for RL: no aux loss and a frozen expert bias. Both are
+    # non-task signals that move the router every step, perturbing the DPO checkpoint's expert
+    # assignment and drifting training routing away from what the rollout engine used. With them
+    # on, math arm I and code v3 both collapsed (length down, evals down); math R1, identical
+    # except for these flags, trained 400 steps without decline.
+    --moe-router-load-balancing-type none
+    --moe-aux-loss-coeff 0
+    --moe-router-bias-update-rate 0
     --moe-grouped-gemm
     --moe-router-topk-scaling-factor 2.5
     --moe-router-dtype fp32
+    # Keep: the expert bias is part of the checkpoint and the rollout engine routes with it.
+    # Dropping this flag would discard it; bias-update-rate 0 above only freezes it.
     --moe-router-enable-expert-bias
 
     # --- runtime / dtype ---
