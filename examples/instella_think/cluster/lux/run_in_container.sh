@@ -6,6 +6,9 @@
 #                ranks 1..N-1 join as Ray workers until the head stops
 # Coordination is through files in $JOB_DIR: setup.<host>, head_ip, sandbox[-bench].ready, failed, run.status.
 set -uo pipefail
+# No core dumps: a killed sglang dumps ~2.4 GB per GPU process into the working directory (the NFS
+# home), which filled the home quota on 2026-11-09 (see eval_in_container.sh).
+ulimit -c 0
 source /opt/venv/bin/activate
 cd "${USER_HOME}/miles" || exit 1
 I=examples/instella_think
