@@ -7,15 +7,18 @@
 #   examples/instella_think/cluster/lux/eval_watch.sh <SAVE_DIR> [VAR=VALUE ...]
 #
 # The VAR=VALUE args are the eval job's run spec: the training spec, so the eval uses the same
-# model and lengths (sampling and benchmark settings come from run_code.sh). EVAL_NODES (default 5:
-# grading node + trainer + 3 rollout engines) and EVAL_HOURS (default 6) size the jobs. The
-# training job's in-flight checkpoint is skipped until latest_checkpointed_iteration.txt reaches it.
+# model and lengths (sampling and benchmark settings come from run_code.sh). EVAL_NODES (default 4:
+# grading node + 3 inference engines; eval_in_container.sh converts the checkpoint to HF format and
+# runs no trainer) and EVAL_HOURS (default 6) size the jobs. Each job also uploads its scores to W&B
+# and adds them to the training run's eval-series run (EVAL_SERIES_ID in the spec, default
+# evals-<SAVE_DIR name>). The training job's in-flight checkpoint is skipped until
+# latest_checkpointed_iteration.txt reaches it.
 set -uo pipefail
 LUX_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "${LUX_DIR}/lux_env.sh"
 SAVE_DIR="${1:?usage: eval_watch.sh <SAVE_DIR> [VAR=VALUE ...]}"
 shift
-EVAL_NODES="${EVAL_NODES:-5}"
+EVAL_NODES="${EVAL_NODES:-4}"
 EVAL_HOURS="${EVAL_HOURS:-6}"
 MARKS="${SAVE_DIR}/.eval_submitted"
 mkdir -p "${MARKS}"

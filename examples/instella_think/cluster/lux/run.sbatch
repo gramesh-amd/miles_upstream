@@ -21,9 +21,12 @@ LUX_DIR="${LUX_DIR:-${SLURM_SUBMIT_DIR}/examples/instella_think/cluster/lux}"
 source "${LUX_DIR}/lux_env.sh"
 
 SANDBOX_NODES=1
+GPU_NODE_SCRIPT=run_gpu_node.sh
 for kv in "$@"; do
    case "${kv}" in
       SANDBOX_NODES=*) SANDBOX_NODES="${kv#*=}" ;;
+      # Eval-only jobs have no trainer: every GPU node serves inference (eval_gpu_node.sh).
+      EVAL_ONLY=1) GPU_NODE_SCRIPT=eval_gpu_node.sh ;;
       # Sandbox sizing reaches the sandbox node(s) through this script's environment.
       CODE_EXEC_WORKERS=*|CODE_BENCH_WORKERS=*) export "${kv?}" ;;
    esac
@@ -44,8 +47,8 @@ for kv in "$@"; do
    [[ "${kv}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { echo "FATAL: not VAR=VALUE: ${kv}"; exit 1; }
    printf 'export %q\n' "${kv}" >> "${JOB_DIR}/spec.env"
 done
-# The rollout node count follows from the allocation.
-[ "${G}" -ge 2 ] && echo "export ROLLOUT_NODES=$(( G - 1 ))" >> "${JOB_DIR}/spec.env"
+# The rollout node count follows from the allocation (an eval job sets its own, see eval_in_container.sh).
+[ "${G}" -ge 2 ] && [ "${GPU_NODE_SCRIPT}" = run_gpu_node.sh ] && echo "export ROLLOUT_NODES=$(( G - 1 ))" >> "${JOB_DIR}/spec.env"
 echo "job ${SLURM_JOB_ID}: sandbox ${SANDBOXES[*]}, GPU nodes ${GPU_NODES[*]} (head ${GPU_NODES[0]})"
 echo "spec: $*"
 echo "job dir: ${JOB_DIR}"
@@ -70,7 +73,7 @@ else
 fi
 srun -N "${G}" -n "${G}" --ntasks-per-node=1 -w "$(IFS=,; echo "${GPU_NODES[*]}")" --overlap --cpu-bind=none \
    --export=ALL,LUX_DIR="${LUX_DIR}",JOB_DIR="${JOB_DIR}",SANDBOX_HOST="${SANDBOX_HOST}",HEAD_HOST="${GPU_NODES[0]}",GPU_NODE_COUNT="${G}",ALL_HOSTS="$(IFS=,; echo "${NODES[*]}")" \
-   bash "${LUX_DIR}/run_gpu_node.sh" &
+   bash "${LUX_DIR}/${GPU_NODE_SCRIPT}" &
 GPU_PID=$!
 
 wait "${GPU_PID}"
