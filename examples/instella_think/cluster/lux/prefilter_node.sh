@@ -47,14 +47,23 @@ apptainer exec --cleanenv --env-file "${NL}/container.env" "instance://${INST}" 
    export INPUT="${DATA_ROOT}/prefilter/shards/shard_${SHARD}.jsonl" OUTPUT="${DATA_ROOT}/prefilter/shards/shard_${SHARD}.filtered.jsonl"
    [ -s "${INPUT}" ] || { say "FATAL: no ${INPUT}; run prefilter_shards.py split first"; exit 1; }
    [ -f "${OUTPUT}.stats.json" ] && { say "shard ${SHARD} already done"; exit 0; }
-   bash "${I}/prefilter.sh" serve
-   for _ in $(seq 1 180); do curl -sf -m 5 http://127.0.0.1:30000/health >/dev/null && break; sleep 10; done
-   curl -sf -m 5 http://127.0.0.1:30000/health >/dev/null || { say "FATAL: sglang never became healthy"; bash "${I}/prefilter.sh" stop; exit 1; }
-   say "sglang healthy; filtering shard ${SHARD} (concurrency ${CONCURRENCY}, sandbox ${CODE_EXEC_API_URL%/*})"
-   for attempt in 1 2 3 4 5 6; do
-      FOREGROUND=1 bash "${I}/prefilter.sh" filter && break
-      say "filter exited non-zero (attempt ${attempt}); resuming from the cache in 60 s"
-      sleep 60
+   # (Re)starts sglang when it does not answer. At long contexts and high load the server can die
+   # with HSA_STATUS_ERROR_EXCEPTION (a GPU memory fault): all 14 nodes at 512 running requests,
+   # 2 of 14 after 2.5 h at 256 (2026-11-09/10); a dead server is restarted, not waited on.
+   ensure_server() {
+      curl -sf -m 5 http://127.0.0.1:30000/health >/dev/null && return 0
+      say "starting sglang"
+      bash "${I}/prefilter.sh" stop >/dev/null 2>&1
+      bash "${I}/prefilter.sh" serve
+      for _ in $(seq 1 180); do curl -sf -m 5 http://127.0.0.1:30000/health >/dev/null && return 0; sleep 10; done
+      return 1
+   }
+   for attempt in 1 2 3 4 5 6 7 8; do
+      ensure_server || { say "sglang never became healthy (attempt ${attempt})"; continue; }
+      say "sglang healthy; filtering shard ${SHARD} (concurrency ${CONCURRENCY}, sandbox ${CODE_EXEC_API_URL%/*})"
+      SERVER_WAIT=300 FOREGROUND=1 bash "${I}/prefilter.sh" filter && break
+      say "filter exited non-zero (attempt ${attempt}); resuming from the cache"
+      sleep 30
    done
    bash "${I}/prefilter.sh" stop
    [ -f "${OUTPUT}.stats.json" ] && say "shard ${SHARD} done" || { say "shard ${SHARD} NOT finished"; exit 1; }
