@@ -39,7 +39,9 @@ for i in "${!SANDBOXES[@]}"; do
       bash "${LUX_DIR}/run_sandbox_node.sh" > "${JOB_DIR}/sandbox${i}.log" 2>&1 &
    PIDS+=($!)
 done
-srun -N "${G}" -n "${G}" --ntasks-per-node=1 -w "$(IFS=,; echo "${GPU_NODES[*]}")" --overlap --cpu-bind=none \
+# --kill-on-bad-exit=0: one node giving up must not kill the others' shards (Lux kills the whole
+# step on a failed task by default; that ended job 407229 1.5 h early).
+srun -N "${G}" -n "${G}" --ntasks-per-node=1 -w "$(IFS=,; echo "${GPU_NODES[*]}")" --overlap --cpu-bind=none --kill-on-bad-exit=0 \
    --export=ALL,LUX_DIR="${LUX_DIR}",JOB_DIR="${JOB_DIR}",SANDBOX_NODES="${SANDBOX_NODES}",SHARD_BASE="${SHARD_BASE:-0}" \
    bash "${LUX_DIR}/prefilter_node.sh" &
 GPU_PID=$!
