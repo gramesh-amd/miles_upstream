@@ -13,6 +13,9 @@
 # optimizer state) and maps names with megatron_to_hf.convert_to_hf, the converter training uses
 # for its weight updates to sglang (--megatron-to-hf-mode raw, the default).
 set -uo pipefail
+# No core dumps: stopping the engines at the end makes every GPU process dump ~2.4 GB into the
+# working directory (the NFS home), which filled the home quota (234 files, 48 GB, 2026-11-09).
+ulimit -c 0
 source /opt/venv/bin/activate
 cd "${USER_HOME}/miles" || exit 1
 I=examples/instella_think
@@ -119,7 +122,7 @@ ray stop --force >/dev/null 2>&1 || true
 # eval series. Best effort: the result is already in .evals.txt.
 if [ "${WANDB_MODE:-online}" != offline ]; then
    [ -n "${EVAL_SERIES_ID:-}" ] || EVAL_SERIES_ID="evals-$(basename "${EVAL_SOURCE_DIR}")"
-   NETRC="${NETRC_PATH}" HTTPS_PROXY="${LUX_PROXY}" HTTP_PROXY="${LUX_PROXY}" WANDB_LOCAL_DIR="${WANDB_LOCAL_DIR}" \
+   WANDB_DIR="${WANDB_LOCAL_DIR}" NETRC="${NETRC_PATH}" HTTPS_PROXY="${LUX_PROXY}" HTTP_PROXY="${LUX_PROXY}" WANDB_LOCAL_DIR="${WANDB_LOCAL_DIR}" \
       WANDB_PROJECT="${WANDB_PROJECT:-miles-MI355-code}" REF_LOAD="${REF_LOAD:-${CKPT_ROOT}/Instella-MoE-16B-A3B-DPO_torch_dist}" \
       timeout 900 python3 "${I}/cluster/lux/eval_series.py" "${EVAL_SOURCE_DIR}" "${TRAIN_GROUP}" \
       "${TRAIN_GROUP}-eval-iter${EVAL_STEP}" "${EVAL_SERIES_ID}" > "${JOB_DIR}/wandb.log" 2>&1 \
