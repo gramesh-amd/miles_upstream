@@ -72,6 +72,8 @@ start_ray() {
       export SINGLE_NODE=1
       return
    fi
+   # The previous run's RAY_ADDRESS (the dashboard URL) would point the GPU check below at it.
+   unset RAY_ADDRESS
    ray stop --force >/dev/null 2>&1 || true
    ray start --head --node-ip-address="${NODE_IP}" --port=6379 --num-gpus 8 \
       --dashboard-host=0.0.0.0 --dashboard-port=8265 --disable-usage-stats || fail "ray start --head failed"
