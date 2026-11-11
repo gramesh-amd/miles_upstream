@@ -31,6 +31,16 @@ await() {  # <file> <timeout_s> <what>
    done
 }
 
+# Kills what a run leaves behind on this node once its Ray cluster is down. sglang's scheduler and
+# detokenizer processes outlive a force-stopped Ray; orphaned, their watchdog kills its new parent,
+# which is this container session (job 408063: the worker's session died 40 s after its run failed).
+kill_leftovers() {
+   pkill -9 -f 'sglang::' 2>/dev/null
+   pkill -9 -f 'ray::' 2>/dev/null
+   pkill -9 -f 'sglang.srt' 2>/dev/null
+   sleep 2
+}
+
 # --- 1. per-container setup (lost with the container, so every job) ------------------------
 # The editable install writes into the shared Megatron checkout on NFS; stagger the nodes.
 sleep $(( NODE_RANK * 20 ))
@@ -55,6 +65,7 @@ if [ "${NODE_RANK}" != 0 ]; then
       # --block keeps Ray inside this session; it returns when the head's Ray stops.
       ray start --address="${HEAD_IP}:6379" --num-gpus 8 --disable-usage-stats --block
       ray stop --force >/dev/null 2>&1 || true
+      kill_leftovers
       say "Ray worker exited"
       sleep 10
    done
@@ -92,6 +103,7 @@ stop_ray() {  # stops the run's Ray jobs and the cluster (workers wait for the n
    for id in $(ray job list 2>/dev/null | grep -o "raysubmit_[A-Za-z0-9]*" | sort -u); do ray job stop "${id}" >/dev/null 2>&1; done
    rm -f "${JOB_DIR}/head_ip"
    ray stop --force >/dev/null 2>&1 || true
+   kill_leftovers
    sleep 15
 }
 
