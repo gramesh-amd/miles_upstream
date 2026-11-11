@@ -13,6 +13,7 @@ README "5b" trains from (CODE_TRAIN=...).
 """
 
 import glob
+import hashlib
 import json
 import os
 import sys
@@ -57,26 +58,55 @@ def status():
     print(f"total: {tot_done}/{tot} ({100.0 * tot_done / max(tot, 1):.1f}%)")
 
 
+def _key(row):
+    # difficulty_filter._key with its default --input-key prompt / --label-key label.
+    blob = json.dumps([row.get("prompt"), row.get("label")], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
 def merge(dst):
+    """Concatenate the shards' kept rows, after checking that every shard is complete, that all
+    were graded under one config, and that no prompt was graded twice; duplicate prompts in the
+    source set (the same prompt + label in several rows) are written once."""
     inputs = shard_inputs()
     missing = [p for p in inputs if not os.path.exists(p[:-len(".jsonl")] + ".filtered.jsonl.stats.json")]
     if missing:
         sys.exit(f"{len(missing)} shards not complete, e.g. {missing[:3]}")
-    kept = 0
-    hist = {}
+    configs, graded = {}, {}
+    for p in inputs:
+        cache = p[:-len(".jsonl")] + ".filtered.jsonl.cache.jsonl"
+        with open(cache) as f:
+            configs[json.dumps(json.loads(f.readline())["_config"], sort_keys=True)] = p
+            for line in f:
+                rec = json.loads(line)
+                graded.setdefault(rec["key"], []).append(os.path.basename(p))
+    if len(configs) != 1:
+        sys.exit(f"shards were graded under {len(configs)} different configs: {list(configs.values())}")
+    regraded = {k: v for k, v in graded.items() if len(v) > 1 and len(set(v)) == len(v)}
+    within = {k: v for k, v in graded.items() if len(set(v)) < len(v)}
+    print(f"config: identical across {len(inputs)} shards; graded prompts {len(graded)}; "
+          f"same prompt in several shards {len(regraded)}; graded twice within a shard {len(within)}")
+    kept, dup, hist = 0, 0, {}
+    seen = set()
     with open(dst, "w") as out:
         for p in inputs:
-            base = p[:-len(".jsonl")] + ".filtered.jsonl"
-            with open(base) as f:
+            with open(p[:-len(".jsonl")] + ".filtered.jsonl") as f:
                 for line in f:
+                    k = _key(json.loads(line))
+                    if k in seen:
+                        dup += 1
+                        continue
+                    seen.add(k)
                     out.write(line)
                     kept += 1
-            stats = json.load(open(base + ".stats.json"))
+            stats = json.load(open(p[:-len(".jsonl")] + ".filtered.jsonl.stats.json"))
             for key, v in (stats.get("histogram") or {}).items():
                 hist[key] = hist.get(key, 0) + v
     total = sum(lines(p) for p in inputs)
-    json.dump({"prompts": total, "kept": kept, "histogram": hist}, open(dst + ".stats.json", "w"), indent=1)
-    print(f"merged {len(inputs)} shards: kept {kept}/{total} -> {dst}\nhistogram (n_correct: prompts): {hist}")
+    json.dump({"prompts": total, "unique_graded": len(graded), "kept": kept, "duplicates_skipped": dup,
+               "histogram_per_row": hist}, open(dst + ".stats.json", "w"), indent=1)
+    print(f"merged {len(inputs)} shards: kept {kept} unique of {total} rows ({dup} duplicate kept rows skipped) -> {dst}\n"
+          f"histogram (n_correct: rows): {hist}")
 
 
 if __name__ == "__main__":

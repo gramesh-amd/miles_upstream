@@ -58,7 +58,7 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 import requests
 
@@ -232,6 +232,8 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="first N prompts only (pilot); 0 = all")
     ap.add_argument("--request-timeout", type=float, default=7200)
     ap.add_argument("--server-wait", type=int, default=1800, help="seconds to wait for the engine")
+    ap.add_argument("--ramp-s", type=float, default=600,
+                    help="seconds over which prompts in flight rise from concurrency/16 to concurrency (0 = no ramp)")
     ap.add_argument("--max-consecutive-failures", type=int, default=32)
     ap.add_argument("--retry-backoff", type=float, default=20.0, help="seconds x attempt before a retry")
     ap.add_argument("--reset-cache", action="store_true")
@@ -312,12 +314,39 @@ def main():
             print(f"ABORT: {n_fail} consecutive prompts failed; rerun to resume from the cache", flush=True)
             os._exit(1)
 
+    # Ramp: a burst of CONCURRENCY x N requests onto a freshly started sglang server comes back
+    # degenerate (on Lux, ~97% of the first batch after every start scored 0/8 by failing the think
+    # gate, at 32-64 prompts in flight, while the same load was fine once warm). So the number of
+    # prompts in flight starts at 1/16 of --concurrency and rises linearly over --ramp-s seconds.
     t0 = time.time()
+    start_conc = max(1, args.concurrency // 16)
+
+    def allowed() -> int:
+        if args.ramp_s <= 0:
+            return args.concurrency
+        frac = min(1.0, (time.time() - t0) / args.ramp_s)
+        return max(start_conc, int(start_conc + (args.concurrency - start_conc) * frac))
+
+    graded = 0
+
+    def report(n_done: int) -> None:
+        nonlocal graded
+        for _ in range(n_done):
+            graded += 1
+            if graded % 50 == 0 or graded == len(todo):
+                rate = graded / max(time.time() - t0, 1e-9) * 3600
+                print(f"  graded {graded}/{len(todo)} ({rate:.0f} prompts/h, {allowed()} in flight)", flush=True)
+
     with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-        for k, _ in enumerate(ex.map(run_one, todo), 1):
-            if k % 50 == 0 or k == len(todo):
-                rate = k / max(time.time() - t0, 1e-9) * 3600
-                print(f"  graded {k}/{len(todo)} ({rate:.0f} prompts/h)", flush=True)
+        inflight = set()
+        for i in todo:
+            while len(inflight) >= allowed():
+                finished, inflight = wait(inflight, timeout=5, return_when=FIRST_COMPLETED)
+                report(len(finished))
+            inflight.add(ex.submit(run_one, i))
+        while inflight:
+            finished, inflight = wait(inflight, timeout=5, return_when=FIRST_COMPLETED)
+            report(len(finished))
     cache.close()
 
     missing = [i for i, k in enumerate(keys) if k not in done]

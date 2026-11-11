@@ -113,7 +113,7 @@ filter)
           --tokenizer "${HF_CKPT}" --max-new-tokens "${MAX_NEW_TOKENS}"
           --n "${N:-8}" --max-pass-rate "${MAX_PASS_RATE:-0.625}"
           --temperature "${TEMPERATURE:-1.0}" --concurrency "${CONCURRENCY:-16}"
-          --limit "${LIMIT:-0}" --server-wait "${SERVER_WAIT:-1800}")
+          --limit "${LIMIT:-0}" --server-wait "${SERVER_WAIT:-1800}" --ramp-s "${RAMP_S:-600}")
    [ "${DROP_UNSOLVED:-0}" = "1" ] && FARGS+=(--drop-unsolved)
    [ "${RESET_CACHE:-0}" = "1" ] && FARGS+=(--reset-cache)
    if [ "${TASK}" = "code" ]; then
