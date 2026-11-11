@@ -1,4 +1,5 @@
 import logging
+import os
 
 import torch
 
@@ -43,7 +44,14 @@ def define_step_key_metric_group(prefix: str, step_key: str) -> None:
     _manager.define_step_key_metric_group(prefix, step_key)
 
 
+# Logged with every metric group (e.g. rollout/slurm_job_id against rollout/step) so that a run
+# resumed across Slurm jobs shows where each job took over.
+_SLURM_JOB_ID = os.environ.get("SLURM_JOB_ID", "")
+
+
 def log(args, metrics, step_key: str):
+    if _SLURM_JOB_ID.isdigit() and "/" in step_key:
+        metrics = {**metrics, f"{step_key.rsplit('/', 1)[0]}/slurm_job_id": int(_SLURM_JOB_ID)}
     step = metrics.get(step_key)
     _manager.log(metrics, step=step, step_key=step_key)
 

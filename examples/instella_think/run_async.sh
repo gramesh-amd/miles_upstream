@@ -630,6 +630,14 @@ WANDB_ARGS=(
 if [ "${WANDB_RANDOM_SUFFIX:-1}" = "0" ]; then
    WANDB_ARGS+=(--disable-wandb-random-suffix)
 fi
+# One W&B run per training run, however many Slurm jobs it takes: the run id follows SAVE_TAG (the
+# run's identity, since it is also what --load resumes from), so a resumed job appends to the same
+# W&B run. miles logs <group>/slurm_job_id with every metric group to show where each job took
+# over. WANDB_RUN_ID overrides; WANDB_RUN_ID=none restores a new W&B run per launch.
+WANDB_RUN_ID="${WANDB_RUN_ID:-$(printf '%s' "${SAVE_TAG}" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-48)-$(printf '%s' "${SAVE_TAG}" | md5sum | cut -c1-8)}"
+if [ "${WANDB_RUN_ID}" != "none" ]; then
+   WANDB_ARGS+=(--wandb-run-id "${WANDB_RUN_ID}")
+fi
 
 # Resolved once so the value used for the flag and the value printed in the
 # ENABLE_DP_ATTENTION=0 message below cannot drift apart.

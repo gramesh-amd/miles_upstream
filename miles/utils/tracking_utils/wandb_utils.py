@@ -63,6 +63,11 @@ def init_wandb_primary(args):
         "name": run_name,
         "config": _compute_config_for_logging(args),
     }
+    # A fixed --wandb-run-id makes every launch of the same run (e.g. each job of a run that is
+    # resumed across Slurm jobs) append to one W&B run instead of creating a new one.
+    if getattr(args, "wandb_run_id", None):
+        init_kwargs["id"] = args.wandb_run_id
+        init_kwargs["resume"] = "allow"
 
     # Configure settings based on offline/online mode
     if offline:
