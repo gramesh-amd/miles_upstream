@@ -67,9 +67,22 @@ else
       PYTHONPATH="${PWD}:${MEGATRON_PATH}" python3 tools/convert_torch_dist_to_hf.py \
          --input-dir "${SRC}" --output-dir "${TMP}" --origin-hf-dir "${BASE_HF}" \
          > "${JOB_DIR}/convert.log" 2>&1 || fail "checkpoint conversion failed (see ${JOB_DIR}/convert.log)"
+      sync
       mv "${TMP}" "${EVAL_HF}" 2>/dev/null || { rm -rf "${TMP}"; say "another job converted it first"; }
       say "converted ($(grep -c . "${EVAL_HF}/model.safetensors.index.json") index lines)"
    fi
+   # Each shard must be as long as its header says. One engine of eval 408873 (2026-11-12) read a
+   # shard as truncated ("incomplete metadata") and the eval hung; the files themselves were whole.
+   python3 - "${EVAL_HF}" <<'EOF' || fail "converted checkpoint ${EVAL_HF} is incomplete; delete it to reconvert"
+import glob, json, os, struct, sys
+for f in sorted(glob.glob(os.path.join(sys.argv[1], "*.safetensors"))):
+    with open(f, "rb") as fh:
+        n = struct.unpack("<Q", fh.read(8))[0]
+        header = json.loads(fh.read(n))
+    end = max(v["data_offsets"][1] for k, v in header.items() if k != "__metadata__")
+    if 8 + n + end != os.path.getsize(f):
+        sys.exit(f"{f}: {os.path.getsize(f)} bytes, header says {8 + n + end}")
+EOF
 fi
 
 await "${JOB_DIR}/sandbox.ready" 900 "the reward sandbox (see ${JOB_DIR}/sandbox.log)"
@@ -105,9 +118,17 @@ log="$(grep -o 'log=[^ ]*' "${JOB_DIR}/launch.txt" | head -1 | cut -d= -f2)"
 [ -n "${pid}" ] || fail "no LAUNCHED pid in launch output"
 ln -sf "${log}" "${JOB_DIR}/run.log"
 say "run pid ${pid}, log ${log}"
+# An engine that dies while loading leaves the run waiting for it forever, so give up after
+# EVAL_TIMEOUT_S (a 4-node eval takes ~70 min with its 15 min ramp).
+waited=0
 until grep -q -E "^.*eval 0: \{" "${log}" 2>/dev/null; do
    kill -0 "${pid}" 2>/dev/null || fail "run ended before logging the eval (see ${log})"
-   sleep 30
+   if [ "${waited}" -ge "${EVAL_TIMEOUT_S:-10800}" ]; then
+      # Stopping the head releases the workers' blocking `ray start`, so the job ends.
+      ray stop --force >/dev/null 2>&1
+      fail "no eval result after ${EVAL_TIMEOUT_S:-10800} s (see ${log})"
+   fi
+   sleep 30; waited=$((waited + 30))
 done
 grep -o -E "eval 0: \{.*" "${log}" | head -1 > "${JOB_DIR}/eval_result.txt"
 echo "iter ${EVAL_STEP} of ${EVAL_SOURCE_DIR}: $(cat "${JOB_DIR}/eval_result.txt")" >> "${EVAL_SOURCE_DIR}/.evals.txt"
