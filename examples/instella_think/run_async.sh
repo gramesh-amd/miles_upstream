@@ -643,7 +643,8 @@ fi
 # resumed run by launch (cluster/lux/wandb_segment_view.py).
 if [ "${DRY_RUN:-0}" != "1" ]; then
    mkdir -p "${SAVE_DIR}"
-   MILES_SEGMENT=$(( $(cat "${SAVE_DIR}/.segments" 2>/dev/null | wc -l) + 1 ))
+   # (set -eo pipefail: a missing file must not fail the pipeline on a run's first launch)
+   MILES_SEGMENT=$(( $( [ -f "${SAVE_DIR}/.segments" ] && wc -l < "${SAVE_DIR}/.segments" || echo 0) + 1 ))
    echo "${MILES_SEGMENT} $(date -Iseconds) slurm_job=${SLURM_JOB_ID:-none} host=$(hostname -s)" >> "${SAVE_DIR}/.segments"
 fi
 
