@@ -15,6 +15,13 @@
 # MLA_UNFUSED_ROPE=1 every probe came back 100% correct (2026-11-12, jobs 409249/409283/409301,
 # scripts in $LUX_ROOT/shared/diag/prefill_*). The triton extend kernel itself matches a torch
 # reference for Lq=544 (kernel_test.py), so the fault is in the fused aiter path.
+#
+# Cause: sglang unpacks the fused kernel as `q, _, _, k = fused_qk_rope_cat_and_cache_mla(...)`,
+# but this container's aiter (7d604afe, June 2026) returns (q_out, decode_q_pe_out, k_pe_out,
+# q_nope_zeros_out), and the 4th is torch.empty((num_decode_toks_for_zeros=0, heads, 512)). The
+# empty k then hits the overlay's `if k.shape[0] == 0: o.zero_(); return o` guard in
+# triton_backend.forward_extend, so every absorbed-MLA prefill gets zero attention output in every
+# layer. Decode reads K from the cache, which the kernel does write correctly, so it is unaffected.
 set -euo pipefail
 
 python3 - <<'PY'
