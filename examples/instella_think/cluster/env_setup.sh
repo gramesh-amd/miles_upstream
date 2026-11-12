@@ -35,6 +35,8 @@ say "python=$(python3 -V 2>&1)  torch=$(python3 -c 'import torch; print(torch.__
 
 # 1. sglang FarSkip overlay (sglang in the container).
 step "setup_farskip.sh" bash "${INSTELLA_DIR}/setup_farskip.sh"
+# 1b. Opt-in workaround for aiter's fused MLA rope kernel corrupting prefill (MLA_UNFUSED_ROPE=1).
+step "patch_sglang_mla_rope.sh" bash "${INSTELLA_DIR}/patch_sglang_mla_rope.sh"
 # 2. Megatron import shims (writes into MEGATRON_PATH on NFS).
 step "patch_megatron_compat.sh" bash "${INSTELLA_DIR}/patch_megatron_compat.sh"
 # 2b. Routing-replay hooks (USE_ROUTING_REPLAY=1, the run_code.sh / run_if.sh default).

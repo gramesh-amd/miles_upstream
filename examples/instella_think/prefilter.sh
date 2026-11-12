@@ -80,6 +80,9 @@ serve)
    export FARSKIP_REFERENCE_DECODER_LAYER=1
    export SGLANG_USE_AITER="${SGLANG_USE_AITER:-1}"
    export SGLANG_ROCM_FUSED_DECODE_MLA=0
+   # aiter's fused MLA rope kernel corrupts prefill batches that run absorbed MLA (bursts, split
+   # prompts); see patch_sglang_mla_rope.sh. The prefilter has no run to stay comparable with.
+   export MLA_UNFUSED_ROPE="${MLA_UNFUSED_ROPE:-1}"
    export GPU_MAX_HW_QUEUES=8
    export PYTORCH_ALLOC_CONF=expandable_segments:True
    export SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION="${CONTEXT_LEN}"

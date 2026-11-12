@@ -894,6 +894,15 @@ echo "RAY_ADDRESS=${RAY_ADDRESS}  MASTER_ADDR=${MASTER_ADDR}  SINGLE_NODE=${SING
 # 1-node smoke logged rollout/repetition_frac 0.0 on every cycle, so it has not appeared in
 # training. repetition_frac is the canary: if it lifts off zero, come back to this.
 SGLANG_USE_AITER="${SGLANG_USE_AITER:-1}"
+# MLA_UNFUSED_ROPE=1 works around a corruption with aiter=1 on gfx950: any prefill batch that runs
+# absorbed MLA (one holding a chunked-prefill continuation, i.e. several requests arriving
+# together or a prompt split across 2048-token chunks) comes out as gibberish or BOS spam -- very
+# likely the BOS-spam caveat above. See patch_sglang_mla_rope.sh. Default 0 so a run in progress
+# keeps its engine path; new runs should set it.
+if [ "${MLA_UNFUSED_ROPE:-0}" = "1" ] && ! python3 -c "import sys, sglang.srt.models.deepseek_common.attention_forward_methods.forward_mla as m; sys.exit('MLA_UNFUSED_ROPE' not in open(m.__file__).read())" 2>/dev/null; then
+   echo "FATAL: MLA_UNFUSED_ROPE=1 but sglang's forward_mla.py is not patched (run patch_sglang_mla_rope.sh)" >&2
+   exit 1
+fi
 # Kernel serialization: DEBUG_KERNEL_SERIALIZE=1 pins the true faulting kernel for
 # ROCm async memory faults (adds HIP_LAUNCH_BLOCKING + AMD_SERIALIZE_*). Slow; smoke only.
 if [ "${DEBUG_KERNEL_SERIALIZE:-0}" = "1" ]; then
@@ -965,6 +974,7 @@ RUNTIME_ENV_JSON="{
     \"SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN\": \"${SGLANG_LONG_CONTEXT}\",
     \"SGLANG_USE_AITER\": \"${SGLANG_USE_AITER}\",
     \"SGLANG_ROCM_FUSED_DECODE_MLA\": \"0\",
+    \"MLA_UNFUSED_ROPE\": \"${MLA_UNFUSED_ROPE:-0}\",
     \"GPU_MAX_HW_QUEUES\": \"8\",
     \"IF_REWARD_SCALE\": \"${IF_REWARD_SCALE:-1.0}\",
     \"IF_PARTIAL_CREDIT\": \"${IF_PARTIAL_CREDIT:-1}\",
