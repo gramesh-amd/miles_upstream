@@ -32,6 +32,23 @@ await() {  # <file> <timeout_s> <what>
    done
 }
 
+# Each shard must be as long as its header says. Engines have read a freshly converted shard as
+# truncated on a node other than the one that wrote it (evals 408873 and 409375, 2026-11-12: an
+# 8 MB view of a 5.4 GB file) and the eval hung, though the files were whole. So the head checks
+# after converting, and each worker re-checks (and waits) before it joins.
+check_shards() {
+   python3 - "$1" <<'EOF'
+import glob, json, os, struct, sys
+for f in sorted(glob.glob(os.path.join(sys.argv[1], "*.safetensors"))):
+    with open(f, "rb") as fh:
+        n = struct.unpack("<Q", fh.read(8))[0]
+        header = json.loads(fh.read(n))
+    end = max(v["data_offsets"][1] for k, v in header.items() if k != "__metadata__")
+    if 8 + n + end != os.path.getsize(f):
+        sys.exit(f"{f}: {os.path.getsize(f)} bytes, header says {8 + n + end}")
+EOF
+}
+
 # --- 1. per-container setup, as run_in_container.sh ----------------------------------------
 sleep $(( NODE_RANK * 20 ))
 pip install -q -e "${MEGATRON_PATH}" --no-deps --no-build-isolation 2>&1 | grep -v "notice" || true
@@ -41,6 +58,13 @@ touch "${JOB_DIR}/setup.${HOST}"
 # --- 2a. Ray workers -----------------------------------------------------------------------
 if [ "${NODE_RANK}" != 0 ]; then
    await "${JOB_DIR}/head_ip" 3600 "the Ray head"
+   EVAL_HF="$(cat "${JOB_DIR}/eval_hf")"
+   waited=0
+   until check_shards "${EVAL_HF}"; do
+      [ "${waited}" -ge 900 ] && fail "${EVAL_HF} still looks incomplete from ${HOST} after 900 s"
+      sleep 15; waited=$((waited + 15))
+   done
+   [ "${waited}" -gt 0 ] && say "shards of ${EVAL_HF} complete after ${waited} s"
    say "joining Ray head $(cat "${JOB_DIR}/head_ip")"
    ray start --address="$(cat "${JOB_DIR}/head_ip"):6379" --num-gpus 8 --disable-usage-stats --block
    say "Ray worker exited"
@@ -71,18 +95,7 @@ else
       mv "${TMP}" "${EVAL_HF}" 2>/dev/null || { rm -rf "${TMP}"; say "another job converted it first"; }
       say "converted ($(grep -c . "${EVAL_HF}/model.safetensors.index.json") index lines)"
    fi
-   # Each shard must be as long as its header says. One engine of eval 408873 (2026-11-12) read a
-   # shard as truncated ("incomplete metadata") and the eval hung; the files themselves were whole.
-   python3 - "${EVAL_HF}" <<'EOF' || fail "converted checkpoint ${EVAL_HF} is incomplete; delete it to reconvert"
-import glob, json, os, struct, sys
-for f in sorted(glob.glob(os.path.join(sys.argv[1], "*.safetensors"))):
-    with open(f, "rb") as fh:
-        n = struct.unpack("<Q", fh.read(8))[0]
-        header = json.loads(fh.read(n))
-    end = max(v["data_offsets"][1] for k, v in header.items() if k != "__metadata__")
-    if 8 + n + end != os.path.getsize(f):
-        sys.exit(f"{f}: {os.path.getsize(f)} bytes, header says {8 + n + end}")
-EOF
+   check_shards "${EVAL_HF}" || fail "converted checkpoint ${EVAL_HF} is incomplete; delete it to reconvert"
 fi
 
 await "${JOB_DIR}/sandbox.ready" 900 "the reward sandbox (see ${JOB_DIR}/sandbox.log)"
@@ -94,6 +107,7 @@ export CODE_BENCH_API_URL="http://$(cat "${JOB_DIR}/sandbox-bench.ready"):${CODE
 ray stop --force >/dev/null 2>&1 || true
 ray start --head --node-ip-address="${NODE_IP}" --port=6379 --num-gpus 8 \
    --dashboard-host=0.0.0.0 --dashboard-port=8265 --disable-usage-stats || fail "ray start --head failed"
+echo "${EVAL_HF}" > "${JOB_DIR}/eval_hf"
 echo "${NODE_IP}" > "${JOB_DIR}/head_ip"
 waited=0
 until [ "$(python3 -c 'import ray; ray.init(address="auto", logging_level="ERROR"); print(int(ray.cluster_resources().get("GPU", 0)))' 2>/dev/null)" = "$(( GPU_NODE_COUNT * 8 ))" ]; do
@@ -123,6 +137,10 @@ say "run pid ${pid}, log ${log}"
 waited=0
 until grep -q -E "^.*eval 0: \{" "${log}" 2>/dev/null; do
    kill -0 "${pid}" 2>/dev/null || fail "run ended before logging the eval (see ${log})"
+   if grep -q "Scheduler hit an exception" "${log}" 2>/dev/null; then
+      ray stop --force >/dev/null 2>&1
+      fail "an sglang engine died (see 'Scheduler hit an exception' in ${log})"
+   fi
    if [ "${waited}" -ge "${EVAL_TIMEOUT_S:-10800}" ]; then
       # Stopping the head releases the workers' blocking `ray start`, so the job ends.
       ray stop --force >/dev/null 2>&1
