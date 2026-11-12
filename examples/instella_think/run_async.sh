@@ -638,6 +638,14 @@ WANDB_RUN_ID="${WANDB_RUN_ID:-$(printf '%s' "${SAVE_TAG}" | tr -c 'A-Za-z0-9_-' 
 if [ "${WANDB_RUN_ID}" != "none" ]; then
    WANDB_ARGS+=(--wandb-run-id "${WANDB_RUN_ID}")
 fi
+# Segment: one per launch of this run (a new Slurm job, or the next run in a held job), counted in
+# SAVE_DIR/.segments and logged as <group>/segment with every metric, so W&B charts can colour a
+# resumed run by launch (cluster/lux/wandb_segment_view.py).
+if [ "${DRY_RUN:-0}" != "1" ]; then
+   mkdir -p "${SAVE_DIR}"
+   MILES_SEGMENT=$(( $(cat "${SAVE_DIR}/.segments" 2>/dev/null | wc -l) + 1 ))
+   echo "${MILES_SEGMENT} $(date -Iseconds) slurm_job=${SLURM_JOB_ID:-none} host=$(hostname -s)" >> "${SAVE_DIR}/.segments"
+fi
 
 # Resolved once so the value used for the flag and the value printed in the
 # ENABLE_DP_ATTENTION=0 message below cannot drift apart.
@@ -941,6 +949,7 @@ fi
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"${MEGATRON_PATH}:${FULLY_ASYNC_DIR}:${INSTELLA_DIR}\",
+    \"MILES_SEGMENT\": \"${MILES_SEGMENT:-}\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
     \"MASTER_ADDR\": \"${MASTER_ADDR}\",

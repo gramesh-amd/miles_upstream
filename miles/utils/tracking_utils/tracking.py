@@ -45,13 +45,19 @@ def define_step_key_metric_group(prefix: str, step_key: str) -> None:
 
 
 # Logged with every metric group (e.g. rollout/slurm_job_id against rollout/step) so that a run
-# resumed across Slurm jobs shows where each job took over.
-_SLURM_JOB_ID = os.environ.get("SLURM_JOB_ID", "")
+# resumed across Slurm jobs shows where each job took over: the Slurm job id, and the launcher's
+# segment number (MILES_SEGMENT, one per launch, so it also separates runs within one job).
+_RUN_MARKERS = {
+    name: int(value)
+    for name, value in (("slurm_job_id", os.environ.get("SLURM_JOB_ID", "")), ("segment", os.environ.get("MILES_SEGMENT", "")))
+    if value.isdigit()
+}
 
 
 def log(args, metrics, step_key: str):
-    if _SLURM_JOB_ID.isdigit() and "/" in step_key:
-        metrics = {**metrics, f"{step_key.rsplit('/', 1)[0]}/slurm_job_id": int(_SLURM_JOB_ID)}
+    if _RUN_MARKERS and "/" in step_key:
+        prefix = step_key.rsplit("/", 1)[0]
+        metrics = {**metrics, **{f"{prefix}/{name}": value for name, value in _RUN_MARKERS.items()}}
     step = metrics.get(step_key)
     _manager.log(metrics, step=step, step_key=step_key)
 
