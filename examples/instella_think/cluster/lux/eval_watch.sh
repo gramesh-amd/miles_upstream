@@ -30,9 +30,14 @@ for d in "${SAVE_DIR}"/iter_*; do
    step=$((10#${d##*iter_}))
    [ "${step}" -le "${latest}" ] || continue        # still being written
    [ -e "${MARKS}/${step}" ] && continue
+   # Engine cap: 256 per engine (32/GPU) unless the spec sets one. At 64/GPU, sustained full load
+   # crashed every prefilter server within ~35 min (HSA_STATUS_ERROR_EXCEPTION); 32/GPU plus the
+   # eval request ramp (EVAL_RAMP_S) scored the same as 16/GPU (v5 iter 599, 2026-11-11).
+   cap=SGLANG_MAX_RUNNING_REQUESTS=256
+   for kv in "$@"; do case "${kv}" in SGLANG_MAX_RUNNING_REQUESTS=*) cap="${kv}" ;; esac; done
    # The training spec's sandbox sizing favours rewards; an eval job grades benchmarks.
    job="$(cd "${LUX_DIR}/../../../.." && sbatch --parsable -A "${LUX_ACCOUNT}" -N "${EVAL_NODES}" -t "${EVAL_HOURS}:00:00" \
-      -J instella-eval -o "${LUX_HOME}/logs/%x-%j.out" "${LUX_DIR}/run.sbatch" "$@" \
+      -J instella-eval -o "${LUX_HOME}/logs/%x-%j.out" "${LUX_DIR}/run.sbatch" "$@" "${cap}" \
       CODE_EXEC_WORKERS=8 CODE_BENCH_WORKERS=112 EVAL_ONLY=1 EVAL_STEP="${step}" EVAL_SOURCE_DIR="${SAVE_DIR}")" \
       || { echo "sbatch failed for iter ${step}"; continue; }
    echo "${job}" > "${MARKS}/${step}"
