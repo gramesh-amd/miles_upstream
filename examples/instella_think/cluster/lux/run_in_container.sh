@@ -107,6 +107,22 @@ stop_ray() {  # stops the run's Ray jobs and the cluster (workers wait for the n
    sleep 15
 }
 
+# A stop must not land mid-checkpoint: Megatron writes iter_N first and points
+# latest_checkpointed_iteration.txt at it last, so a run stopped in between loses that save (the
+# segment test's release did, and the next launch resumed two steps back). Wait up to 10 min.
+wait_for_save() {
+   local dir newest latest waited=0
+   dir="$(source "${SPEC}"; echo "${SAVE_DIR:-${CKPT_ROOT}/Instella-MoE-16B-A3B-DPO_${SAVE_TAG:-}}")"
+   while [ "${waited}" -lt 600 ]; do
+      newest="$(ls -d "${dir}"/iter_* 2>/dev/null | sort | tail -1 | grep -o '[0-9]*$')"
+      latest="$(cat "${dir}/latest_checkpointed_iteration.txt" 2>/dev/null)"
+      [ -z "${newest}" ] || [ "$((10#${newest}))" = "${latest}" ] && return 0
+      [ "${waited}" = 0 ] && say "waiting for the checkpoint save of iter $((10#${newest})) to finish"
+      sleep 10; waited=$((waited + 10))
+   done
+   say "checkpoint save still unfinished after 600 s; stopping anyway"
+}
+
 release() {
    touch "${JOB_DIR}/released"
    stop_ray
@@ -170,6 +186,7 @@ while true; do
       while kill -0 "${pid}" 2>/dev/null; do
          if [ -e "${JOB_DIR}/stop.request" ]; then
             say "stop requested; stopping the run"
+            wait_for_save
             stopped=1
             stop_ray
             for _ in $(seq 1 60); do kill -0 "${pid}" 2>/dev/null || break; sleep 5; done
