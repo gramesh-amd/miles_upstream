@@ -6,6 +6,7 @@ Implements the API the Instella reward client already speaks:
     POST <prefix>/test_program        {"program", "tests": [str], "max_execution_time"}
     POST <prefix>/test_program_stdio  {"program", "tests": [{"input","output"}], "max_execution_time"}
     POST <prefix>/test_program_call   {"program", "tests": [{"input","output"}], "fn_name", ...}
+    POST <prefix>/test_program_checker {"program", "tests": [{"input","output"}], "checker"?, ...}
         -> {"results": [0|1, ...]}   one entry per test, in order
     GET  <prefix>/health              -> {"ok": true, ...}
 
@@ -15,6 +16,11 @@ Optional request fields, used by the benchmark evals (prepare_code_benchmarks.py
     "name": the program's __name__ (default "__main__")
 /test_program_call follows LiveCodeBench's call-based grading: the program is imported as
 a module and fn_name (on Solution() if the code defines it) is called per test.
+/test_program_checker follows open-r1's Codeforces judge (piston packages/codeforces run):
+blank lines are dropped from both outputs; with a "checker" (Python source), it runs as
+`checker.py input.txt correct_output.txt solution_output.txt` under the same guard and the
+test passes iff it exits 0 printing 1 or 100; without one, outputs are compared token by token
+with yes/no case-insensitive.
 
 Standard library only, so it runs on a bare CPU host (python3 >= 3.8).
 
@@ -41,6 +47,7 @@ import collections
 import functools
 import json
 import os
+import re
 import resource
 import secrets
 import shutil
@@ -109,13 +116,14 @@ del _hook
 _prog = sys.argv[1]
 with open(_prog) as _f:
     _src = _f.read()
-sys.argv = [_prog]
+sys.argv = [_prog] + sys.argv[2:]
 _code = compile(_src, "solution.py", "exec")
 _g = {"__name__": os.environ.get("CODE_EXEC_NAME", "__main__"), "__file__": "solution.py",
       "__builtins__": builtins}
 exec(_code, _g)
 '''
 
+_TLS = threading.local()
 STATS_LOCK = threading.Lock()
 STATS = {"requests": 0, "tests": 0, "passed": 0, "timeouts": 0, "errors": 0, "busy_s": 0.0}
 
@@ -142,6 +150,20 @@ def _lines_equal_with_decimal(a: str, b: str) -> bool:
         except (InvalidOperation, ValueError):
             return False
     return True
+
+
+_YES_NO_RE = re.compile(r"\b(yes|no)\b", re.IGNORECASE)
+
+
+def _drop_blank_lines(s: str) -> str:
+    return "".join(ln + "\n" for ln in s.replace("\r", "").split("\n") if ln != "")
+
+
+def cf_tokens_equal(out: str, expected: str) -> bool:
+    """piston's Codeforces diff: whitespace-insensitive, YES/NO case-insensitive."""
+    def norm(s):
+        return _YES_NO_RE.sub(lambda m: m.group(1).upper(), s.replace("\r", "")).split()
+    return norm(out) == norm(expected)
 
 
 class Runner:
@@ -182,10 +204,17 @@ class Runner:
 
         return apply
 
-    def run_one(self, program: str, stdin: str, timeout: float, name: str = "__main__", case=None):
+    def run_one(self, program: str, stdin: str, timeout: float, name: str = "__main__", case=None,
+                files=None, args=()):
         """Returns (returncode or None on timeout, stdout). `name` is the program's
-        __name__; `case`, if given, is written to _case.json beside it."""
+        __name__; `case`, if given, is written to _case.json beside it; `files` maps
+        file names to contents written beside it; `args` follow it on the command line."""
         with self.sem:
+            # A stop_on_fail request's tests queue here together; once one has failed, the
+            # rest skip instead of running.
+            failed = getattr(_TLS, "failed", None)
+            if failed is not None and failed.is_set():
+                return -1, ""
             t0 = time.monotonic()
             d = tempfile.mkdtemp(prefix="t-", dir=self.scratch_root)
             try:
@@ -195,9 +224,12 @@ class Runner:
                 if case is not None:
                     with open(os.path.join(d, "_case.json"), "w") as f:
                         json.dump(case, f)
+                for fname, content in (files or {}).items():
+                    with open(os.path.join(d, fname), "w") as f:
+                        f.write(content)
                 env = dict(self.env, HOME=d, TMPDIR=d, CODE_EXEC_SCRATCH=d, CODE_EXEC_NAME=name)
                 p = subprocess.Popen(
-                    [self.python, "-I", self.guard, prog],
+                    [self.python, "-I", self.guard, prog, *args],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     cwd=d, env=env, preexec_fn=self._limits(timeout), close_fds=True,
                 )
@@ -235,7 +267,11 @@ class Runner:
         def guarded(tc):
             if failed.is_set():
                 return 0
-            r = one(tc)
+            _TLS.failed = failed
+            try:
+                r = one(tc)
+            finally:
+                _TLS.failed = None
             if not r:
                 failed.set()
             return r
@@ -272,6 +308,29 @@ class Runner:
             return 1 if rc == 0 else 0
 
         return self._map(one, tests, stop_on_fail)
+
+    def judge_output(self, out, tc, checker=None):
+        """open-r1 / piston Codeforces verdict for a program's stdout on one test."""
+        if not checker:
+            return 1 if cf_tokens_equal(out, str(tc.get("output", ""))) else 0
+        files = {"input.txt": str(tc.get("input", "")).replace("\r", ""),
+                 "correct_output.txt": _drop_blank_lines(str(tc.get("output", ""))),
+                 "solution_output.txt": _drop_blank_lines(out)}
+        rc, verdict = self.run_one(checker, "", CHECKER_TIMEOUT, files=files,
+                                   args=("input.txt", "correct_output.txt", "solution_output.txt"))
+        return 1 if rc == 0 and "".join(verdict.split()) in ("1", "100") else 0
+
+    def checker_tests(self, program, tests, timeout, checker=None, stop_on_fail=False):
+        def one(tc):
+            if not isinstance(tc, dict):
+                return 0
+            rc, out = self.run_one(program, str(tc.get("input", "")), timeout)
+            return self.judge_output(out, tc, checker) if rc == 0 else 0
+
+        return self._map(one, tests, stop_on_fail)
+
+
+CHECKER_TIMEOUT = 10.0  # piston runs checker.py under `timeout 10`
 
 
 # Appended to call-based programs. Names are dunder-prefixed so the solution's own
@@ -358,7 +417,7 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
 
         def do_POST(self):
             route = self._route()
-            if route not in ("/test_program", "/test_program_stdio", "/test_program_call"):
+            if route not in ("/test_program", "/test_program_stdio", "/test_program_call", "/test_program_checker"):
                 return self._send(404, {"error": "not found"})
             try:
                 n = int(self.headers.get("Content-Length", "0"))
@@ -382,6 +441,9 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
                 name = req.get("name", "__main__")
                 if not (isinstance(name, str) and name.isidentifier()):
                     raise ValueError("name must be an identifier")
+                checker = req.get("checker") or None
+                if checker is not None and not isinstance(checker, str):
+                    raise ValueError("checker must be Python source")
             except (OSError, ValueError, KeyError, TypeError) as e:
                 return self._send(400, {"error": f"bad request: {e}"})
             total = len(tests)
@@ -392,6 +454,8 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
                 res = runner.assert_tests(program, [str(t) for t in tests], timeout, name, stop_on_fail)
             elif route == "/test_program_stdio":
                 res = runner.stdio_tests(program, tests, timeout, stop_on_fail)
+            elif route == "/test_program_checker":
+                res = runner.checker_tests(program, tests, timeout, checker, stop_on_fail)
             else:
                 res = runner.call_tests(program, tests, timeout, fn_name, stop_on_fail)
             _bump(requests=1, tests=len(res), passed=sum(res))

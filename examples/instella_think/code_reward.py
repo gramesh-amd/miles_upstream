@@ -26,6 +26,7 @@ line every CODE_LOG_EVERY samples:
 api_error must stay at 0; if it is not, the reward is measuring the network.
 """
 
+import ast
 import asyncio
 import json
 import logging
@@ -272,7 +273,60 @@ def _bench_answer(response: str) -> str:
     return _SPECIAL_TOKEN_RE.sub("", answer)
 
 
-def _bench_code(answer: str, style: str) -> str:
+_CRUX_ANSWER_RE = re.compile(r"(?s)\[ANSWER\](.*?)\[/ANSWER\]")
+# Calls a CRUXEval-O literal may contain; anything else (f(...), sys.exit(0), ...) is not a
+# literal and would let the prediction run code ahead of the assert.
+_CRUX_LITERAL_CALLS = {"set", "frozenset", "tuple", "list", "dict", "str", "int", "float", "bool",
+                       "bytes", "complex", "range"}
+
+
+def _crux_assert(text: str):
+    """The last `assert ...` statement (or bare expression) in text, as (module, node)."""
+    text = re.sub(r"(?m)^\s*```(?:python|py)?\s*$", "", text).strip()
+    for cand in (text, *reversed([ln.strip() for ln in text.splitlines() if ln.strip()])):
+        try:
+            tree = ast.parse(cand)
+        except (SyntaxError, ValueError):
+            continue
+        stmts = [s for s in tree.body if isinstance(s, (ast.Assert, ast.Expr))]
+        if stmts:
+            return cand, stmts[-1]
+    return None, None
+
+
+def _crux_pred(answer: str, mode: str) -> str:
+    """CRUXEval: the predicted output literal (mode "o") or the f(...) call (mode "i") from
+    the last [ANSWER]...[/ANSWER] (else the last `assert` line), as `__pred = (...)`.
+    cruxeval itself splits the assertion on "=="; parsing it keeps "==" inside strings intact."""
+    found = _CRUX_ANSWER_RE.findall(answer)
+    if found:
+        text = found[-1]
+    else:
+        lines = [ln for ln in answer.splitlines() if ln.strip().startswith("assert")]
+        if not lines:
+            return ""
+        text = lines[-1]
+    src, node = _crux_assert(text)
+    if node is None:
+        return ""
+    expr = node.test if isinstance(node, ast.Assert) else node.value
+    if isinstance(expr, ast.Compare) and len(expr.ops) == 1 and isinstance(expr.ops[0], ast.Eq):
+        expr = expr.comparators[0] if mode == "o" else expr.left
+    if mode == "o":
+        for n in ast.walk(expr):
+            if isinstance(n, ast.Call) and not (isinstance(n.func, ast.Name) and n.func.id in _CRUX_LITERAL_CALLS):
+                return ""
+            if isinstance(n, (ast.Lambda, ast.NamedExpr, ast.Await, ast.Yield, ast.YieldFrom)):
+                return ""
+    elif not (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id == "f"):
+        return ""
+    seg = ast.get_source_segment(src, expr)
+    return f"__pred = ({seg})\n" if seg else ""
+
+
+def _bench_code(answer: str, style: str, label: dict | None = None) -> str:
+    if style == "crux":
+        return _crux_pred(answer, (label or {}).get("crux_mode", "o"))
     if style == "lcb":
         # lcb_runner extract_code (OpenAIChat style): lines between the last two ``` lines
         lines = answer.split("\n")
@@ -298,11 +352,13 @@ def bench_pass(code: str, label: dict) -> bool | None:
         path, n_tests = "/test_program", 1
         body.update(tests=[label["test"]], name="tmp_sol")
     else:
-        path = "/test_program_call" if route == "call" else "/test_program_stdio"
+        path = {"call": "/test_program_call", "checker": "/test_program_checker"}.get(route, "/test_program_stdio")
         n_tests = int(label["n_tests"])
         body["tests_ref"] = label["tests_ref"]
         if route == "call":
             body["fn_name"] = label["fn_name"]
+        if route == "checker" and label.get("checker"):
+            body["checker"] = label["checker"]
     if _LOCAL or not _BENCH_API_URL:
         return None
     res = _post(_BENCH_API_URL, path, body, n_tests, min(3600.0, (timeout + 1.0) * n_tests + 60.0))
@@ -310,7 +366,7 @@ def bench_pass(code: str, label: dict) -> bool | None:
 
 
 def _score_bench(response: str, label: dict) -> float:
-    code = _bench_code(_bench_answer(response), label.get("extract", "olmes"))
+    code = _bench_code(_bench_answer(response), label.get("extract", "olmes"), label)
     if not code.strip():
         STATS.note("no_code")
         STATS.note_sample(0.0, False)

@@ -60,8 +60,11 @@ export PROMPT_DATA="${PROMPT_DATA:-${CODE_TRAIN}}"
 # Eval: OLMo 3's code benchmarks (prepare_code_benchmarks.py builds them; `cluster/code_exec.sh
 # start bench` serves their tests). Sampling is OLMo 3 Think's (arXiv 2512.13961 Table 16):
 # 10 samples, temperature 0.6, top_p 0.95, 32768 tokens, so eval/<set> is their pass@1.
+# Other sets (README "More benchmarks"): lcb_v5 lcb_v6 lcb_v6_strict humanevalpro mbpppro
+# cruxeval_o cruxeval_i codeforces. CODE_BENCH_N_SETS="lcb_v5=16 lcb_v6=16" overrides n per set.
 CODE_BENCH_SETS="${CODE_BENCH_SETS:-humanevalplus mbppplus lcb_v3}"
 CODE_BENCH_N="${CODE_BENCH_N:-10}"
+CODE_BENCH_N_SETS="${CODE_BENCH_N_SETS:-}"
 CODE_BENCH_MAX_LEN="${CODE_BENCH_MAX_LEN:-32768}"
 for s in ${CODE_BENCH_SETS}; do
    [ -s "${CODE_BENCH_DIR}/${s}.jsonl" ] || {
@@ -81,7 +84,9 @@ if [ -z "${EVAL_CONFIG:-}" ]; then
       echo "eval:"
       echo "  datasets:"
       for s in ${CODE_BENCH_SETS}; do
-         echo "    - {name: ${s}, path: ${CODE_BENCH_DIR}/${s}.jsonl, n_samples_per_eval_prompt: ${CODE_BENCH_N},"
+         _n="${CODE_BENCH_N}"
+         for kv in ${CODE_BENCH_N_SETS}; do [ "${kv%%=*}" = "${s}" ] && _n="${kv#*=}"; done
+         echo "    - {name: ${s}, path: ${CODE_BENCH_DIR}/${s}.jsonl, n_samples_per_eval_prompt: ${_n},"
          echo "       temperature: 0.6, top_p: 0.95, top_k: -1, max_response_len: ${CODE_BENCH_MAX_LEN}}"
       done
    } > "${EVAL_CONFIG}"

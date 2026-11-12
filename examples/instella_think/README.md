@@ -16,7 +16,8 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `code_reward.py` | The code reward (`--custom-rm-path code_reward.batched_reward`). Pass rate while training, all-or-nothing at eval. Self-tests with `python3 code_reward.py` (needs the sandbox). |
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
-| `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol. |
+| `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol, plus LCB v5/v6, HumanEval/MBPP Pro, CRUXEval and Codeforces. |
+| `validate_code_benchmarks.py` | Grades reference / always-wrong answers and old eval dumps against the bench sandbox. |
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`). |
 | `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
 | `model_args.sh` | `MODEL_ARGS=(...)` + `MOE_LAYER_FREQ` (layer 0 dense, 1–26 MoE). MLA + `--gated-attention` + `--use-simple-farskip-layer`. **No `--spec`** (this Megatron forbids it for MoE; FarSkip is config-driven). |
@@ -236,6 +237,46 @@ the practical in-training setting. Keep `CODE_BENCH_N=10` for reported numbers, 
 saved checkpoints. `CODE_BENCH_SETS` picks a subset. Watch `cluster/code_exec.sh status bench`: it
 shares the CPU host with the training sandbox, and if `timeouts` climb, CPU contention is
 failing correct LiveCodeBench solutions (6 s per test).
+
+### More benchmarks (what recent reasoning-model reports use)
+
+`prepare_code_benchmarks.py` also builds these (`--sets ...`; Codeforces only with
+`--codeforces`). Pick them with `CODE_BENCH_SETS`, and per-set sample counts with
+`CODE_BENCH_N_SETS="lcb_v5=16 lcb_v6=16"`:
+
+| set | rows | source (pinned) | route / extract | notes |
+|---|---|---|---|---|
+| `lcb_v5` | 279 | LCB release_v5, 2024-08-01 <= date < 2025-02-01 | stdio, call / lcb | the "LCB v5 (2408-2502)" of DeepSeek-R1, AceReason, MiMo, DeepCoder |
+| `lcb_v6` | 175 | LCB test6.jsonl (2025-01-04 .. 04-06) | stdio, call / lcb | the "LCB v6 (2502-2505)" of AceReason, MiMo, Qwen3-2507 |
+| `lcb_v6_strict` | 131 | test6, date >= 2025-02-01 | stdio, call / lcb | shares `tests/lcb_v6` |
+| `humanevalpro` / `mbpppro` | 164 / 378 | CodeEval-Pro (self-invoking) | script / olmes | answer must define both functions |
+| `cruxeval_o` / `cruxeval_i` | 800 / 800 | cruxeval-org/cruxeval | script / crux | `[ANSWER]assert f(..) == ..[/ANSWER]`; O must be a literal |
+| `codeforces` | 422 | open-r1/codeforces `verifiable` test (2024-08 .. 2025-02) | checker / lcb | 45 with a checker; `metadata.rating` for buckets |
+
+LCB v5/v6 reuse lcb_v3's prompt, extraction, prefix and 6 s/test timeout; `lcb_v3` itself is
+byte-identical to before. Their tests add ~3.8 GB under `tests/` (v5 3.5 GB, v6 0.3 GB).
+CRUXEval is graded like cruxeval's `assert <gold> == <prediction>`, the prediction taken from
+the last `[ANSWER]` block (else the last `assert` line); output predictions with calls other than
+builtin constructors (`set()`, `tuple()`...) score 0.
+
+Codeforces is judged like open-r1 (piston): token diff with YES/NO case-insensitive, or the
+dataset's `generated_checker` run as `checker.py input correct output` (pass = exit 0 and prints
+1/100), on route `/test_program_checker`, so **restart the bench sandbox** after updating
+`code_exec_server.py`. Python gets `min(20, max(6, 3 x time limit))` seconds per test. Tests are
+the R1-generated hard tests then the official ones, at most 64, dropping tests over 8 MB and the
+largest ones beyond 64 MB per problem: 10,094 of 11,334 tests kept, 98 problems lose some
+(`metadata.tests_dropped`); ~8.3 GB. Dropping the largest inputs makes Codeforces somewhat
+lenient on Python time limits. Rows keep the LiveCodeBench system prompt and stdin instructions. Report pass@1 by rating
+bucket; it is not an Elo.
+
+Both LCB and Codeforces test files are parsed whole and cached by the sandbox
+(`CODE_EXEC_TESTS_CACHE` files, default 256). With LCB v3+v5+v6 (1,066 files) plus Codeforces
+(422) set `CODE_EXEC_TESTS_CACHE=2000` and give the host ~25 GB, or cache misses re-parse
+100 MB files with the GIL held and time out correct solutions.
+
+`validate_code_benchmarks.py` grades reference answers (Pro canonical solutions, CRUXEval gold,
+accepted Python Codeforces submissions), always-wrong answers, and an old eval dump against
+the sandbox.
 
 ### 7. Watch it
 
