@@ -120,7 +120,23 @@ sys.argv = [_prog] + sys.argv[2:]
 _code = compile(_src, "solution.py", "exec")
 _g = {"__name__": os.environ.get("CODE_EXEC_NAME", "__main__"), "__file__": "solution.py",
       "__builtins__": builtins}
-exec(_code, _g)
+
+
+def _run(code, g, must_finish):
+    # must_finish: the per-run token arrives on stdin's first line and is consumed here, so the
+    # program can neither read it nor create the done file; the file is written only if exec
+    # returns. Kept in this frame, not module globals, so `import __main__` cannot reach it
+    # (frame introspection still could: same limit as EvalPlus / open-instruct).
+    if must_finish:
+        done = os.path.join(_SCRATCH, "_done_" + sys.stdin.readline().strip())
+        oopen, oclose, oflags = os.open, os.close, os.O_WRONLY | os.O_CREAT
+    exec(code, g)
+    if must_finish:
+        oclose(oopen(done, oflags, 0o600))
+
+
+_run(_code, _g, os.environ.get("CODE_EXEC_MUST_FINISH") == "1")
+del _run
 '''
 
 _TLS = threading.local()
@@ -134,8 +150,12 @@ def _bump(**kw):
             STATS[k] += v
 
 
+_INT_RE = re.compile(r"[+-]?\d+")
+
+
 def _tokens_equal(x: str, y: str, float_tol, case_insensitive: bool) -> bool:
-    if x == y or (case_insensitive and x.lower() == y.lower()):
+    # case_insensitive folds YES/NO only (open-r1 / Codeforces convention), not names like Alice.
+    if x == y or (case_insensitive and x.lower() == y.lower() and y.lower() in ("yes", "no")):
         return True
     try:
         dx, dy = Decimal(x), Decimal(y)
@@ -144,6 +164,8 @@ def _tokens_equal(x: str, y: str, float_tol, case_insensitive: bool) -> bool:
     if dx == dy:
         return True
     if float_tol is None or not (dx.is_finite() and dy.is_finite()):
+        return False
+    if _INT_RE.fullmatch(x) and _INT_RE.fullmatch(y):
         return False
     # Codeforces-style: absolute or relative error within float_tol.
     return abs(dx - dy) <= Decimal(str(float_tol)) * max(Decimal(1), abs(dy))
@@ -166,12 +188,82 @@ def _lines_equal_with_decimal(a: str, b: str, float_tol=None, case_insensitive=F
     return True
 
 
-# Appended by run_one(must_finish=True). Dunder names and os via __import__ so the program's
-# own globals cannot shadow them; the token is per run, so a program cannot forge it.
-DONE_SNIPPET = r'''
-
-__import__("os").close(__import__("os").open("_done_{token}", __import__("os").O_WRONLY | __import__("os").O_CREAT, 0o600))
+# strict (training) equality: both sides of `assert A == B` pass through __canon, which
+# reduces values to builtin types, so an object whose __eq__ always returns True cannot pass.
+# numpy, fractions, decimal, datetime and collections values are reduced or kept; any other
+# type must use identity equality (object.__eq__).
+CANON_PRELUDE = r'''
+def __canon(x, _d=0):
+    if _d > 200:
+        raise TypeError("value nested too deeply")
+    t = type(x)
+    if x is None or t in (bool, int, float, complex, str, bytes):
+        return x
+    m = getattr(t, "__module__", "") or ""
+    if m == "numpy" or m.startswith("numpy."):
+        return __canon(x.tolist(), _d + 1)
+    if m in ("fractions", "decimal", "datetime"):
+        return x
+    if isinstance(x, bool):
+        return bool(x)
+    if isinstance(x, int):
+        return int(x)
+    if isinstance(x, float):
+        return float(x)
+    if isinstance(x, str):
+        return str.__str__(x)
+    if isinstance(x, bytes):
+        return bytes(x)
+    if isinstance(x, dict):
+        return {__canon(k, _d + 1): __canon(v, _d + 1) for k, v in dict.items(x)}
+    if isinstance(x, list):
+        return [__canon(v, _d + 1) for v in list.__iter__(x)]
+    if isinstance(x, tuple):
+        return tuple(__canon(v, _d + 1) for v in tuple.__iter__(x))
+    if isinstance(x, (set, frozenset)):
+        return frozenset(__canon(v, _d + 1) for v in x)
+    if m == "collections":
+        return [__canon(v, _d + 1) for v in x]
+    import types as __ty, gc as __gc
+    identity = True
+    for name in ("__eq__", "__ne__"):
+        for k in t.__mro__:
+            if name in k.__dict__:
+                f = k.__dict__[name]
+                if not isinstance(f, __ty.WrapperDescriptorType):
+                    raise TypeError("user-defined %s on %s in strict comparison" % (name, t.__name__))
+                identity = identity and k is object
+                break
+    # C-level equality (slice, range, list[int], ...) can still delegate to the
+    # objects it holds, so those must pass the same check; identity needs nothing.
+    if not identity and not isinstance(x, type):
+        for r in __gc.get_referents(x):
+            __canon(r, _d + 1)
+    return x
 '''
+
+
+def strict_assert(test: str) -> str:
+    """`assert A == B[, msg]` -> both sides through __canon; any other test is left as is."""
+    import ast
+
+    try:
+        tree = ast.parse(test)
+    except SyntaxError:
+        return test
+    if not hasattr(ast, "unparse"):
+        return test
+    changed = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare) \
+                and len(node.test.ops) == 1 and isinstance(node.test.ops[0], (ast.Eq, ast.NotEq)):
+            cmp = node.test
+            wrap = lambda e: ast.Call(func=ast.Name(id="__canon", ctx=ast.Load()), args=[e], keywords=[])
+            cmp.left, cmp.comparators = wrap(cmp.left), [wrap(cmp.comparators[0])]
+            changed = True
+    if not changed:
+        return test
+    return CANON_PRELUDE + "\n" + ast.unparse(ast.fix_missing_locations(tree)) + "\n"
 
 
 def _finished(d: str, token: str) -> bool:
@@ -239,7 +331,7 @@ class Runner:
         program: exiting early (sys.exit(0) before appended tests run) returns -1."""
         token = secrets.token_hex(16) if must_finish else None
         if token:
-            program = program + DONE_SNIPPET.format(token=token)
+            stdin = token + "\n" + stdin
         with self.sem:
             # A stop_on_fail request's tests queue here together; once one has failed, the
             # rest skip instead of running.
@@ -258,7 +350,8 @@ class Runner:
                 for fname, content in (files or {}).items():
                     with open(os.path.join(d, fname), "w") as f:
                         f.write(content)
-                env = dict(self.env, HOME=d, TMPDIR=d, CODE_EXEC_SCRATCH=d, CODE_EXEC_NAME=name)
+                env = dict(self.env, HOME=d, TMPDIR=d, CODE_EXEC_SCRATCH=d, CODE_EXEC_NAME=name,
+                           CODE_EXEC_MUST_FINISH="1" if token else "0")
                 p = subprocess.Popen(
                     [self.python, "-I", self.guard, prog, *args],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -313,7 +406,10 @@ class Runner:
 
         return list(self.pool.map(guarded, tests))
 
-    def assert_tests(self, program, tests, timeout, name="__main__", stop_on_fail=False):
+    def assert_tests(self, program, tests, timeout, name="__main__", stop_on_fail=False, strict=False):
+        if strict:
+            tests = [strict_assert(tc) for tc in tests]
+
         def one(tc):
             rc, _ = self.run_one(f"{program}\n\n{tc}\n", "", timeout, name=name, must_finish=True)
             return 1 if rc == 0 else 0
@@ -330,11 +426,11 @@ class Runner:
 
         return self._map(one, tests, stop_on_fail)
 
-    def call_tests(self, program, tests, timeout, fn_name, stop_on_fail=False):
+    def call_tests(self, program, tests, timeout, fn_name, stop_on_fail=False, strict=False):
         """LiveCodeBench call-based grading (lcb_runner testing_util.grade_call_based): the
         program is imported, not run as __main__; inputs are one JSON value per line."""
         target = "Solution()" if "class Solution" in program else None
-        program = program + "\n\n" + CALL_HARNESS.format(fn=fn_name, target=target)
+        program = program + "\n\n" + CALL_HARNESS.format(fn=fn_name, target=target, strict=bool(strict))
 
         def one(tc):
             if not isinstance(tc, dict):
@@ -382,6 +478,9 @@ def __grade():
     __p = __m(*[__j.loads(__l) for __l in __c["input"].split("\n")])
     if isinstance(__p, tuple):
         __p = list(__p)
+    if {strict}:
+        # open-instruct's JSON round trip: only plain JSON values can compare equal.
+        __p = __j.loads(__j.dumps(__p, allow_nan=False))
     if not (__p == __j.loads(__c["output"])):
         raise SystemExit(1)
 __grade()
@@ -483,6 +582,7 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
                 float_tol = req.get("float_tol")
                 float_tol = None if float_tol is None else float(float_tol)
                 case_insensitive = bool(req.get("case_insensitive", False))
+                strict = bool(req.get("strict", False))
             except (OSError, ValueError, KeyError, TypeError) as e:
                 return self._send(400, {"error": f"bad request: {e}"})
             total = len(tests)
@@ -490,13 +590,13 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
                 tests = tests[:max_tests]
             padded = total - len(tests)
             if route == "/test_program":
-                res = runner.assert_tests(program, [str(t) for t in tests], timeout, name, stop_on_fail)
+                res = runner.assert_tests(program, [str(t) for t in tests], timeout, name, stop_on_fail, strict)
             elif route == "/test_program_stdio":
                 res = runner.stdio_tests(program, tests, timeout, stop_on_fail, float_tol, case_insensitive)
             elif route == "/test_program_checker":
                 res = runner.checker_tests(program, tests, timeout, checker, stop_on_fail)
             else:
-                res = runner.call_tests(program, tests, timeout, fn_name, stop_on_fail)
+                res = runner.call_tests(program, tests, timeout, fn_name, stop_on_fail, strict)
             _bump(requests=1, tests=len(res), passed=sum(res))
             # Tests beyond the cap count as failed so the client's length check holds.
             self._send(200, {"results": res + [0] * padded})

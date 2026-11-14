@@ -53,6 +53,7 @@ _MAX_TESTS = int(os.environ.get("CODE_MAX_TESTS", "32"))
 _CONCURRENCY = int(os.environ.get("CODE_REWARD_CONCURRENCY", "64"))
 _LOG_EVERY = int(os.environ.get("CODE_LOG_EVERY", "200"))
 _HTTP_RETRIES = int(os.environ.get("CODE_EXEC_API_RETRIES", "2"))
+_STRICT = os.environ.get("CODE_STRICT_GRADING", "1") == "1"
 
 # Benchmark rows (prepare_code_benchmarks.py) can go to their own service, so their heavy
 # tests never queue behind training rewards.
@@ -162,8 +163,8 @@ def _run_remote(program: str, tests: list, stdio: bool, opts=None):
     """0/1 per test, or None if the service could not be reached."""
     path = "/test_program_stdio" if stdio else "/test_program"
     body = {"program": program, "tests": tests, "max_execution_time": _TIMEOUT}
-    if stdio and opts:
-        body.update(opts)
+    if opts:
+        body.update({k: v for k, v in opts.items() if k in (_STDIO_OPTS if stdio else _ASSERT_OPTS)})
     return _post(_API_URL, path, body, len(tests), min(300.0, _TIMEOUT * len(tests) + 30.0))
 
 
@@ -196,7 +197,8 @@ def _run_local(program: str, tests: list, stdio: bool, opts=None):
             if stdio:
                 r = subprocess.run([sys.executable, "-c", program], input=str(tc.get("input", "")),
                                    capture_output=True, text=True, timeout=_TIMEOUT)
-                ok = r.returncode == 0 and _lines_equal(r.stdout, str(tc.get("output", "")), **(opts or {}))
+                cmp = {k: v for k, v in (opts or {}).items() if k in _STDIO_OPTS}
+                ok = r.returncode == 0 and _lines_equal(r.stdout, str(tc.get("output", "")), **cmp)
             else:
                 r = subprocess.run([sys.executable, "-c", f"{program}\n\n{tc}\n"],
                                    capture_output=True, text=True, timeout=_TIMEOUT)
@@ -210,7 +212,7 @@ def _run_local(program: str, tests: list, stdio: bool, opts=None):
 def _tokens_equal(x: str, y: str, float_tol, case_insensitive: bool) -> bool:
     from decimal import Decimal, InvalidOperation
 
-    if x == y or (case_insensitive and x.lower() == y.lower()):
+    if x == y or (case_insensitive and x.lower() == y.lower() and y.lower() in ("yes", "no")):
         return True
     try:
         dx, dy = Decimal(x), Decimal(y)
@@ -219,6 +221,8 @@ def _tokens_equal(x: str, y: str, float_tol, case_insensitive: bool) -> bool:
     if dx == dy:
         return True
     if float_tol is None or not (dx.is_finite() and dy.is_finite()):
+        return False
+    if re.fullmatch(r"[+-]?\d+", x) and re.fullmatch(r"[+-]?\d+", y):
         return False
     return abs(dx - dy) <= Decimal(str(float_tol)) * max(Decimal(1), abs(dy))
 
@@ -246,11 +250,18 @@ def _run(program, tests, stdio, opts=None):
     return _run_remote(program, tests, stdio, opts)
 
 
-def stdio_options(meta: dict) -> dict:
-    """Per-row stdio comparison options set by the data pipeline when the statement allows
-    them (metadata.float_tol, metadata.case_insensitive). Training only: evals keep the
-    benchmarks' own comparison."""
-    opts = {}
+_STDIO_OPTS = ("float_tol", "case_insensitive")
+_ASSERT_OPTS = ("strict", "name")
+
+
+def train_options(meta: dict) -> dict:
+    """Grader options for training rows; evals keep the benchmarks' own semantics.
+    stdio: per-row comparison options set by the data pipeline when the statement allows
+    them (metadata.float_tol, metadata.case_insensitive; YES/NO folding only).
+    asserts (CODE_STRICT_GRADING=1): both sides of `assert A == B` reduced to builtin values,
+    so objects with a rigged __eq__ fail; and the program is not run as __main__, so a
+    `if __name__ == "__main__":` block neither runs nor can exit before the tests."""
+    opts = {"strict": True, "name": "tmp_sol"} if _STRICT else {}
     if meta.get("float_tol") is not None:
         opts["float_tol"] = float(meta["float_tol"])
     if meta.get("case_insensitive"):
@@ -260,7 +271,7 @@ def stdio_options(meta: dict) -> dict:
 
 def pass_rate(code: str, tests, opts=None) -> float | None:
     """Fraction of tests passed, or None when the tests could not be run at all.
-    `opts` are stdio comparison options (stdio_options)."""
+    `opts` are grader options (train_options)."""
     if isinstance(tests, dict):
         test_str = str(tests.get("test", "") or "")
         if not test_str:
@@ -274,7 +285,7 @@ def pass_rate(code: str, tests, opts=None) -> float | None:
         else:
             entry = tests.get("entry_point") or ""
             cases = [f"{test_str}\ncheck({entry})\n"] if entry and "check(" in test_str else [test_str]
-        res = _run(code, cases[:_MAX_TESTS], stdio=False)
+        res = _run(code, cases[:_MAX_TESTS], stdio=False, opts=opts)
         return None if res is None else sum(res) / len(cases)
 
     if isinstance(tests[0], dict):
@@ -287,7 +298,7 @@ def pass_rate(code: str, tests, opts=None) -> float | None:
         return None if res is None else sum(res) / len(capped)
 
     cases = [str(t) for t in tests][:_MAX_TESTS]
-    res = _run(code, cases, stdio=False)
+    res = _run(code, cases, stdio=False, opts=opts)
     return None if res is None else sum(res) / len(cases)
 
 
@@ -439,7 +450,7 @@ def _score_one(sample, evaluation: bool = False) -> float:
         STATS.note_sample(0.0, False)
         return 0.0
 
-    rate = pass_rate(code, tests, None if evaluation else stdio_options(meta))
+    rate = pass_rate(code, tests, None if evaluation else train_options(meta))
     if rate is None:
         STATS.note("api_error")
         STATS.note_sample(0.0, False)
