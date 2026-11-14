@@ -125,7 +125,7 @@ exec(_code, _g)
 
 _TLS = threading.local()
 STATS_LOCK = threading.Lock()
-STATS = {"requests": 0, "tests": 0, "passed": 0, "timeouts": 0, "errors": 0, "busy_s": 0.0}
+STATS = {"requests": 0, "tests": 0, "passed": 0, "timeouts": 0, "errors": 0, "early_exits": 0, "busy_s": 0.0}
 
 
 def _bump(**kw):
@@ -134,9 +134,25 @@ def _bump(**kw):
             STATS[k] += v
 
 
-def _lines_equal_with_decimal(a: str, b: str) -> bool:
+def _tokens_equal(x: str, y: str, float_tol, case_insensitive: bool) -> bool:
+    if x == y or (case_insensitive and x.lower() == y.lower()):
+        return True
+    try:
+        dx, dy = Decimal(x), Decimal(y)
+    except (InvalidOperation, ValueError):
+        return False
+    if dx == dy:
+        return True
+    if float_tol is None or not (dx.is_finite() and dy.is_finite()):
+        return False
+    # Codeforces-style: absolute or relative error within float_tol.
+    return abs(dx - dy) <= Decimal(str(float_tol)) * max(Decimal(1), abs(dy))
+
+
+def _lines_equal_with_decimal(a: str, b: str, float_tol=None, case_insensitive=False) -> bool:
     """Same comparison as the Instella reward's local path: per-line, whitespace
-    stripped, with a Decimal fallback so 1.0 == 1 == 1.00."""
+    stripped, with a Decimal fallback so 1.0 == 1 == 1.00. float_tol and
+    case_insensitive are per-row options for statements that allow them (training only)."""
     a_lines = [ln.strip() for ln in a.strip().split("\n")]
     b_lines = [ln.strip() for ln in b.strip().split("\n")]
     if len(a_lines) != len(b_lines):
@@ -144,12 +160,22 @@ def _lines_equal_with_decimal(a: str, b: str) -> bool:
     for al, bl in zip(a_lines, b_lines):
         if al == bl:
             continue
-        try:
-            if [Decimal(t) for t in al.split()] != [Decimal(t) for t in bl.split()]:
-                return False
-        except (InvalidOperation, ValueError):
+        at, bt = al.split(), bl.split()
+        if len(at) != len(bt) or not all(_tokens_equal(x, y, float_tol, case_insensitive) for x, y in zip(at, bt)):
             return False
     return True
+
+
+# Appended by run_one(must_finish=True). Dunder names and os via __import__ so the program's
+# own globals cannot shadow them; the token is per run, so a program cannot forge it.
+DONE_SNIPPET = r'''
+
+__import__("os").close(__import__("os").open("_done_{token}", __import__("os").O_WRONLY | __import__("os").O_CREAT, 0o600))
+'''
+
+
+def _finished(d: str, token: str) -> bool:
+    return os.path.exists(os.path.join(d, f"_done_{token}"))
 
 
 _YES_NO_RE = re.compile(r"\b(yes|no)\b", re.IGNORECASE)
@@ -205,10 +231,15 @@ class Runner:
         return apply
 
     def run_one(self, program: str, stdin: str, timeout: float, name: str = "__main__", case=None,
-                files=None, args=()):
+                files=None, args=(), must_finish=False):
         """Returns (returncode or None on timeout, stdout). `name` is the program's
         __name__; `case`, if given, is written to _case.json beside it; `files` maps
-        file names to contents written beside it; `args` follow it on the command line."""
+        file names to contents written beside it; `args` follow it on the command line.
+        With must_finish, a clean exit only counts if control reached the end of the
+        program: exiting early (sys.exit(0) before appended tests run) returns -1."""
+        token = secrets.token_hex(16) if must_finish else None
+        if token:
+            program = program + DONE_SNIPPET.format(token=token)
         with self.sem:
             # A stop_on_fail request's tests queue here together; once one has failed, the
             # rest skip instead of running.
@@ -235,7 +266,11 @@ class Runner:
                 )
                 try:
                     out, _ = p.communicate(stdin.encode("utf-8", "replace"), timeout=timeout)
-                    return p.returncode, out.decode("utf-8", "replace")
+                    rc = p.returncode
+                    if token and rc == 0 and not _finished(d, token):
+                        _bump(early_exits=1)
+                        rc = -1
+                    return rc, out.decode("utf-8", "replace")
                 except subprocess.TimeoutExpired:
                     try:
                         os.killpg(p.pid, signal.SIGKILL)
@@ -280,17 +315,18 @@ class Runner:
 
     def assert_tests(self, program, tests, timeout, name="__main__", stop_on_fail=False):
         def one(tc):
-            rc, _ = self.run_one(f"{program}\n\n{tc}\n", "", timeout, name=name)
+            rc, _ = self.run_one(f"{program}\n\n{tc}\n", "", timeout, name=name, must_finish=True)
             return 1 if rc == 0 else 0
 
         return self._map(one, tests, stop_on_fail)
 
-    def stdio_tests(self, program, tests, timeout, stop_on_fail=False):
+    def stdio_tests(self, program, tests, timeout, stop_on_fail=False, float_tol=None, case_insensitive=False):
         def one(tc):
             if not isinstance(tc, dict):
                 return 0
             rc, out = self.run_one(program, str(tc.get("input", "")), timeout)
-            return 1 if rc == 0 and _lines_equal_with_decimal(out, str(tc.get("output", ""))) else 0
+            return 1 if rc == 0 and _lines_equal_with_decimal(
+                out, str(tc.get("output", "")), float_tol, case_insensitive) else 0
 
         return self._map(one, tests, stop_on_fail)
 
@@ -304,7 +340,7 @@ class Runner:
             if not isinstance(tc, dict):
                 return 0
             case = {"input": str(tc.get("input", "")), "output": str(tc.get("output", ""))}
-            rc, _ = self.run_one(program, "", timeout, name="tmp_sol", case=case)
+            rc, _ = self.run_one(program, "", timeout, name="tmp_sol", case=case, must_finish=True)
             return 1 if rc == 0 else 0
 
         return self._map(one, tests, stop_on_fail)
@@ -444,6 +480,9 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
                 checker = req.get("checker") or None
                 if checker is not None and not isinstance(checker, str):
                     raise ValueError("checker must be Python source")
+                float_tol = req.get("float_tol")
+                float_tol = None if float_tol is None else float(float_tol)
+                case_insensitive = bool(req.get("case_insensitive", False))
             except (OSError, ValueError, KeyError, TypeError) as e:
                 return self._send(400, {"error": f"bad request: {e}"})
             total = len(tests)
@@ -453,7 +492,7 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
             if route == "/test_program":
                 res = runner.assert_tests(program, [str(t) for t in tests], timeout, name, stop_on_fail)
             elif route == "/test_program_stdio":
-                res = runner.stdio_tests(program, tests, timeout, stop_on_fail)
+                res = runner.stdio_tests(program, tests, timeout, stop_on_fail, float_tol, case_insensitive)
             elif route == "/test_program_checker":
                 res = runner.checker_tests(program, tests, timeout, checker, stop_on_fail)
             else:

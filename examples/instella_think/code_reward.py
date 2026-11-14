@@ -158,10 +158,12 @@ def _http():
     return _session
 
 
-def _run_remote(program: str, tests: list, stdio: bool):
+def _run_remote(program: str, tests: list, stdio: bool, opts=None):
     """0/1 per test, or None if the service could not be reached."""
     path = "/test_program_stdio" if stdio else "/test_program"
     body = {"program": program, "tests": tests, "max_execution_time": _TIMEOUT}
+    if stdio and opts:
+        body.update(opts)
     return _post(_API_URL, path, body, len(tests), min(300.0, _TIMEOUT * len(tests) + 30.0))
 
 
@@ -187,14 +189,14 @@ def _post(url: str, path: str, body: dict, n_tests: int, read_timeout: float):
     return None
 
 
-def _run_local(program: str, tests: list, stdio: bool):
+def _run_local(program: str, tests: list, stdio: bool, opts=None):
     out = []
     for tc in tests:
         try:
             if stdio:
                 r = subprocess.run([sys.executable, "-c", program], input=str(tc.get("input", "")),
                                    capture_output=True, text=True, timeout=_TIMEOUT)
-                ok = r.returncode == 0 and _lines_equal(r.stdout, str(tc.get("output", "")))
+                ok = r.returncode == 0 and _lines_equal(r.stdout, str(tc.get("output", "")), **(opts or {}))
             else:
                 r = subprocess.run([sys.executable, "-c", f"{program}\n\n{tc}\n"],
                                    capture_output=True, text=True, timeout=_TIMEOUT)
@@ -205,9 +207,24 @@ def _run_local(program: str, tests: list, stdio: bool):
     return out
 
 
-def _lines_equal(a: str, b: str) -> bool:
+def _tokens_equal(x: str, y: str, float_tol, case_insensitive: bool) -> bool:
     from decimal import Decimal, InvalidOperation
 
+    if x == y or (case_insensitive and x.lower() == y.lower()):
+        return True
+    try:
+        dx, dy = Decimal(x), Decimal(y)
+    except (InvalidOperation, ValueError):
+        return False
+    if dx == dy:
+        return True
+    if float_tol is None or not (dx.is_finite() and dy.is_finite()):
+        return False
+    return abs(dx - dy) <= Decimal(str(float_tol)) * max(Decimal(1), abs(dy))
+
+
+def _lines_equal(a: str, b: str, float_tol=None, case_insensitive=False) -> bool:
+    """Mirror of code_exec_server._lines_equal_with_decimal."""
     al = [x.strip() for x in a.strip().split("\n")]
     bl = [x.strip() for x in b.strip().split("\n")]
     if len(al) != len(bl):
@@ -215,24 +232,35 @@ def _lines_equal(a: str, b: str) -> bool:
     for x, y in zip(al, bl):
         if x == y:
             continue
-        try:
-            if [Decimal(t) for t in x.split()] != [Decimal(t) for t in y.split()]:
-                return False
-        except (InvalidOperation, ValueError):
+        xt, yt = x.split(), y.split()
+        if len(xt) != len(yt) or not all(_tokens_equal(p, q, float_tol, case_insensitive) for p, q in zip(xt, yt)):
             return False
     return True
 
 
-def _run(program, tests, stdio):
+def _run(program, tests, stdio, opts=None):
     if _LOCAL:
-        return _run_local(program, tests, stdio)
+        return _run_local(program, tests, stdio, opts)
     if not _API_URL:
         return None
-    return _run_remote(program, tests, stdio)
+    return _run_remote(program, tests, stdio, opts)
 
 
-def pass_rate(code: str, tests) -> float | None:
-    """Fraction of tests passed, or None when the tests could not be run at all."""
+def stdio_options(meta: dict) -> dict:
+    """Per-row stdio comparison options set by the data pipeline when the statement allows
+    them (metadata.float_tol, metadata.case_insensitive). Training only: evals keep the
+    benchmarks' own comparison."""
+    opts = {}
+    if meta.get("float_tol") is not None:
+        opts["float_tol"] = float(meta["float_tol"])
+    if meta.get("case_insensitive"):
+        opts["case_insensitive"] = True
+    return opts
+
+
+def pass_rate(code: str, tests, opts=None) -> float | None:
+    """Fraction of tests passed, or None when the tests could not be run at all.
+    `opts` are stdio comparison options (stdio_options)."""
     if isinstance(tests, dict):
         test_str = str(tests.get("test", "") or "")
         if not test_str:
@@ -255,7 +283,7 @@ def pass_rate(code: str, tests) -> float | None:
         if not cases:
             return 0.0
         capped = cases[:_MAX_TESTS]
-        res = _run(code, capped, stdio=True)
+        res = _run(code, capped, stdio=True, opts=opts)
         return None if res is None else sum(res) / len(capped)
 
     cases = [str(t) for t in tests][:_MAX_TESTS]
@@ -411,7 +439,7 @@ def _score_one(sample, evaluation: bool = False) -> float:
         STATS.note_sample(0.0, False)
         return 0.0
 
-    rate = pass_rate(code, tests)
+    rate = pass_rate(code, tests, None if evaluation else stdio_options(meta))
     if rate is None:
         STATS.note("api_error")
         STATS.note_sample(0.0, False)
