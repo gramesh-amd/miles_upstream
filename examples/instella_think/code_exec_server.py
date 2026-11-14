@@ -244,7 +244,8 @@ def __canon(x, _d=0):
 
 
 def strict_assert(test: str) -> str:
-    """`assert A == B[, msg]` -> both sides through __canon; any other test is left as is."""
+    """`assert A == B[, msg]` and `assert _v7_close(A, B)` (the v7 data's tolerant float
+    compare) -> both operands through __canon; any other test is left as is."""
     import ast
 
     try:
@@ -253,13 +254,18 @@ def strict_assert(test: str) -> str:
         return test
     if not hasattr(ast, "unparse"):
         return test
+    wrap = lambda e: ast.Call(func=ast.Name(id="__canon", ctx=ast.Load()), args=[e], keywords=[])
     changed = False
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare) \
-                and len(node.test.ops) == 1 and isinstance(node.test.ops[0], (ast.Eq, ast.NotEq)):
-            cmp = node.test
-            wrap = lambda e: ast.Call(func=ast.Name(id="__canon", ctx=ast.Load()), args=[e], keywords=[])
-            cmp.left, cmp.comparators = wrap(cmp.left), [wrap(cmp.comparators[0])]
+        if not isinstance(node, ast.Assert):
+            continue
+        t = node.test
+        if isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.ops[0], (ast.Eq, ast.NotEq)):
+            t.left, t.comparators = wrap(t.left), [wrap(t.comparators[0])]
+            changed = True
+        elif isinstance(t, ast.Call) and isinstance(t.func, ast.Name) and t.func.id == "_v7_close" \
+                and len(t.args) == 2 and not t.keywords:
+            t.args = [wrap(a) for a in t.args]
             changed = True
     if not changed:
         return test

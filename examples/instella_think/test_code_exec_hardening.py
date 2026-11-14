@@ -15,6 +15,16 @@ URL = os.environ["CODE_EXEC_TEST_URL"].rstrip("/")
 TRAIN = {"strict": True, "name": "tmp_sol"}
 T = ["assert double(2) == 4", "assert double(3) == 6"]
 RIGGED = "class _A:\n    def __eq__(self, o): return True\n    def __ne__(self, o): return False\n"
+V7_CLOSE = (
+    "def _v7_close(a, b):\n    import math as _m\n"
+    "    if isinstance(b, float) or (isinstance(a, float) and isinstance(b, int) and not isinstance(b, bool)):\n"
+    "        return isinstance(a, (int, float)) and _m.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)\n"
+    "    if isinstance(b, (list, tuple)):\n"
+    "        return type(a) is type(b) and len(a) == len(b) and all(_v7_close(x, y) for x, y in zip(a, b))\n"
+    "    if isinstance(b, dict):\n"
+    "        return isinstance(a, dict) and a.keys() == b.keys() and all(_v7_close(a[k], b[k]) for k in b)\n"
+    "    return a == b\n"
+)
 CALL = [{"input": "2\n3", "output": "5"}, {"input": "1\n1", "output": "2"}]
 STDIO = [{"input": "", "output": "0.333333333\nYES"}]
 
@@ -63,6 +73,10 @@ CASES = [
     ("rigged object inside slice", "/test_program", TRAIN, RIGGED + "def f(): return slice(_A(), 1)", ["assert f() == slice(0, 1)"], [0]),
     ("rigged object inside namespace", "/test_program", TRAIN, "import types\n" + RIGGED + "def f(): return types.SimpleNamespace(a=_A())",
      ["assert f() == types.SimpleNamespace(a=1)"], [0]),
+    ("v7 tolerant compare: legit float passes", "/test_program", TRAIN, "def f(): return [0.1 + 0.2, 'a']",
+     [V7_CLOSE + "assert _v7_close(f(), [0.3, 'a'])"], [1]),
+    ("v7 tolerant compare: rigged object fails", "/test_program", TRAIN, RIGGED + "def f(): return [0.3, _A()]",
+     [V7_CLOSE + "assert _v7_close(f(), [0.3, 'a'])"], [0]),
     ("__eq__ aliased to a builtin", "/test_program", TRAIN, "class B:\n    __eq__ = bool\ndef f(): return B()", ["assert f() == 4"], [0]),
     ("strict: non-assert test untouched", "/test_program", TRAIN, "def double(x): return 2*x", ["r = double(2)\nassert r == 4, 'msg'", "assert double(2) > 3"], [1, 1]),
     ("call correct", "/test_program_call", {"fn_name": "add"}, "class Solution:\n    def add(self,a,b): return a+b", CALL, [1, 1]),
