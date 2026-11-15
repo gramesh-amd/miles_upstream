@@ -48,7 +48,7 @@ for kv in "$@"; do
    printf 'export %q\n' "${kv}" >> "${JOB_DIR}/spec.env"
 done
 # The rollout node count follows from the allocation (an eval job sets its own, see eval_in_container.sh).
-[ "${G}" -ge 2 ] && [ "${GPU_NODE_SCRIPT}" = run_gpu_node.sh ] && echo "export ROLLOUT_NODES=$(( G - 1 ))" >> "${JOB_DIR}/spec.env"
+[ "${G}" -ge 2 ] && [ "${GPU_NODE_SCRIPT}" = run_gpu_node.sh ] && echo "export ROLLOUT_NODES=$(( G - $(source "${JOB_DIR}/spec.env"; echo "${TRAIN_NODES:-1}") ))" >> "${JOB_DIR}/spec.env"
 echo "job ${SLURM_JOB_ID}: sandbox ${SANDBOXES[*]}, GPU nodes ${GPU_NODES[*]} (head ${GPU_NODES[0]})"
 echo "spec: $*"
 echo "job dir: ${JOB_DIR}"

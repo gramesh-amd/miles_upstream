@@ -93,6 +93,33 @@ def _create_torch_profiler(args, name):
     )
 
 
+def maybe_start_inline_profiler(owner):
+    """MILES_PROFILE_INLINE_STEP=N: torch-profile the N-th train_actor call (0-based) from inside the
+    call, i.e. on the thread that launches the GPU work. The TrainProfiler, started at actor init,
+    records CPU ops but no GPU events in the Megatron actor on ROCm 7.2; this is the alternative."""
+    calls = getattr(owner, "_inline_profile_calls", 0)
+    owner._inline_profile_calls = calls + 1
+    step = os.environ.get("MILES_PROFILE_INLINE_STEP", "")
+    if not step or calls != int(step) or not _profiles_this_rank():
+        return None
+    prof = torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        record_shapes=_env_on("MILES_PROFILE_SHAPES"),
+        with_stack=_env_on("MILES_PROFILE_STACK"),
+    )
+    prof.start()
+    return prof
+
+
+def finish_inline_profiler(prof, args, rollout_id):
+    if prof is None:
+        return
+    prof.stop()
+    path = Path(args.tensorboard_dir or ".") / f"inline_rank_{torch.distributed.get_rank()}_rollout{rollout_id}.pt.trace.json.gz"
+    prof.export_chrome_trace(str(path))
+    logger.info(f"Inline profile written to {path}")
+
+
 class _BaseMemoryProfiler:
     @staticmethod
     def create(args):

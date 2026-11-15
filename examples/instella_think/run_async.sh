@@ -289,8 +289,9 @@ else
    # Trainer node (8 GPU, EP8) + ROLLOUT_NODES rollout nodes, one engine (EP8/DP8) per node.
    # The default 2 is the 3-node recipe (16 rollout GPUs, 2 engines).
    ROLLOUT_NODES="${ROLLOUT_NODES:-2}"
+   # TRAIN_NODES trainer nodes (default 1; dense layers data-parallel across them, experts EP8).
    TOPOLOGY_ARGS=(
-      --actor-num-nodes 1
+      --actor-num-nodes "${TRAIN_NODES:-1}"
       --actor-num-gpus-per-node 8
       --num-gpus-per-node 8
       --rollout-num-gpus $(( ROLLOUT_NODES * 8 ))
@@ -300,6 +301,15 @@ else
 fi
 
 # --- trainer parallelism (Instella known-good from Instella-MoE/rl if_rl) -----
+# Activation recompute: RECOMPUTE=full (default; every layer re-run in backward), selective (only
+# the attention core) or none. Lighter recompute trades memory for ~1/3 less training compute.
+case "${RECOMPUTE:-full}" in
+   full) RECOMPUTE_ARGS=(--recompute-granularity full --recompute-method uniform --recompute-num-layers 1) ;;
+   selective) RECOMPUTE_ARGS=(--recompute-granularity selective) ;;
+   none) RECOMPUTE_ARGS=() ;;
+   *) echo "FATAL: RECOMPUTE must be full, selective or none" >&2; exit 1 ;;
+esac
+
 PERF_ARGS=(
    --tensor-model-parallel-size 1
    # NO-OP here: at TP=1 Megatron warns "Disabling sequence parallelism because tensor model
@@ -312,9 +322,7 @@ PERF_ARGS=(
    --expert-tensor-parallel-size 1
    --moe-token-dispatcher-type alltoall
    --use-distributed-optimizer
-   --recompute-granularity full
-   --recompute-method uniform
-   --recompute-num-layers 1
+   "${RECOMPUTE_ARGS[@]}"
    --use-dynamic-batch-size
    --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-8192}"
    # Peak VRAM in the log-prob pass is the fp32 logits tensor [tokens, padded_vocab/TP]:
@@ -609,6 +617,20 @@ if [ "${PROFILE:-0}" = "1" ]; then
     \"SGLANG_TORCH_PROFILER_DIR\": \"${PROFILE_DIR}\""
    echo "PROFILE=1 -> ${PROFILE_DIR} (trainer step ${_ps}, ranks ${PROFILE_RANKS:-all})"
 fi
+# PROFILE_INLINE_STEP=N: torch-profile the N-th training step (0-based) from inside train_actor
+# instead (the PROFILE=1 profiler records no GPU events in the Megatron actor on ROCm 7.2); traces go
+# to PROFILE_DIR as inline_rank_<r>_rollout<id>.pt.trace.json.gz, PROFILE_RANKS as above.
+if [ -n "${PROFILE_INLINE_STEP:-}" ]; then
+   PROFILE_DIR="${PROFILE_DIR:-${DUMP_ROOT}/${SAVE_TAG}/profile}"
+   [ "${DRY_RUN:-0}" = "1" ] || mkdir -p "${PROFILE_DIR}"
+   [ "${PROFILE:-0}" = "1" ] || GRPO_ARGS+=(--tensorboard-dir "${PROFILE_DIR}")
+   PROFILE_ENV="${PROFILE_ENV},
+    \"MILES_PROFILE_INLINE_STEP\": \"${PROFILE_INLINE_STEP}\",
+    \"MILES_PROFILE_RANKS\": \"${PROFILE_RANKS:-}\",
+    \"MILES_PROFILE_STACK\": \"${PROFILE_FULL:-0}\",
+    \"MILES_PROFILE_SHAPES\": \"${PROFILE_FULL:-0}\""
+   echo "PROFILE_INLINE_STEP=${PROFILE_INLINE_STEP} -> ${PROFILE_DIR} (ranks ${PROFILE_RANKS:-all})"
+fi
 # DEBUG_CLR_GRAPH_PACKET_CAPTURE=0 makes the ROCm 7.2 profiler record every HIP-graph replay (decode
 # under CUDA graphs); without it most replays are missing and nearby kernel times are inflated
 # (rocm-systems#13882). It runs graphs node by node, so only for profiling.
@@ -638,7 +660,7 @@ OPTIMIZER_ARGS=(
    --adam-beta2 0.98
 )
 
-RUN_TAG="$([ "${SINGLE_NODE}" = "1" ] && echo 1node-smoke || echo "$(( ROLLOUT_NODES + 1 ))node")"
+RUN_TAG="$([ "${SINGLE_NODE}" = "1" ] && echo 1node-smoke || echo "$(( ROLLOUT_NODES + ${TRAIN_NODES:-1} ))node")"
 WANDB_ARGS=(
    --use-wandb
    # Separate projects keep unrelated tasks' eval axes apart: the math runs log

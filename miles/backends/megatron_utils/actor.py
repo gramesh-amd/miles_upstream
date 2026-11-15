@@ -36,7 +36,7 @@ from miles.utils.tracking_utils.structured_log import with_logs
 from miles.utils.tracking_utils.tracking import init_tracking
 from miles.utils.types import RolloutBatch
 
-from ...utils.profile_utils import TrainProfiler
+from ...utils.profile_utils import TrainProfiler, finish_inline_profiler, maybe_start_inline_profiler
 from ...utils.tensor_backper import TensorBackuper
 from ..training_utils.data import DataIterator, get_data_iterator, get_rollout_data, sync_actor_critic_data
 from ..training_utils.log_utils import log_cpu_memory, log_perf_data, log_rollout_data
@@ -418,6 +418,7 @@ class MegatronTrainRayActor(TrainRayActor):
     def train_actor(
         self, rollout_id: int, rollout_data: RolloutBatch, *, witness_info: WitnessInfo | None, attempt: int
     ) -> TrainStepOutcome:
+        inline_prof = maybe_start_inline_profiler(self)
         # Create data iterator for log_probs and train.
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
 
@@ -516,6 +517,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 )
 
             self.prof.step(rollout_id=rollout_id)
+        finish_inline_profiler(inline_prof, self.args, rollout_id)
 
         train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=rollout_data)
 
