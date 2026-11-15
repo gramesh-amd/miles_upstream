@@ -331,12 +331,12 @@ Common `--sglang-*` flags:
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
-| `--profile-target` | enum+ | `[train_overall]` | Which sub-loop to profile: `train_overall`, `train_actor`, `train_log_probs`. |
-| `--use-pytorch-profiler` | flag | off | FSDP only: enable PyTorch profiler. |
-| `--profile-step-start` | int | `10` | FSDP only: first step to profile. |
-| `--profile-step-end` | int | `12` | FSDP only: last step to profile. |
-| `--memory-snapshot-path` | str | `snapshot.pickle` | FSDP only: memory snapshot output. |
-| `--tensorboard-dir` | str | – | FSDP only: TensorBoard output dir. |
+| `--profile-target` | enum+ | `[train_overall]` | Which loop to profile: `train_overall`, `train_actor`, `train_log_probs` (Megatron: `train_overall` only). |
+| `--use-pytorch-profiler` | flag | off | Enable the PyTorch profiler (Megatron and FSDP). |
+| `--profile-step-start` | int | `10` | First training step to profile (train_actor calls, from 0 after init). |
+| `--profile-step-end` | int | `12` | Step after the last one profiled. |
+| `--memory-snapshot-path` | str | `snapshot.pickle` | Memory snapshot file name (with `--record-memory-history`). |
+| `--tensorboard-dir` | str | – | Required with `--use-pytorch-profiler`: trace output directory. |
 
 ### Debugging
 

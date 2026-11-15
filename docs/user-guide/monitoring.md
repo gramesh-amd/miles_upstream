@@ -73,24 +73,39 @@ def my_log(rollout_id, args, samples, extra, rollout_time) -> bool:
 
 ### Built-in PyTorch profiler
 
-The PyTorch profiler is wired into Miles via `miles/utils/profile_utils.py`. Flags
-differ by backend:
-
-**Megatron** — choose which sub-loop to profile:
-
-```bash
---profile-target train_overall    # or train_actor, train_log_probs (multi-arg)
-```
-
-**FSDP** — additionally exposes the standard FSDPArgs window:
+The PyTorch profiler is wired into Miles via `miles/utils/profile_utils.py` and works with both
+backends:
 
 ```bash
 --use-pytorch-profiler
---profile-step-start 10
+--profile-step-start 10           # training steps (train_actor calls), counted from 0 after init
 --profile-step-end 12
---memory-snapshot-path snapshot.pickle
---tensorboard-dir /data/tb-run-42
+--tensorboard-dir /data/tb-run-42 # required: traces are written here (<name>_rank_<r>.*.pt.trace.json.gz)
+--profile-target train_overall    # FSDP also accepts train_actor / train_log_probs
 ```
+
+On the Megatron backend only `train_overall` is implemented (the other targets raise
+`NotImplementedError`); it records whole training steps on every rank, including the log-prob pass,
+the weight update to the rollout engines and the wait for rollouts. Timed blocks
+(`miles/utils/timer.py`) appear in the trace as `miles/<timer>` ranges (`miles/log_probs`,
+`miles/actor_train`, `miles/update_weights`, ...), so kernels can be attributed per phase.
+Environment variables (they must reach the Ray workers' runtime env):
+
+| Variable | Effect |
+|---|---|
+| `MILES_PROFILE_RANKS=0,4` | profile only these global ranks (default: all) |
+| `MILES_PROFILE_{STACK,SHAPES,MEMORY,FLOPS}=0` | drop the costly extras (default on; an MoE step with all of them is GBs per rank) |
+| `MILES_PROFILE_INLINE_STEP=N` | profile the N-th `train_actor` call from inside it (Megatron), written to `--tensorboard-dir` as `inline_rank_<r>_rollout<id>.pt.trace.json.gz` |
+
+`--profile` (Megatron's nsys hook) and `--profile-ranks` are accepted but have no effect: Miles runs
+its own training loop.
+
+Known issue (ROCm 7.2, torch 2.9.1, MI355X): in the Megatron actor the profiler started at init
+records CPU ops but no GPU kernels; `MILES_PROFILE_INLINE_STEP` is the alternative being evaluated.
+
+**sglang rollout engines** are profiled through their own HTTP API (`/start_profile`, `/stop_profile`)
+on each engine's port (not the Miles router, which forwards to a single worker); see
+`examples/instella_think/cluster/lux/sglang_profile.sh`.
 
 Open the trace in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev/).
 
@@ -101,7 +116,7 @@ Open the trace in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev/).
 | Trainer stdout | wherever you redirected `ray job submit` (or Ray dashboard) |
 | Ray workers | `~/.ray/session_latest/logs/` |
 | wandb local cache | `wandb/run-<id>/files/` |
-| FSDP profiler / memory snapshot | `--tensorboard-dir`, `--memory-snapshot-path` |
+| PyTorch profiler / memory snapshot | `--tensorboard-dir`, `--memory-snapshot-dir` |
 
 ## Router endpoints
 
