@@ -100,12 +100,15 @@ class _Fp32Logits(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         inp, weight = ctx.saved_tensors
-        grad_output = grad_output.float()
+        # One contiguous [tokens, vocab] matrix for both products. grad_output arrives
+        # non-contiguous, and torch.matmul on a non-contiguous 3-D tensor cannot fold it into a
+        # single GEMM: it ran as a bmm of one-row products, 27% of the trainer's GPU time on
+        # MI355X (2.2 s per micro-batch, profiled 2026-11-15).
+        g2 = grad_output.float().reshape(-1, grad_output.shape[-1]).contiguous()
 
-        grad_input = torch.matmul(grad_output, weight.float()).to(inp.dtype)
+        grad_input = torch.matmul(g2, weight.float()).view(*grad_output.shape[:-1], weight.shape[-1]).to(inp.dtype)
 
         # [tokens, vocab]^T @ [tokens, hidden] -> [vocab, hidden], matching weight.
-        g2 = grad_output.reshape(-1, grad_output.shape[-1])
         i2 = inp.reshape(-1, inp.shape[-1]).float()
         grad_weight_fp32 = torch.matmul(g2.t(), i2)
 
