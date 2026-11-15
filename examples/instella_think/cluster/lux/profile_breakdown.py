@@ -20,7 +20,7 @@ import argparse, collections, glob, gzip, json, os, re
 CATEGORIES = [  # first match wins; case-insensitive, on the kernel name
     ("communication", r"nccl|rccl|cross_device_reduce|all_?reduce|all_?gather|reduce_?scatter|all_?to_?all|alltoall|mscclpp|mori"),
     ("attention", r"fmha|flash|attn|attention|_fwd_kernel|_bwd_kernel|_fwd_grouped_kernel|kernel_stage[12]|mla|paged|decode_kernel|extend_kernel"),
-    ("rope", r"rope|rotary"),
+    ("rope", r"rope|rotary|sbhd_cached|_sbhd_"),
     ("moe", r"moe|fmoe|expert|topk|top_k|permute|sorting|align_block|grouped_gemm|gmm|routing"),
     ("gemm", r"^cijk_|hipblaslt|tensile|gemm|matmul|wvsplitk|_mm_|_mm\b|dot_|bmm|ck_tile.*gemm|addmm"),
     ("norm", r"norm|rms"),

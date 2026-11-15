@@ -72,6 +72,8 @@ def _env_on(name):
 
 def _create_torch_profiler(args, name):
     return torch.profiler.profile(
+        # Explicit: with the default, the ROCm 7.2 build traced CPU ops only (no kernels, no HIP runtime).
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
         schedule=torch.profiler.schedule(
             # TODO the train_actor and train_log_probs ones may need to have different args to control step
             wait=max(args.profile_step_start - 1, 0),

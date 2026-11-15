@@ -60,7 +60,7 @@ class Timer(metaclass=SingletonMeta):
         try:
             # While a torch profiler is recording, also a profiler range, so its trace attributes
             # kernels to the timed phase (log_probs, actor_train, update_weights, ...).
-            if torch.autograd.profiler._is_profiler_enabled:
+            if torch._C._autograd._profiler_enabled():
                 with torch.profiler.record_function(f"miles/{name}"):
                     yield
             else:
