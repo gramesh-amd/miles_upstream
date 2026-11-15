@@ -586,6 +586,35 @@ if [ "${DUMP_TRAIN_DATA:-0}" = "1" ]; then
    echo "DUMP_TRAIN_DATA=1 -> ${DUMP_DIR}/train_data/"
 fi
 
+# PROFILE=1: torch-profiler traces of the trainer (miles TrainProfiler, the whole of training step
+# PROFILE_STEP_START, counted from 0 after init) into PROFILE_DIR as <name>_rank_<r>.*.pt.trace.json.gz,
+# with kernels grouped under miles/<timer> ranges (log_probs, actor_train, update_weights, ...).
+# PROFILE_RANKS (e.g. "0,4") limits it to those ranks; the stack/shape/memory/flop extras are off
+# unless PROFILE_FULL=1 (with them an MoE step is GBs per rank). Rollout engines are profiled
+# separately, from the login node: cluster/lux/sglang_profile.sh.
+PROFILE_ENV=""
+if [ "${PROFILE:-0}" = "1" ]; then
+   PROFILE_DIR="${PROFILE_DIR:-${DUMP_ROOT}/${SAVE_TAG}/profile}"
+   [ "${DRY_RUN:-0}" = "1" ] || mkdir -p "${PROFILE_DIR}"
+   _ps="${PROFILE_STEP_START:-3}"
+   GRPO_ARGS+=(--use-pytorch-profiler --profile-target train_overall --tensorboard-dir "${PROFILE_DIR}"
+               --profile-step-start "${_ps}" --profile-step-end "${PROFILE_STEP_END:-$((_ps + 1))}")
+   _x="${PROFILE_FULL:-0}"
+   PROFILE_ENV=",
+    \"MILES_PROFILE_RANKS\": \"${PROFILE_RANKS:-}\",
+    \"MILES_PROFILE_STACK\": \"${_x}\",
+    \"MILES_PROFILE_SHAPES\": \"${_x}\",
+    \"MILES_PROFILE_MEMORY\": \"${_x}\",
+    \"MILES_PROFILE_FLOPS\": \"${_x}\",
+    \"SGLANG_TORCH_PROFILER_DIR\": \"${PROFILE_DIR}\""
+   echo "PROFILE=1 -> ${PROFILE_DIR} (trainer step ${_ps}, ranks ${PROFILE_RANKS:-all})"
+fi
+# DEBUG_CLR_GRAPH_PACKET_CAPTURE=0 makes the ROCm 7.2 profiler record every HIP-graph replay (decode
+# under CUDA graphs); without it most replays are missing and nearby kernel times are inflated
+# (rocm-systems#13882). It runs graphs node by node, so only for profiling.
+[ -n "${DEBUG_CLR_GRAPH_PACKET_CAPTURE:-}" ] && PROFILE_ENV="${PROFILE_ENV},
+    \"DEBUG_CLR_GRAPH_PACKET_CAPTURE\": \"${DEBUG_CLR_GRAPH_PACKET_CAPTURE}\""
+
 # Observability; neither changes the objective.
 # With --entropy-coef 0 miles skips the entropy computation and logs entropy_loss as a
 # constant 0 (loss_hub/losses.py), which is how the math runs' sharpening collapse (mean
@@ -1001,7 +1030,7 @@ ${WANDB_BASE_URL_ENV}    \"ADAPTIVE_FILTER_MAX_PASS\": \"${ADAPTIVE_FILTER_MAX_P
     \"SOLVED_REWARD\": \"${SOLVED_REWARD:-1.0}\",
     \"WANDB_API_KEY\": \"${WANDB_KEY:-${WANDB_API_KEY:-}}\",
     \"NCCL_SOCKET_IFNAME\": \"${NET_IF}\",
-    \"GLOO_SOCKET_IFNAME\": \"${NET_IF}\"${SERIALIZE_ENV}
+    \"GLOO_SOCKET_IFNAME\": \"${NET_IF}\"${SERIALIZE_ENV}${PROFILE_ENV}
   }
 }"
 

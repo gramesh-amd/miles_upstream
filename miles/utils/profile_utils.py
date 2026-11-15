@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 import traceback
 from pathlib import Path
@@ -16,7 +17,7 @@ class TrainProfiler:
         self._torch_profiler_overall = None
         self._memory_profiler_overall = None
 
-        if args.use_pytorch_profiler and ("train_overall" in args.profile_target):
+        if args.use_pytorch_profiler and ("train_overall" in args.profile_target) and _profiles_this_rank():
             self._torch_profiler_overall = _create_torch_profiler(args, name="train_overall")
 
         if args.record_memory_history and ("train_overall" in args.profile_target):
@@ -57,6 +58,18 @@ def _profile_simple_loop(iterator, args, name):
         torch_profiler.step()
 
 
+def _profiles_this_rank():
+    # MILES_PROFILE_RANKS="0,4" limits the torch profiler to those global ranks; unset = every rank.
+    ranks = os.environ.get("MILES_PROFILE_RANKS", "").strip()
+    return not ranks or torch.distributed.get_rank() in {int(r) for r in ranks.split(",")}
+
+
+def _env_on(name):
+    # MILES_PROFILE_{STACK,SHAPES,MEMORY,FLOPS}=0 turn off the costly extras (traces of an MoE step
+    # with all of them reach GBs per rank).
+    return os.environ.get(name, "1") != "0"
+
+
 def _create_torch_profiler(args, name):
     return torch.profiler.profile(
         schedule=torch.profiler.schedule(
@@ -71,10 +84,10 @@ def _create_torch_profiler(args, name):
             worker_name=f"{name}_rank_{torch.distributed.get_rank()}",
             use_gzip=True,
         ),
-        record_shapes=True,
-        with_stack=True,
-        profile_memory=True,
-        with_flops=True,
+        record_shapes=_env_on("MILES_PROFILE_SHAPES"),
+        with_stack=_env_on("MILES_PROFILE_STACK"),
+        profile_memory=_env_on("MILES_PROFILE_MEMORY"),
+        with_flops=_env_on("MILES_PROFILE_FLOPS"),
     )
 
 
