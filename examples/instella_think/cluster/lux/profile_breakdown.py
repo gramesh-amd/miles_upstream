@@ -19,7 +19,10 @@ import argparse, collections, glob, gzip, json, os, re
 
 CATEGORIES = [  # first match wins; case-insensitive, on the kernel name
     ("communication", r"nccl|rccl|cross_device_reduce|all_?reduce|all_?gather|reduce_?scatter|all_?to_?all|alltoall|mscclpp|mori"),
-    ("attention", r"fmha|flash|attn|attention|_fwd_kernel|_bwd_kernel|_fwd_grouped_kernel|kernel_stage[12]|mla|paged|decode_kernel|extend_kernel"),
+    # sglang triton MLA attention: _fwd_kernel = extend (prefill); stage1/stage2 = decode
+    ("attention (prefill)", r"^_fwd_kernel$|extend_kernel|_fwd_kernel_unified"),
+    ("attention (decode)", r"_fwd_grouped_kernel_stage1|_fwd_kernel_stage[12]|decode_kernel"),
+    ("attention", r"fmha|flash|attn|attention|_fwd_kernel|_bwd_kernel|_fwd_grouped_kernel|kernel_stage[12]|mla|paged"),
     ("rope", r"rope|rotary|sbhd_cached|_sbhd_"),
     ("moe", r"moe|fmoe|expert|topk|top_k|permute|sorting|align_block|grouped_gemm|gmm|routing"),
     ("gemm", r"^cijk_|hipblaslt|tensile|gemm|matmul|wvsplitk|_mm_|_mm\b|dot_|bmm|ck_tile.*gemm|addmm"),
@@ -30,7 +33,7 @@ CATEGORIES = [  # first match wins; case-insensitive, on the kernel name
 ]
 CAT_RE = [(c, re.compile(p, re.I)) for c, p in CATEGORIES]
 MOE_OP = re.compile(r"grouped|expert|moe|gmm|fused_experts", re.I)
-COMPUTE = {"attention", "rope", "moe", "gemm", "norm", "softmax/loss", "elementwise/other"}
+COMPUTE = {"attention", "attention (prefill)", "attention (decode)", "rope", "moe", "gemm", "norm", "softmax/loss", "elementwise/other"}
 
 
 def classify(name, op):
@@ -47,7 +50,9 @@ def kind_of(path):
     for k in ("EXTEND", "DECODE"):
         if f"-{k}" in b:
             return k
-    return "train" if "train" in b else "other"
+    if "train" in b:
+        return "train"
+    return "rollout (prefill+decode)" if "-TP-" in b else "other"
 
 
 def union(iv):
