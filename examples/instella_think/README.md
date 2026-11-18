@@ -15,6 +15,8 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `run_code.sh` | **Code RL arm.** Dolci-Think-RL `code_rlvr`, unit-test reward, HumanEval+/MBPP+/LiveCodeBench v3 evals. Wrapper over `run_async.sh`. |
 | `code_reward.py` | The code reward (`--custom-rm-path code_reward.batched_reward`). All-or-nothing while training (`CODE_REWARD_MODE=binary`, default; `partial` restores the old pass-rate reward) and at eval; the pass rate is logged as `rollout/code/pass_rate_mean`. Self-tests with `python3 code_reward.py` (needs the sandbox). |
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
+| `test_grader.sh` | Runs every grader test (hardening, adversarial, hack monitor in both reward modes, reward self-test) against a private local server. |
+| `HANDOFF.md` | State of the v7 code-RL grader work: changes, env vars, verification, metrics, lux plan, open decisions. |
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol, plus LCB v5/v6, HumanEval/MBPP Pro, CRUXEval and Codeforces. |
 | `validate_code_benchmarks.py` | Grades reference / always-wrong answers and old eval dumps against the bench sandbox. |
@@ -278,15 +280,61 @@ Both LCB and Codeforces test files are parsed whole and cached by the sandbox
 accepted Python Codeforces submissions), always-wrong answers, and an old eval dump against
 the sandbox.
 
+### Grader and reward
+
+**Reward.** Training is all-or-nothing by default; eval is always pass@1.
+
+| `CODE_REWARD_MODE` | training reward | note |
+|---|---|---|
+| `binary` (default) | 1 iff pass rate >= `CODE_REWARD_PASS_THRESHOLD` (default 1.0) | 0.99 differs from 1.0 only when `CODE_MAX_TESTS` >= 100 |
+| `partial` | the pass rate | the reward of the reference run below |
+
+The legacy `CODE_PARTIAL_CREDIT=1/0` still selects partial/binary when `CODE_REWARD_MODE` is unset, and a
+contradicting pair is fatal. Whatever the mode, the pass rate is logged as `rollout/code/pass_rate_mean`.
+
+**Strict grading** (`CODE_STRICT_GRADING=1`, default; training rows only). Every value an assert compares or
+truth-tests is reduced to builtin types before comparing, so objects with rigged `__eq__`, `__bool__`, `__lt__`,
+... fail. The program runs as module `tmp_sol`, so a `__main__` block neither runs nor exits early. Pure-Python
+`__eq__` (dataclasses, `Fraction`, a user class) is rejected by design. Evals keep the benchmarks' own rules.
+
+**Both train and eval:** on the assert and call routes, exiting before the tests finish fails the test (no
+`sys.exit(0)` pass), and the test code and expected output are deleted before the program runs. Responses
+carry `flags` (`early_exit`, `strict_reject`, `timeout`) for monitoring; they never change a verdict.
+
+**Checker rows** (several correct outputs): `metadata.checker` (Python source) or a label
+`{"tests": [...], "checker": "..."}` go to `/test_program_checker`. The checker runs as
+`checker.py input.txt correct_output.txt solution_output.txt`, and a test passes iff it exits 0 printing 1.
+
+**A local grader** (tests, debugging). Bind to 127.0.0.1, with its own token file and scratch dir, and an
+interpreter <= 3.12 (the server refuses 3.13+):
+
+```bash
+python3 $I/code_exec_server.py --host 127.0.0.1 --port 18977 --token-file /tmp/$USER-tok \
+  --scratch /tmp/$USER-scratch --python <venv>/bin/python &   # the token file is created mode 600
+bash $I/test_grader.sh     # or: every suite against its own private server (GRADER_PYTHON=<venv>/bin/python)
+```
+
 ### 7. Watch it
 
 ```bash
 L=$(ls -t $NFS_ROOT/rl-logs/launch-code*.out | head -1)
 grep "CODE_REWARD scored" $L | tail -1     # api_error must stay 0
 grep -o "'rollout/[a-z_]*': [0-9.e-]*" $L | tail -4
+grep -o "code_hack [0-9]*: .*" $L | tail -1  # rollout/code/* and rollout/code_hack/* of the last step
 grep -o "'eval/\(humanevalplus\|mbppplus\|lcb_v3\)': [0-9.]*" $L
-$I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench
+$I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench   # early_exits= strict_rejects= errors=
 ```
+
+In W&B (`rollout/step` axis):
+- `rollout/code/pass_rate_mean` and `rollout/code/all_pass_rate` over every graded training sample;
+  `rollout/code/trained/*` is the batch the trainer got (after the dynamic filter). Under `binary` the train
+  reward is `all_pass_rate`.
+- `rollout/code_hack/solved_any_rate`: the share of all-pass samples with any hack flag. Alarm if it trends up
+  over 20+ steps, or if `all_pass_rate` jumps with no eval gain. Then look at `solved_<k>_rate` for
+  `helper_tamper`, `touch_frames`, `touch_builtins`, `sys_modules` and `exit_call`, and read dumped samples
+  whose `metadata.code_hack.<k>` is set.
+- `rollout/code_hack/early_exit_rate` and `strict_reject_rate` are failed attempts; rising early in a run is
+  the policy probing the grader.
 
 Stop a run from inside the container: `RAY_ADDRESS=http://$HEAD_IP:8265 ray job list`, then
 `ray job stop <id>`. **Relaunching with the same `SAVE_TAG` resumes** from the newest
@@ -297,7 +345,7 @@ Stop a run from inside the container: `RAY_ADDRESS=http://$HEAD_IP:8265 ray job 
 | | |
 |---|---|
 | step time | ~20 min (rollout-bound; the train step itself is ~2 min, weight sync ~3 s) |
-| train reward | 0.45 at step 1, 0.5-0.6 by step 30 (partial-credit reward; compare `rollout/code/pass_rate_mean` under the binary default) |
+| pass rate (`rollout/code/pass_rate_mean`) | 0.45 at step 1, 0.5-0.6 by step 30. That run trained on the partial reward, i.e. this value. No all-pass baseline exists yet, so record `rollout/code/all_pass_rate` from the first binary run. |
 | eval cost | see "Evals" above; training waits while it runs |
 | checkpoint | ~207 GB, ~66 s to save |
 
