@@ -106,9 +106,11 @@ if [ -z "${CODE_EXEC_API_URL:-}" ]; then
 fi
 export CODE_EXEC_TIMEOUT="${CODE_EXEC_TIMEOUT:-5}"
 export CODE_MAX_TESTS="${CODE_MAX_TESTS:-32}"
-# binary: 1 iff pass rate >= CODE_REWARD_PASS_THRESHOLD (1.0 = every test; OLMo 3 uses 0.99,
-# which only differs from 1.0 when CODE_MAX_TESTS >= 100). partial: the pass rate, as runs
-# before this switch used. Legacy CODE_PARTIAL_CREDIT=1/0 maps to partial/binary.
+# binary: 1 iff pass rate >= CODE_REWARD_PASS_THRESHOLD (1.0 = every test; 0.99 only differs
+# from it when CODE_MAX_TESTS >= 100). partial: the pass rate. Legacy CODE_PARTIAL_CREDIT=1/0
+# maps to partial/binary.
+case "${CODE_PARTIAL_CREDIT:-}" in ""|0|1) ;; *)
+   echo "FATAL: CODE_PARTIAL_CREDIT must be 0 or 1, got ${CODE_PARTIAL_CREDIT}" >&2; exit 1 ;; esac
 if [ -z "${CODE_REWARD_MODE:-}" ] && [ -n "${CODE_PARTIAL_CREDIT:-}" ]; then
    [ "${CODE_PARTIAL_CREDIT}" = "1" ] && CODE_REWARD_MODE=partial || CODE_REWARD_MODE=binary
 fi
@@ -120,6 +122,8 @@ if [ -n "${CODE_PARTIAL_CREDIT:-}" ] && [ "$([ "${CODE_PARTIAL_CREDIT}" = "1" ] 
    echo "FATAL: CODE_REWARD_MODE=${CODE_REWARD_MODE} contradicts legacy CODE_PARTIAL_CREDIT=${CODE_PARTIAL_CREDIT}; unset one" >&2; exit 1
 fi
 export CODE_REQUIRE_THINK="${CODE_REQUIRE_THINK:-1}"
+# 1: training asserts graded strictly (README "Grader and reward"); evals never are.
+export CODE_STRICT_GRADING="${CODE_STRICT_GRADING:-1}"
 export CODE_REWARD_SCALE="${CODE_REWARD_SCALE:-1.0}"
 
 # --- run identity -----------------------------------------------------------------
@@ -240,7 +244,7 @@ if [ "${CHECK_ONLY:-0}" = "1" ]; then
    echo "  project    : ${WANDB_PROJECT}"
    echo "  run name   : ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
    echo "  train data : ${PROMPT_DATA} ($(wc -l < "${PROMPT_DATA}") prompts)"
-   echo "  reward     : CODE_REWARD_MODE=${CODE_REWARD_MODE} threshold=${CODE_REWARD_PASS_THRESHOLD}"
+   echo "  reward     : CODE_REWARD_MODE=${CODE_REWARD_MODE} threshold=${CODE_REWARD_PASS_THRESHOLD} CODE_STRICT_GRADING=${CODE_STRICT_GRADING}"
    echo "  eval       : ${CODE_BENCH_SETS} (n=${CODE_BENCH_N}, ${CODE_BENCH_MAX_LEN} tokens) via ${EVAL_CONFIG}"
    echo "  save dir   : ${SAVE_DIR} (every ${SAVE_INTERVAL} steps)"
    exit 0
@@ -262,6 +266,7 @@ cp "${TARGET}" "${FROZEN}" || exit 1
 echo "=== code RL $(( ROLLOUT_MAX_RESPONSE_LEN / 1024 ))k arm ==="
 echo "  wandb: ${WANDB_PROJECT} / ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
 for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_REWARD_MODE CODE_REWARD_PASS_THRESHOLD CODE_REQUIRE_THINK \
+         CODE_STRICT_GRADING CUSTOM_ROLLOUT_LOG_PATH \
          SAVE_INTERVAL EVAL_INTERVAL ROLLOUT_MAX_RESPONSE_LEN DISABLE_STD_NORM USE_ROUTING_REPLAY \
          CONTEXT_LEN PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER; do
    echo "  ${V}=${!V}"
