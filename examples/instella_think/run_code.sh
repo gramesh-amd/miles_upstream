@@ -4,7 +4,9 @@
 # Same recipe as run_if.sh (itself the rytwnj5z math recipe, see that file's header),
 # with the task swapped to unit-test-verified code generation:
 #   data   : Dolci-Think-RL code_rlvr (21k prompts, stdin/stdout + assert tests)
-#   reward : code_reward.batched_reward -- pass rate while training, all-or-nothing at eval
+#   reward : code_reward.batched_reward -- all-or-nothing (CODE_REWARD_MODE=binary) while
+#            training, CODE_REWARD_MODE=partial for the old pass-rate reward; always
+#            all-or-nothing at eval. The pass rate is logged as rollout/code/pass_rate_mean.
 #   eval   : HumanEval+, MBPP+ and LiveCodeBench v3 under OLMo 3's protocol (README)
 # Objective defaults (nostd + R3, per-sample loss, fp32 head) are run_if.sh's, for the
 # same reasons given there; this file only sets what differs.
@@ -104,7 +106,19 @@ if [ -z "${CODE_EXEC_API_URL:-}" ]; then
 fi
 export CODE_EXEC_TIMEOUT="${CODE_EXEC_TIMEOUT:-5}"
 export CODE_MAX_TESTS="${CODE_MAX_TESTS:-32}"
-export CODE_PARTIAL_CREDIT="${CODE_PARTIAL_CREDIT:-1}"
+# binary: 1 iff pass rate >= CODE_REWARD_PASS_THRESHOLD (1.0 = every test; OLMo 3 uses 0.99,
+# which only differs from 1.0 when CODE_MAX_TESTS >= 100). partial: the pass rate, as runs
+# before this switch used. Legacy CODE_PARTIAL_CREDIT=1/0 maps to partial/binary.
+if [ -z "${CODE_REWARD_MODE:-}" ] && [ -n "${CODE_PARTIAL_CREDIT:-}" ]; then
+   [ "${CODE_PARTIAL_CREDIT}" = "1" ] && CODE_REWARD_MODE=partial || CODE_REWARD_MODE=binary
+fi
+export CODE_REWARD_MODE="${CODE_REWARD_MODE:-binary}"
+export CODE_REWARD_PASS_THRESHOLD="${CODE_REWARD_PASS_THRESHOLD:-1.0}"
+case "${CODE_REWARD_MODE}" in binary|partial) ;; *)
+   echo "FATAL: CODE_REWARD_MODE must be binary or partial, got ${CODE_REWARD_MODE}" >&2; exit 1 ;; esac
+if [ -n "${CODE_PARTIAL_CREDIT:-}" ] && [ "$([ "${CODE_PARTIAL_CREDIT}" = "1" ] && echo partial || echo binary)" != "${CODE_REWARD_MODE}" ]; then
+   echo "FATAL: CODE_REWARD_MODE=${CODE_REWARD_MODE} contradicts legacy CODE_PARTIAL_CREDIT=${CODE_PARTIAL_CREDIT}; unset one" >&2; exit 1
+fi
 export CODE_REQUIRE_THINK="${CODE_REQUIRE_THINK:-1}"
 export CODE_REWARD_SCALE="${CODE_REWARD_SCALE:-1.0}"
 
@@ -154,7 +168,9 @@ elif [ "${DRGRPO}" = "1" ]; then _n+=("drgrpo${DRGRPO_DIVISOR%%.*}")
 else _n+=("persample"); fi
 [ "${OVERLONG_FILTER}" = "1" ]      && _n+=("overlong")
 [ "${FP32_TRAINER_READOUT}" = "1" ] && _n+=("fp32head")
-[ "${CODE_PARTIAL_CREDIT}" = "1" ]  && _n+=("passrate")  || _n+=("allpass")
+if [ "${CODE_REWARD_MODE}" = "partial" ]; then _n+=("passrate")
+elif [ "${CODE_REWARD_PASS_THRESHOLD}" = "1.0" ] || [ "${CODE_REWARD_PASS_THRESHOLD}" = "1" ]; then _n+=("allpass")
+else _n+=("pass${CODE_REWARD_PASS_THRESHOLD}"); fi
 [ "${CODE_REQUIRE_THINK}" = "1" ]   || _n+=("nothink")
 [ "${EVAL_MAX_RESPONSE_LEN}" = "${ROLLOUT_MAX_RESPONSE_LEN}" ] || _n+=("evallen${EVAL_MAX_RESPONSE_LEN}")
 [ "${CONTEXT_LEN}" = "32768" ] || _n+=("ctx${CONTEXT_LEN}")
@@ -224,6 +240,7 @@ if [ "${CHECK_ONLY:-0}" = "1" ]; then
    echo "  project    : ${WANDB_PROJECT}"
    echo "  run name   : ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
    echo "  train data : ${PROMPT_DATA} ($(wc -l < "${PROMPT_DATA}") prompts)"
+   echo "  reward     : CODE_REWARD_MODE=${CODE_REWARD_MODE} threshold=${CODE_REWARD_PASS_THRESHOLD}"
    echo "  eval       : ${CODE_BENCH_SETS} (n=${CODE_BENCH_N}, ${CODE_BENCH_MAX_LEN} tokens) via ${EVAL_CONFIG}"
    echo "  save dir   : ${SAVE_DIR} (every ${SAVE_INTERVAL} steps)"
    exit 0
@@ -244,7 +261,7 @@ cp "${TARGET}" "${FROZEN}" || exit 1
 
 echo "=== code RL $(( ROLLOUT_MAX_RESPONSE_LEN / 1024 ))k arm ==="
 echo "  wandb: ${WANDB_PROJECT} / ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo 3node)"
-for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_PARTIAL_CREDIT CODE_REQUIRE_THINK \
+for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_REWARD_MODE CODE_REWARD_PASS_THRESHOLD CODE_REQUIRE_THINK \
          SAVE_INTERVAL EVAL_INTERVAL ROLLOUT_MAX_RESPONSE_LEN DISABLE_STD_NORM USE_ROUTING_REPLAY \
          CONTEXT_LEN PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER; do
    echo "  ${V}=${!V}"

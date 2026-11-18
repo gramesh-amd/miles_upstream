@@ -837,7 +837,9 @@ echo "NCCL_SOCKET_IFNAME=${NET_IF}"
 # needed here). INSTELLA_DIR kept for convenience.
 #
 # The IF_* vars configure if_reward.py and are inert for math runs (nothing imports it);
-# the CODE_* vars do the same for code_reward.py (run_code.sh).
+# the CODE_* vars do the same for code_reward.py (run_code.sh). CODE_REWARD_MODE and the
+# legacy CODE_PARTIAL_CREDIT go through empty when unset, so code_reward.py resolves them
+# (default binary) and rejects a contradictory pair.
 # They have to be listed HERE rather than merely exported before launch: the reward runs
 # inside the Ray rollout workers, whose environment is exactly this runtime_env, so an
 # `export IF_REQUIRE_THINK=0` in the launching shell would otherwise be silently dropped
@@ -887,7 +889,9 @@ RUNTIME_ENV_JSON="{
     \"CODE_BENCH_API_URL\": \"${CODE_BENCH_API_URL:-}\",
     \"CODE_EXEC_TIMEOUT\": \"${CODE_EXEC_TIMEOUT:-5}\",
     \"CODE_MAX_TESTS\": \"${CODE_MAX_TESTS:-32}\",
-    \"CODE_PARTIAL_CREDIT\": \"${CODE_PARTIAL_CREDIT:-1}\",
+    \"CODE_REWARD_MODE\": \"${CODE_REWARD_MODE:-}\",
+    \"CODE_REWARD_PASS_THRESHOLD\": \"${CODE_REWARD_PASS_THRESHOLD:-1.0}\",
+    \"CODE_PARTIAL_CREDIT\": \"${CODE_PARTIAL_CREDIT:-}\",
     \"CODE_REQUIRE_THINK\": \"${CODE_REQUIRE_THINK:-1}\",
     \"CODE_REWARD_SCALE\": \"${CODE_REWARD_SCALE:-1.0}\",
     \"CODE_REWARD_CONCURRENCY\": \"${CODE_REWARD_CONCURRENCY:-64}\",

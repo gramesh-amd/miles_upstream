@@ -13,9 +13,19 @@ against the row's tests. Test formats, all JSON in `label`:
 Programs run on the code-exec service (code_exec_server.py) at CODE_EXEC_API_URL, never
 on the training node. Set CODE_EXEC_API_URL=local only for offline debugging.
 
-Training reward is the pass rate (CODE_PARTIAL_CREDIT=1) or all-or-nothing. Eval is
-always all-or-nothing, i.e. pass@1. Like if_reward.py, the eval/train split is read from
-metadata.split because miles calls a custom reward without its `evaluation` kwarg.
+Training reward, CODE_REWARD_MODE:
+    binary   (default) 1 iff pass rate >= CODE_REWARD_PASS_THRESHOLD, else 0. All-or-nothing
+             as in DeepCoder / AceReason; the default threshold 1.0 means every test passes.
+             OLMo 3 uses 0.99, which only differs from 1.0 when CODE_MAX_TESTS >= 100 (at the
+             default 32 tests the best non-perfect rate is 31/32 = 0.969).
+    partial  the pass rate itself, i.e. the behaviour of runs before this switch. The legacy
+             CODE_PARTIAL_CREDIT=1/0 still selects partial/binary when CODE_REWARD_MODE is unset.
+Eval is always all-or-nothing at 1.0, i.e. pass@1, whatever the mode. Like if_reward.py, the
+eval/train split is read from metadata.split because miles calls a custom reward without its
+`evaluation` kwarg. The think gate and the other 0-reward cases below apply in both modes.
+
+The raw pass rate of every graded sample is kept in sample.metadata["code_pass_rate"] and,
+through log_rollout_data, logged as rollout/code/pass_rate_mean and rollout/code/all_pass_rate.
 
 A 0 reward is ambiguous, so every non-model cause is counted and logged as a CODE_REWARD
 line every CODE_LOG_EVERY samples:
@@ -29,7 +39,8 @@ Reward-hack monitoring (never changes a reward): every graded sample gets
 sample.metadata["code_hack"], booleans from the server's per-request flags and a static scan
 of the code (hack_flags), and training samples are also counted in HACKS. With
 --custom-rollout-log-function-path code_reward.log_rollout_data, both are logged per rollout
-step as rollout/code_hack/* rates.
+step as rollout/code_hack/* rates. `solved` there means raw reward >= 0.99, so it is the
+all-pass rate under the default binary reward and the near-perfect rate under partial.
 """
 
 import ast
@@ -50,7 +61,26 @@ logger = logging.getLogger(__name__)
 _API_URL = os.environ.get("CODE_EXEC_API_URL", "").strip().rstrip("/")
 _LOCAL = _API_URL.lower() == "local"
 REWARD_SCALE = float(os.environ.get("CODE_REWARD_SCALE", "1.0"))
-_PARTIAL_CREDIT = os.environ.get("CODE_PARTIAL_CREDIT", "1") == "1"
+REWARD_MODES = ("binary", "partial")
+
+
+def _reward_mode() -> str:
+    mode = os.environ.get("CODE_REWARD_MODE", "").strip().lower()
+    legacy = os.environ.get("CODE_PARTIAL_CREDIT", "").strip()
+    if legacy not in ("", "0", "1"):
+        raise ValueError(f"CODE_PARTIAL_CREDIT must be 0 or 1, got {legacy!r}")
+    legacy_mode = {"1": "partial", "0": "binary"}.get(legacy)
+    if mode and mode not in REWARD_MODES:
+        raise ValueError(f"CODE_REWARD_MODE must be one of {REWARD_MODES}, got {mode!r}")
+    if mode and legacy_mode and mode != legacy_mode:
+        raise ValueError(f"CODE_REWARD_MODE={mode} contradicts CODE_PARTIAL_CREDIT={legacy}; unset one")
+    return mode or legacy_mode or "binary"
+
+
+REWARD_MODE = _reward_mode()
+PASS_THRESHOLD = float(os.environ.get("CODE_REWARD_PASS_THRESHOLD", "1.0"))
+if not 0.0 < PASS_THRESHOLD <= 1.0:
+    raise ValueError(f"CODE_REWARD_PASS_THRESHOLD must be in (0, 1], got {PASS_THRESHOLD}")
 _REQUIRE_THINK = os.environ.get("CODE_REQUIRE_THINK", "1") == "1"
 _TIMEOUT = float(os.environ.get("CODE_EXEC_TIMEOUT", "5"))
 # Tests per sample. Dolci rows carry up to hundreds; past a few dozen the extra tests
@@ -84,6 +114,7 @@ class _Stats:
     def reset(self):
         self.n = 0
         self.reward_sum = 0.0
+        self.pass_rate_sum = 0.0
         self.all_pass = 0
         self.counts = {k: 0 for k in self.KEYS}
 
@@ -91,18 +122,20 @@ class _Stats:
         with self.lock:
             self.counts[key] += 1
 
-    def note_sample(self, raw, all_pass):
+    def note_sample(self, raw, all_pass, rate=0.0):
         with self.lock:
             self.n += 1
             self.reward_sum += raw
+            self.pass_rate_sum += rate
             self.all_pass += int(all_pass)
             if _LOG_EVERY and self.n % _LOG_EVERY == 0:
                 self._dump_locked()
 
     def _dump_locked(self):
         c = " ".join(f"{k}={v}" for k, v in self.counts.items())
-        logger.info("CODE_REWARD scored=%d mean_reward=%.4f all_pass=%.4f | %s",
-                    self.n, self.reward_sum / max(1, self.n), self.all_pass / max(1, self.n), c)
+        n = max(1, self.n)
+        logger.info("CODE_REWARD mode=%s scored=%d mean_reward=%.4f mean_pass_rate=%.4f all_pass=%.4f | %s",
+                    REWARD_MODE, self.n, self.reward_sum / n, self.pass_rate_sum / n, self.all_pass / n, c)
 
     def dump(self):
         with self.lock:
@@ -306,8 +339,9 @@ def pass_rate(code: str, tests, opts=None, flags=None) -> float | None:
         else:
             entry = tests.get("entry_point") or ""
             cases = [f"{test_str}\ncheck({entry})\n"] if entry and "check(" in test_str else [test_str]
-        res = _run(code, cases[:_MAX_TESTS], stdio=False, opts=opts, flags=flags)
-        return None if res is None else sum(res) / len(cases)
+        capped = cases[:_MAX_TESTS]
+        res = _run(code, capped, stdio=False, opts=opts, flags=flags)
+        return None if res is None else sum(res) / len(capped)
 
     if isinstance(tests[0], dict):
         cases = [{"input": t.get("input", ""), "output": t.get("output", "")}
@@ -436,7 +470,7 @@ def _score_bench(response: str, label: dict) -> float:
         STATS.note("api_error")
         STATS.note_sample(0.0, False)
         return 0.0
-    STATS.note_sample(float(ok), ok)
+    STATS.note_sample(float(ok), ok, float(ok))
     return float(ok) * REWARD_SCALE
 
 
@@ -556,30 +590,43 @@ def hack_flags(code: str, server: dict, solved: bool) -> dict:
     return flags
 
 
-class _HackWindow:
-    """Training samples scored since the last rollout log. Sample metadata alone would miss
-    groups the dynamic filter drops, and those include every group a hack solves 8/8."""
+class _Window:
+    """Per-sample values for training samples scored since the last rollout log. Sample
+    metadata alone would miss groups the dynamic filter drops, and those include every group
+    a hack solves 8/8 (and, under the binary reward, every all-pass or all-fail group)."""
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.flags = []
+        self.items = []
 
-    def add(self, flags):
+    def add(self, item):
         with self.lock:
-            self.flags.append(flags)
+            self.items.append(item)
 
     def drain(self):
         with self.lock:
-            out, self.flags = self.flags, []
+            out, self.items = self.items, []
         return out
 
 
-HACKS = _HackWindow()
+HACKS = _Window()
+PASS_RATES = _Window()
+
+
+def pass_rate_metrics(rates: list) -> dict:
+    """Over graded samples (think-gate, no-code and api_error samples never reach the grader):
+    pass_rate_mean is the mean raw pass rate, the partial-credit reward; all_pass_rate is the
+    fraction passing every test, the binary reward at threshold 1.0."""
+    n = len(rates)
+    if not n:
+        return {}
+    return {"n_graded": n, "pass_rate_mean": sum(rates) / n,
+            "all_pass_rate": sum(r >= 1.0 - 1e-9 for r in rates) / n}
 
 
 def hack_metrics(flags: list) -> dict:
-    """Rates over a list of hack_flags dicts. `solved_<k>_rate` is among samples with reward
-    >= 0.99 (pass rate), i.e. how often a flagged program is also one that wins."""
+    """Rates over a list of hack_flags dicts. `solved_<k>_rate` is among samples with raw
+    reward >= 0.99, i.e. how often a flagged program is also one that wins."""
     n = len(flags)
     if not n:
         return {}
@@ -600,19 +647,26 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics=None, roll
         rollout/code_hack/<k>          every training sample scored since the previous log,
                                        including groups the dynamic filter dropped
         rollout/code_hack/trained/<k>  the batch handed to the trainer (sample.metadata)
+        rollout/code/<k>               pass_rate_metrics, same two scopes (rollout/code/trained/<k>)
     Returns False so miles' default rollout logging still runs."""
     try:
         from miles.utils.metric_utils import compute_rollout_step
         from miles.utils.tracking_utils import tracking
 
-        trained = []
+        trained, trained_rates = [], []
         for group in samples or []:
             for s in group if isinstance(group, (list, tuple)) else [group]:
                 meta = getattr(s, "metadata", None)
-                if isinstance(meta, dict) and isinstance(meta.get("code_hack"), dict):
+                if not isinstance(meta, dict):
+                    continue
+                if isinstance(meta.get("code_hack"), dict):
                     trained.append(meta["code_hack"])
+                if isinstance(meta.get("code_pass_rate"), (int, float)):
+                    trained_rates.append(float(meta["code_pass_rate"]))
         log_dict = {f"rollout/code_hack/{k}": v for k, v in hack_metrics(HACKS.drain()).items()}
         log_dict |= {f"rollout/code_hack/trained/{k}": v for k, v in hack_metrics(trained).items()}
+        log_dict |= {f"rollout/code/{k}": v for k, v in pass_rate_metrics(PASS_RATES.drain()).items()}
+        log_dict |= {f"rollout/code/trained/{k}": v for k, v in pass_rate_metrics(trained_rates).items()}
         if log_dict:
             log_dict["rollout/step"] = compute_rollout_step(args, rollout_id)
             logger.info("code_hack %s: %s", rollout_id, log_dict)
@@ -625,6 +679,15 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics=None, roll
 # --- scoring --------------------------------------------------------------------
 def _is_eval(meta: dict, evaluation_kwarg: bool) -> bool:
     return evaluation_kwarg or str(meta.get("split", "")).lower() == "eval"
+
+
+def reward_from_pass_rate(rate: float, evaluation: bool) -> float:
+    """Unscaled reward for a graded sample (see the module docstring for the modes)."""
+    if evaluation:
+        return float(rate >= 1.0 - 1e-9)
+    if REWARD_MODE == "partial":
+        return rate
+    return float(rate >= PASS_THRESHOLD - 1e-9)
 
 
 def _score_one(sample, evaluation: bool = False) -> float:
@@ -660,14 +723,15 @@ def _score_one(sample, evaluation: bool = False) -> float:
         STATS.note_sample(0.0, False)
         return 0.0
 
-    all_pass = rate >= 1.0 - 1e-9
-    raw = rate if (_PARTIAL_CREDIT and not evaluation) else float(all_pass)
-    STATS.note_sample(raw, all_pass)
+    raw = reward_from_pass_rate(rate, evaluation)
+    STATS.note_sample(raw, rate >= 1.0 - 1e-9, rate)
     flags = hack_flags(code, server, raw >= 0.99)
     if isinstance(getattr(sample, "metadata", None), dict):
         sample.metadata["code_hack"] = flags
+        sample.metadata["code_pass_rate"] = rate
     if not evaluation:
         HACKS.add(flags)
+        PASS_RATES.add(rate)
     return raw * REWARD_SCALE
 
 
@@ -718,23 +782,43 @@ if __name__ == "__main__":
     half = "<think>r</think>\n```python\na, b = map(int, input().split())\nprint(a + b if a != b else 0)\n```"
     asserts = json.dumps(["assert double(2) == 4", "assert double(0) == 0"])
     pytest_style = json.dumps({"test": "def test_a():\n    assert inc(1) == 2\n\ndef test_b():\n    assert inc(5) == 7\n"})
+    # (response, label, metadata, (binary reward, partial reward), pass rate or None, why)
     cases = [
-        (good, stdio, {}, 1.0, "stdio all pass"),
-        (half, stdio, {}, 0.5, "stdio half pass, partial credit"),
-        (half, stdio, {"split": "eval"}, 0.0, "eval is all-or-nothing"),
-        ("```python\nprint(5)\n```", stdio, {}, 0.0 if _REQUIRE_THINK else 0.25, "think gate"),
-        ("<think>r</think>no code here", stdio, {}, 0.0, "prose is not a program"),
-        ("<think>r</think>```python\ndef double(x): return 2*x\n```", asserts, {}, 1.0, "assert list"),
-        ("<think>r</think>```python\ndef inc(x): return x+1\n```", pytest_style, {}, 0.5, "pytest functions"),
-        ("<think>r</think>```python\nwhile True: pass\n```", stdio, {}, 0.0, "infinite loop"),
-        (good, json.dumps([stdio]), {}, 1.0, "Dolci shape: list holding one JSON string"),
+        (good, stdio, {}, (1.0, 1.0), 1.0, "stdio all pass"),
+        (half, stdio, {}, (0.0, 0.5), 0.5, "stdio half pass"),
+        (half, stdio, {"split": "eval"}, (0.0, 0.0), 0.5, "eval is all-or-nothing in both modes"),
+        ("```python\nprint(5)\n```", stdio, {}, (0.0, 0.0 if _REQUIRE_THINK else 0.25),
+         None if _REQUIRE_THINK else 0.25, "think gate"),
+        ("<think>r</think>no code here", stdio, {}, (0.0, 0.0), 0.0, "prose is not a program"),
+        ("<think>r</think>```python\ndef double(x): return 2*x\n```", asserts, {}, (1.0, 1.0), 1.0, "assert list"),
+        ("<think>r</think>```python\ndef inc(x): return x+1\n```", pytest_style, {}, (0.0, 0.5), 0.5,
+         "pytest functions"),
+        ("<think>r</think>```python\nwhile True: pass\n```", stdio, {}, (0.0, 0.0), 0.0, "infinite loop"),
+        (good, json.dumps([stdio]), {}, (1.0, 1.0), 1.0, "Dolci shape: list holding one JSON string"),
     ]
     ok = True
-    for resp, label, meta, want, why in cases:
-        got = asyncio.run(batched_reward(None, [_S(resp, label, meta)]))[0]
-        flag = "ok " if abs(got - want * REWARD_SCALE) < 1e-6 else "FAIL"
-        ok &= flag == "ok "
-        print(f"  {flag} reward={got:.3f} want={want * REWARD_SCALE:.3f}  ({why})")
+    env_mode, env_threshold = REWARD_MODE, PASS_THRESHOLD
+    print(f"env: CODE_REWARD_MODE={env_mode} CODE_REWARD_PASS_THRESHOLD={env_threshold}")
+    for REWARD_MODE in REWARD_MODES:
+        PASS_THRESHOLD = 1.0
+        for resp, label, meta, wants, want_rate, why in cases:
+            want = wants[REWARD_MODES.index(REWARD_MODE)]
+            s = _S(resp, label, meta)
+            got = asyncio.run(batched_reward(None, [s]))[0]
+            rate = s.metadata.get("code_pass_rate")
+            good_rate = rate == want_rate if want_rate is None else rate is not None and abs(rate - want_rate) < 1e-6
+            flag = "ok " if abs(got - want * REWARD_SCALE) < 1e-6 and good_rate else "FAIL"
+            ok &= flag == "ok "
+            print(f"  {flag} [{REWARD_MODE}] reward={got:.3f} want={want * REWARD_SCALE:.3f} "
+                  f"pass_rate={rate} want={want_rate}  ({why})")
+    REWARD_MODE, PASS_THRESHOLD = "binary", 0.5
+    got = asyncio.run(batched_reward(None, [_S(half, stdio)]))[0]
+    flag = "ok " if abs(got - REWARD_SCALE) < 1e-6 else "FAIL"
+    ok &= flag == "ok "
+    print(f"  {flag} [binary, threshold 0.5] reward={got:.3f} want={REWARD_SCALE:.3f}  (stdio half pass)")
+    REWARD_MODE, PASS_THRESHOLD = env_mode, env_threshold
+    HACKS.drain()
+    PASS_RATES.drain()
     STATS.dump()
     if STATS.counts["api_error"]:
         print("  FAIL api_error > 0: the service dropped requests")

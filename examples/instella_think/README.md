@@ -13,7 +13,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `paths.sh` | Per-user locations (checkpoints, data, NFS logs, Primus checkout, sandbox token), all overridable; per-user overrides go in `~/.instella-env.sh`. Sourced by every script below. |
 | `cluster/` | Login-node tooling for Spur: `bringup.sh` (containers), `on_node.sh` (run a payload in a node's container), `env_setup.sh`, `ray_head.sh` / `ray_worker.sh`, `launch.sh`, `code_exec.sh` (sandbox). |
 | `run_code.sh` | **Code RL arm.** Dolci-Think-RL `code_rlvr`, unit-test reward, HumanEval+/MBPP+/LiveCodeBench v3 evals. Wrapper over `run_async.sh`. |
-| `code_reward.py` | The code reward (`--custom-rm-path code_reward.batched_reward`). Pass rate while training, all-or-nothing at eval. Self-tests with `python3 code_reward.py` (needs the sandbox). |
+| `code_reward.py` | The code reward (`--custom-rm-path code_reward.batched_reward`). All-or-nothing while training (`CODE_REWARD_MODE=binary`, default; `partial` restores the old pass-rate reward) and at eval; the pass rate is logged as `rollout/code/pass_rate_mean`. Self-tests with `python3 code_reward.py` (needs the sandbox). |
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol, plus LCB v5/v6, HumanEval/MBPP Pro, CRUXEval and Codeforces. |
@@ -297,7 +297,7 @@ Stop a run from inside the container: `RAY_ADDRESS=http://$HEAD_IP:8265 ray job 
 | | |
 |---|---|
 | step time | ~20 min (rollout-bound; the train step itself is ~2 min, weight sync ~3 s) |
-| train reward | 0.45 at step 1, 0.5-0.6 by step 30 |
+| train reward | 0.45 at step 1, 0.5-0.6 by step 30 (partial-credit reward; compare `rollout/code/pass_rate_mean` under the binary default) |
 | eval cost | see "Evals" above; training waits while it runs |
 | checkpoint | ~207 GB, ~66 s to save |
 
