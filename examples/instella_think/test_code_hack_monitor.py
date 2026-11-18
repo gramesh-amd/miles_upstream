@@ -68,9 +68,29 @@ E2E = [
 
 
 class _S:
-    def __init__(self, code, label):
+    def __init__(self, code, label, metadata=None):
         self.response = f"<think>r</think>\n```python\n{code}\n```"
-        self.label, self.metadata = json.dumps(label), {}
+        self.label, self.metadata = json.dumps(label), dict(metadata or {})
+
+
+# Checker rows: "print two non-negative integers that sum to n"; the jury answers are not "n 0".
+PAIR_CHECKER = ("import sys\nn = int(open(sys.argv[1]).read().split()[0])\nt = open(sys.argv[3]).read().split()\n"
+                "ok = len(t) == 2 and all(x.isdigit() for x in t) and int(t[0]) + int(t[1]) == n\n"
+                "print(1 if ok else 0)\n")
+PAIRS = [{"input": "5\n", "output": "2 3\n"}, {"input": "10\n", "output": "5 5\n"},
+         {"input": "1\n", "output": "0 1\n"}, {"input": "7\n", "output": "3 4\n"}]
+ALT = "n = int(input())\nprint(n, 0)"
+# (name, code, metadata, flags, (binary reward, partial reward))
+E2E_CHECKER = [
+    ("checker: alternative answer", ALT, {"checker": PAIR_CHECKER}, set(), (1.0, 1.0)),
+    ("checker: wrong answer", "print(1, 1)", {"checker": PAIR_CHECKER}, set(), (0.0, 0.0)),
+    ("checker: crash", ALT, {"checker": "import sys\nsys.exit(3)\n"}, set(), (0.0, 0.0)),
+    ("checker: half right", "n = int(input())\nprint(n, 0) if n % 2 else print(n)", {"checker": PAIR_CHECKER},
+     set(), (0.0, 0.75)),
+    ("checker: timeout", "while True:\n    pass", {"checker": PAIR_CHECKER}, {"timeout"}, (0.0, 0.0)),
+    ("checker: exit after printing", ALT + "\nimport sys\nsys.exit(0)", {"checker": PAIR_CHECKER}, {"exit_call"},
+     (1.0, 1.0)),
+]
 
 
 def post(route, body):
@@ -192,6 +212,50 @@ def test_reward_modes():
     return fails, total
 
 
+def test_checker_rows():
+    """Checker-row plumbing without a server: split_checker, and the options _score_one hands to
+    pass_rate (the checker replaces the training options, in train and eval alike)."""
+    fails = total = 0
+
+    def expect(name, ok):
+        nonlocal fails, total
+        total += 1
+        fails += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {name}")
+
+    split = code_reward.split_checker
+    expect("split: metadata.checker", split(PAIRS, {"checker": PAIR_CHECKER}) == (PAIRS, PAIR_CHECKER))
+    expect("split: checker in the label", split({"tests": PAIRS, "checker": PAIR_CHECKER}, {}) == (PAIRS, PAIR_CHECKER))
+    expect("split: no checker leaves the row alone", split(PAIRS, {"float_tol": 1e-6}) == (PAIRS, None))
+    expect("split: pytest dict untouched", split({"test": "def test_a(): pass"}, {}) == ({"test": "def test_a(): pass"}, None))
+    for bad, why in [({"checker": ""}, "empty"), ({"checker": 3}, "not a string")]:
+        expect(f"split: unusable checker ({why}) -> no tests", split(PAIRS, bad) == (None, None))
+    expect("split: checker with assert tests -> no tests", split(T, {"checker": PAIR_CHECKER}) == (None, None))
+
+    seen = []
+    saved = code_reward.pass_rate
+    code_reward.pass_rate = lambda code, tests, opts=None, flags=None: seen.append(opts) or 1.0
+    try:
+        for meta, want in [({"checker": PAIR_CHECKER, "float_tol": 1e-6}, {"checker": PAIR_CHECKER}),
+                           ({"checker": PAIR_CHECKER, "split": "eval"}, {"checker": PAIR_CHECKER}),
+                           ({"float_tol": 1e-6}, dict(code_reward.train_options({}), float_tol=1e-6)),
+                           ({"split": "eval"}, None)]:
+            seen.clear()
+            s = _S(ALT, PAIRS, meta)
+            r = code_reward._score_one(s)
+            expect(f"_score_one {sorted(meta)} -> pass_rate opts {sorted(want) if want else want}",
+                   seen == [want] and r == code_reward.REWARD_SCALE)
+        n0 = code_reward.STATS.counts["no_tests"]
+        r = code_reward._score_one(_S(ALT, PAIRS, {"checker": 5}))
+        expect("_score_one unusable checker -> 0 and counted as no_tests",
+               r == 0.0 and code_reward.STATS.counts["no_tests"] == n0 + 1)
+    finally:
+        code_reward.pass_rate = saved
+        code_reward.HACKS.drain()
+        code_reward.PASS_RATES.drain()
+    return fails, total
+
+
 def main():
     fails = total = 0
     for name, code, want in SCAN:
@@ -199,12 +263,29 @@ def main():
         fails += not check(f"scan {name}", {k for k, v in code_reward.scan_code(code).items() if v}, want)
     f, t = test_reward_modes()
     fails, total = fails + f, total + t
+    f, t = test_checker_rows()
+    fails, total = fails + f, total + t
     if not URL:
         print(f"{total - fails}/{total} passed (no server; set CODE_EXEC_TEST_URL for the server checks)")
         sys.exit(1 if fails else 0)
 
     mode = code_reward.REWARD_MODE
     print(f"e2e in CODE_REWARD_MODE={mode} (threshold {code_reward.PASS_THRESHOLD})")
+    for name, code, meta, want, rewards in E2E_CHECKER:
+        reward = rewards[code_reward.REWARD_MODES.index(mode)]
+        s = _S(code, PAIRS, meta)
+        got_reward = code_reward._score_one(s)
+        flags = s.metadata["code_hack"]
+        total += 1
+        fails += not check(f"e2e {name} (reward {got_reward}, pass rate {s.metadata.get('code_pass_rate')})",
+                           {k for k, v in flags.items() if v and k != "solved"}, want)
+        total += 1
+        if abs(got_reward - reward) > 1e-9 or flags["solved"] != (reward >= 0.99):
+            fails += 1
+            print(f"FAIL e2e {name}: reward {got_reward} solved {flags['solved']}, want reward {reward}")
+    code_reward.HACKS.drain()
+    code_reward.PASS_RATES.drain()
+
     samples = []
     for name, code, tests, want, rewards in E2E:
         reward = rewards[code_reward.REWARD_MODES.index(mode)]

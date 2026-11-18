@@ -10,6 +10,15 @@ against the row's tests. Test formats, all JSON in `label`:
     {"bench": ..., "route": ..., ...}      a benchmark row from prepare_code_benchmarks.py,
                                            graded by oe-eval's rules (see _score_bench)
 
+Checker rows (problems with several correct outputs): the stdin/stdout list plus a Python
+checker, either as metadata.checker = "<python source>" next to the usual label (what the v7
+data uses) or self-contained as label = {"tests": [{"input", "output"}, ...], "checker": "..."}.
+They go to the service's /test_program_checker route (open-r1's Codeforces judge): the checker
+runs sandboxed as `checker.py input.txt correct_output.txt solution_output.txt` and a test
+passes iff it exits 0 printing 1 (or 100). A checker that crashes or prints anything else fails
+the test. Reward mode, think gate, CODE_MAX_TESTS, CODE_EXEC_TIMEOUT and the hack monitor are
+the same as for stdin/stdout rows; float_tol / case_insensitive do not apply (the checker decides).
+
 Programs run on the code-exec service (code_exec_server.py) at CODE_EXEC_API_URL, never
 on the training node. Set CODE_EXEC_API_URL=local only for offline debugging.
 
@@ -201,6 +210,11 @@ def _http():
 def _run_remote(program: str, tests: list, stdio: bool, opts=None, flags=None):
     """0/1 per test, or None if the service could not be reached. The server's per-test
     outcome counts (early_exit, strict_reject, timeout) are added into `flags`."""
+    checker = (opts or {}).get("checker")
+    if checker:
+        body = {"program": program, "tests": tests, "max_execution_time": _TIMEOUT, "checker": checker}
+        per_test = _TIMEOUT + _CHECKER_TIMEOUT
+        return _post(_API_URL, "/test_program_checker", body, len(tests), min(300.0, per_test * len(tests) + 30.0), flags)
     path = "/test_program_stdio" if stdio else "/test_program"
     body = {"program": program, "tests": tests, "max_execution_time": _TIMEOUT}
     if opts:
@@ -235,11 +249,33 @@ def _post(url: str, path: str, body: dict, n_tests: int, read_timeout: float, fl
     return None
 
 
+def _checker_local(checker: str, tc: dict, out: str) -> bool:
+    import tempfile
+
+    def no_blank(s):
+        return "".join(ln + "\n" for ln in s.replace("\r", "").split("\n") if ln != "")
+
+    with tempfile.TemporaryDirectory() as d:
+        files = {"checker.py": checker, "input.txt": str(tc.get("input", "")).replace("\r", ""),
+                 "correct_output.txt": no_blank(str(tc.get("output", ""))), "solution_output.txt": no_blank(out)}
+        for name, text in files.items():
+            with open(os.path.join(d, name), "w") as f:
+                f.write(text)
+        r = subprocess.run([sys.executable, "checker.py", "input.txt", "correct_output.txt", "solution_output.txt"],
+                           cwd=d, capture_output=True, text=True, timeout=_CHECKER_TIMEOUT)
+    return r.returncode == 0 and "".join(r.stdout.split()) in ("1", "100")
+
+
 def _run_local(program: str, tests: list, stdio: bool, opts=None):
+    checker = (opts or {}).get("checker")
     out = []
     for tc in tests:
         try:
-            if stdio:
+            if checker:
+                r = subprocess.run([sys.executable, "-c", program], input=str(tc.get("input", "")),
+                                   capture_output=True, text=True, timeout=_TIMEOUT)
+                ok = r.returncode == 0 and _checker_local(checker, tc, r.stdout)
+            elif stdio:
                 r = subprocess.run([sys.executable, "-c", program], input=str(tc.get("input", "")),
                                    capture_output=True, text=True, timeout=_TIMEOUT)
                 cmp = {k: v for k, v in (opts or {}).items() if k in _STDIO_OPTS}
@@ -306,6 +342,23 @@ def _run(program, tests, stdio, opts=None, flags=None):
 
 _STDIO_OPTS = ("float_tol", "case_insensitive")
 _ASSERT_OPTS = ("strict", "name")
+_CHECKER_TIMEOUT = 10.0  # the service's CHECKER_TIMEOUT (piston runs checker.py under `timeout 10`)
+
+
+def split_checker(tests, meta: dict):
+    """(tests, checker source or None) for a parsed label; (None, None) when a row names a checker
+    that cannot be used (not a non-empty string, or tests that are not stdin/stdout cases)."""
+    checker = None
+    if isinstance(tests, dict) and "checker" in tests:
+        checker, tests = tests.get("checker"), tests.get("tests")
+    elif meta.get("checker") is not None:
+        checker = meta["checker"]
+    if checker is None:
+        return tests, None
+    if not (isinstance(checker, str) and checker.strip() and isinstance(tests, list) and tests
+            and all(isinstance(t, dict) for t in tests)):
+        return None, None
+    return tests, checker
 
 
 def train_options(meta: dict) -> dict:
@@ -325,7 +378,8 @@ def train_options(meta: dict) -> dict:
 
 def pass_rate(code: str, tests, opts=None, flags=None) -> float | None:
     """Fraction of tests passed, or None when the tests could not be run at all.
-    `opts` are grader options (train_options); `flags` collects the server's outcome counts."""
+    `opts` are grader options (train_options, or {"checker": source} for checker rows, which
+    sends stdin/stdout tests to /test_program_checker); `flags` collects the server's outcome counts."""
     if isinstance(tests, dict):
         test_str = str(tests.get("test", "") or "")
         if not test_str:
@@ -702,6 +756,11 @@ def _score_one(sample, evaluation: bool = False) -> float:
         return 0.0
     if isinstance(tests, dict) and "bench" in tests:
         return _score_bench(response, tests)
+    tests, checker = split_checker(tests, meta)
+    if tests is None:
+        STATS.note("no_tests")
+        STATS.note_sample(0.0, False)
+        return 0.0
 
     if _REQUIRE_THINK:
         ok = ("</think>" in response) if evaluation else _has_clean_think(response)
@@ -717,7 +776,8 @@ def _score_one(sample, evaluation: bool = False) -> float:
         return 0.0
 
     server = {}
-    rate = pass_rate(code, tests, None if evaluation else train_options(meta), server)
+    opts = {"checker": checker} if checker else None if evaluation else train_options(meta)
+    rate = pass_rate(code, tests, opts, server)
     if rate is None:
         STATS.note("api_error")
         STATS.note_sample(0.0, False)
@@ -796,6 +856,33 @@ if __name__ == "__main__":
         ("<think>r</think>```python\nwhile True: pass\n```", stdio, {}, (0.0, 0.0), 0.0, "infinite loop"),
         (good, json.dumps([stdio]), {}, (1.0, 1.0), 1.0, "Dolci shape: list holding one JSON string"),
     ]
+    # checker rows: "print two non-negative integers that sum to n"; the jury answers differ from n 0
+    pair_checker = ("import sys\nn = int(open(sys.argv[1]).read().split()[0])\nt = open(sys.argv[3]).read().split()\n"
+                    "ok = len(t) == 2 and all(x.isdigit() for x in t) and int(t[0]) + int(t[1]) == n\n"
+                    "print(1 if ok else 0)\n")
+    pairs = [{"input": "5\n", "output": "2 3\n"}, {"input": "10\n", "output": "5 5\n"},
+             {"input": "1\n", "output": "0 1\n"}, {"input": "7\n", "output": "3 4\n"}]
+    pair_label, pair_meta = json.dumps(pairs), {"checker": pair_checker}
+    alt = "<think>r</think>\n```python\nn = int(input())\nprint(n, 0)\n```"
+    cases += [
+        (alt, pair_label, pair_meta, (1.0, 1.0), 1.0, "checker accepts an answer other than the jury's"),
+        (alt, pair_label, {}, (0.0, 0.0), 0.0, "same answer without the checker: plain compare rejects it"),
+        (alt, json.dumps({"tests": pairs, "checker": pair_checker}), {}, (1.0, 1.0), 1.0,
+         "checker inside the label"),
+        ("<think>r</think>\n```python\nprint(1, 1)\n```", pair_label, pair_meta, (0.0, 0.0), 0.0,
+         "checker rejects a wrong answer"),
+        ("<think>r</think>\n```python\nn = int(input())\nprint(n, 0) if n % 2 else print(1, 1)\n```", pair_label,
+         pair_meta, (0.0, 0.75), 0.75, "checker row, 3 of 4 tests"),
+        (alt, pair_label, {"checker": "raise RuntimeError('broken checker')\n"}, (0.0, 0.0), 0.0,
+         "checker crash fails every test"),
+        (alt, pair_label, {"checker": "print('accepted')\n"}, (0.0, 0.0), 0.0, "checker output other than 1 fails"),
+        (alt, pair_label, dict(pair_meta, split="eval"), (1.0, 1.0), 1.0, "checker row in eval"),
+        ("```python\nn = int(input())\nprint(n, 0)\n```", pair_label, pair_meta,
+         (0.0, 0.0) if _REQUIRE_THINK else (1.0, 1.0), None if _REQUIRE_THINK else 1.0, "think gate on a checker row"),
+        ("<think>r</think>\n```python\nwhile True: pass\n```", pair_label, pair_meta, (0.0, 0.0), 0.0,
+         "checker row, infinite loop"),
+        (alt, pair_label, {"checker": 7}, (0.0, 0.0), None, "unusable checker: no_tests"),
+    ]
     ok = True
     env_mode, env_threshold = REWARD_MODE, PASS_THRESHOLD
     print(f"env: CODE_REWARD_MODE={env_mode} CODE_REWARD_PASS_THRESHOLD={env_threshold}")
@@ -803,7 +890,7 @@ if __name__ == "__main__":
         PASS_THRESHOLD = 1.0
         for resp, label, meta, wants, want_rate, why in cases:
             want = wants[REWARD_MODES.index(REWARD_MODE)]
-            s = _S(resp, label, meta)
+            s = _S(resp, label, dict(meta))
             got = asyncio.run(batched_reward(None, [s]))[0]
             rate = s.metadata.get("code_pass_rate")
             good_rate = rate == want_rate if want_rate is None else rate is not None and abs(rate - want_rate) < 1e-6
