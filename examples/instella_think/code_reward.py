@@ -23,12 +23,11 @@ Programs run on the code-exec service (code_exec_server.py) at CODE_EXEC_API_URL
 on the training node. Set CODE_EXEC_API_URL=local only for offline debugging.
 
 Training reward, CODE_REWARD_MODE:
-    binary   (default) 1 iff pass rate >= CODE_REWARD_PASS_THRESHOLD, else 0. All-or-nothing
-             as in DeepCoder / AceReason; the default threshold 1.0 means every test passes.
-             OLMo 3 uses 0.99, which only differs from 1.0 when CODE_MAX_TESTS >= 100 (at the
-             default 32 tests the best non-perfect rate is 31/32 = 0.969).
-    partial  the pass rate itself, i.e. the behaviour of runs before this switch. The legacy
-             CODE_PARTIAL_CREDIT=1/0 still selects partial/binary when CODE_REWARD_MODE is unset.
+    binary   (default) 1 iff pass rate >= CODE_REWARD_PASS_THRESHOLD, else 0. The default
+             threshold 1.0 means every test passes; 0.99 only differs from it when
+             CODE_MAX_TESTS >= 100 (at 32 tests the best non-perfect rate is 31/32 = 0.969).
+    partial  the pass rate itself. The legacy CODE_PARTIAL_CREDIT=1/0 selects partial/binary
+             when CODE_REWARD_MODE is unset.
 Eval is always all-or-nothing at 1.0, i.e. pass@1, whatever the mode. Like if_reward.py, the
 eval/train split is read from metadata.split because miles calls a custom reward without its
 `evaluation` kwarg. The think gate and the other 0-reward cases below apply in both modes.
@@ -46,7 +45,7 @@ api_error must stay at 0; if it is not, the reward is measuring the network.
 
 Reward-hack monitoring (never changes a reward): every graded sample gets
 sample.metadata["code_hack"], booleans from the server's per-request flags and a static scan
-of the code (hack_flags), and training samples are also counted in HACKS. With
+of the code (hack_flags), and training samples are also kept in WINDOW (CODE_HACK_WINDOW_MAX). With
 --custom-rollout-log-function-path code_reward.log_rollout_data, both are logged per rollout
 step as rollout/code_hack/* rates. `solved` there means raw reward >= 0.99, so it is the
 all-pass rate under the default binary reward and the near-perfect rate under partial.
@@ -54,6 +53,7 @@ all-pass rate under the default binary reward and the near-perfect rate under pa
 
 import ast
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -62,6 +62,7 @@ import subprocess
 import sys
 import threading
 import time
+from decimal import Decimal, InvalidOperation
 
 import requests
 
@@ -99,6 +100,8 @@ _CONCURRENCY = int(os.environ.get("CODE_REWARD_CONCURRENCY", "64"))
 _LOG_EVERY = int(os.environ.get("CODE_LOG_EVERY", "200"))
 _HTTP_RETRIES = int(os.environ.get("CODE_EXEC_API_RETRIES", "2"))
 _STRICT = os.environ.get("CODE_STRICT_GRADING", "1") == "1"
+# Training samples kept for the next rollout log; bounds memory when the log hook is off.
+_WINDOW_MAX = int(os.environ.get("CODE_HACK_WINDOW_MAX", "100000"))
 
 # Benchmark rows (prepare_code_benchmarks.py) can go to their own service, so their heavy
 # tests never queue behind training rewards.
@@ -191,6 +194,10 @@ def _parse_tests(label):
 
 
 # --- execution ------------------------------------------------------------------
+_STDIO_OPTS = ("float_tol", "case_insensitive")
+_ASSERT_OPTS = ("strict", "name")
+_CHECKER_TIMEOUT = 10.0  # must equal code_exec_server.CHECKER_TIMEOUT
+_INT_RE = re.compile(r"[+-]?\d+")
 _session = None
 _session_lock = threading.Lock()
 
@@ -213,8 +220,8 @@ def _run_remote(program: str, tests: list, stdio: bool, opts=None, flags=None):
     checker = (opts or {}).get("checker")
     if checker:
         body = {"program": program, "tests": tests, "max_execution_time": _TIMEOUT, "checker": checker}
-        per_test = _TIMEOUT + _CHECKER_TIMEOUT
-        return _post(_API_URL, "/test_program_checker", body, len(tests), min(300.0, per_test * len(tests) + 30.0), flags)
+        read_timeout = min(300.0, (_TIMEOUT + _CHECKER_TIMEOUT) * len(tests) + 30.0)
+        return _post(_API_URL, "/test_program_checker", body, len(tests), read_timeout, flags)
     path = "/test_program_stdio" if stdio else "/test_program"
     body = {"program": program, "tests": tests, "max_execution_time": _TIMEOUT}
     if opts:
@@ -291,25 +298,24 @@ def _run_local(program: str, tests: list, stdio: bool, opts=None):
 
 
 def _tokens_equal(x: str, y: str, float_tol, case_insensitive: bool) -> bool:
-    from decimal import Decimal, InvalidOperation
-
     if x == y or (case_insensitive and x.lower() == y.lower() and y.lower() in ("yes", "no")):
         return True
     try:
         dx, dy = Decimal(x), Decimal(y)
+        if dx == dy:
+            return True
     except (InvalidOperation, ValueError):
         return False
-    if dx == dy:
-        return True
     if float_tol is None or not (dx.is_finite() and dy.is_finite()):
         return False
-    if re.fullmatch(r"[+-]?\d+", x) and re.fullmatch(r"[+-]?\d+", y):
+    if _INT_RE.fullmatch(x) and _INT_RE.fullmatch(y):
         return False
     return abs(dx - dy) <= Decimal(str(float_tol)) * max(Decimal(1), abs(dy))
 
 
 def _lines_equal(a: str, b: str, float_tol=None, case_insensitive=False) -> bool:
-    """Mirror of code_exec_server._lines_equal_with_decimal."""
+    """Mirror of code_exec_server._lines_equal_with_decimal (that module need not be importable
+    here); test_code_hack_monitor.py checks that the two agree."""
     al = [x.strip() for x in a.strip().split("\n")]
     bl = [x.strip() for x in b.strip().split("\n")]
     if len(al) != len(bl):
@@ -319,8 +325,6 @@ def _lines_equal(a: str, b: str, float_tol=None, case_insensitive=False) -> bool
             continue
         xt, yt = x.split(), y.split()
         if float_tol is None and not case_insensitive:
-            from decimal import Decimal, InvalidOperation
-
             try:
                 if [Decimal(t) for t in xt] != [Decimal(t) for t in yt]:
                     return False
@@ -339,10 +343,6 @@ def _run(program, tests, stdio, opts=None, flags=None):
         return None
     return _run_remote(program, tests, stdio, opts, flags)
 
-
-_STDIO_OPTS = ("float_tol", "case_insensitive")
-_ASSERT_OPTS = ("strict", "name")
-_CHECKER_TIMEOUT = 10.0  # the service's CHECKER_TIMEOUT (piston runs checker.py under `timeout 10`)
 
 
 def split_checker(tests, meta: dict):
@@ -365,9 +365,10 @@ def train_options(meta: dict) -> dict:
     """Grader options for training rows; evals keep the benchmarks' own semantics.
     stdio: per-row comparison options set by the data pipeline when the statement allows
     them (metadata.float_tol, metadata.case_insensitive; YES/NO folding only).
-    asserts (CODE_STRICT_GRADING=1): both sides of `assert A == B` reduced to builtin values,
-    so objects with a rigged __eq__ fail; and the program is not run as __main__, so a
-    `if __name__ == "__main__":` block neither runs nor can exit before the tests."""
+    asserts (CODE_STRICT_GRADING=1): every value an assert compares or truth-tests is reduced to
+    builtin values (code_exec_server.strict_assert), so objects with rigged dunders fail; and the
+    program is not run as __main__, so a `if __name__ == "__main__":` block neither runs nor can
+    exit before the tests."""
     opts = {"strict": True, "name": "tmp_sol"} if _STRICT else {}
     if meta.get("float_tol") is not None:
         opts["float_tol"] = float(meta["float_tol"])
@@ -531,8 +532,8 @@ def _score_bench(response: str, label: dict) -> float:
 # --- reward-hack monitoring -----------------------------------------------------
 # Informational only: nothing here changes a reward. Static flags come from scan_code, the
 # rest from the server's per-request outcome counts.
-SCAN_KEYS = ("touch_frames", "touch_builtins", "read_own_file", "exit_call", "sys_modules", "eq_true",
-             "class_assign", "trace_hook", "atexit", "signal", "ctypes", "subprocess")
+SCAN_KEYS = ("touch_frames", "touch_builtins", "helper_tamper", "read_own_file", "exit_call", "sys_modules",
+             "eq_true", "class_assign", "trace_hook", "atexit", "signal", "ctypes", "subprocess")
 SERVER_KEYS = ("early_exit", "strict_reject", "timeout")
 HACK_KEYS = SERVER_KEYS + SCAN_KEYS
 
@@ -546,6 +547,14 @@ _MUTATORS = {"update", "pop", "popitem", "setdefault", "clear", "__setitem__", "
              "__delattr__"}
 _PROC_MODULES = {"subprocess", "pty", "multiprocessing"}
 _PROC_CALLS = ("os.system", "os.popen", "os.exec", "os.spawn", "os.posix_spawn", "os.fork")
+# helper_tamper: what the strict tests' own helpers and builtins run on (the residual attacks in
+# test_code_exec_adversarial.py): the helpers by name, function internals, module-level rebinding
+# of builtins the tests call, and attributes of imported modules (sys excepted: stdin/stdout swaps
+# are common and sys has its own keys).
+_TEST_HELPERS = {"__v7canon__", "_v7_close"}
+_FUNC_INTERNALS = {"__code__", "__defaults__", "__kwdefaults__", "__globals__", "__closure__"}
+_TEST_BUILTINS = {"all", "any", "abs", "len", "isinstance", "issubclass", "sorted", "sum", "min", "max", "type",
+                  "round", "list", "set", "tuple", "dict", "str", "int", "float", "bool", "repr", "zip", "map"}
 
 
 def scan_code(code: str) -> dict:
@@ -580,9 +589,19 @@ def scan_code(code: str) -> dict:
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "vars" and len(e.args) == 1:
             base = dotted(e.args[0])
             return base and f"{base}.__dict__"
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "globals" and not e.args:
+            return "__globals__"
         return None
 
-    calls = set()
+    calls, attr_stores, tamper = set(), set(), False
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            tamper |= n.name in _TEST_BUILTINS
+        elif isinstance(n, (ast.Assign, ast.AnnAssign)) and isinstance(n.value, (ast.Lambda, ast.Name, ast.Attribute)):
+            tamper |= any(isinstance(t, ast.Name) and t.id in _TEST_BUILTINS
+                          for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            tamper |= any((a.asname or a.name) in _TEST_BUILTINS for a in n.names)
     for n in ast.walk(tree):
         if isinstance(n, ast.Name):
             names.add(n.id)
@@ -592,7 +611,9 @@ def scan_code(code: str) -> dict:
             names.add(n.attr)
             if isinstance(n.ctx, (ast.Store, ast.Del)):
                 mutated.add(dotted(n.value) or "")
+                attr_stores.add(dotted(n.value) or "")
                 flags["class_assign"] |= n.attr == "__class__"
+                tamper |= n.attr in _FUNC_INTERNALS
         elif isinstance(n, ast.Subscript) and isinstance(n.ctx, (ast.Store, ast.Del)):
             mutated.add(dotted(n.value) or "")
         elif isinstance(n, ast.Constant) and isinstance(n.value, str):
@@ -604,11 +625,15 @@ def scan_code(code: str) -> dict:
                 mutated.add(dotted(n.func.value) or "")
             if fn.rpartition(".")[2] in ("setattr", "delattr", "__setattr__", "__delattr__") and n.args:
                 mutated.add(dotted(n.args[0]) or "")
+                attr_stores.add(dotted(n.args[0]) or "")
+                tamper |= any(isinstance(a, ast.Constant) and a.value in _FUNC_INTERNALS for a in n.args[1:2])
                 flags["class_assign"] |= any(isinstance(a, ast.Constant) and a.value == "__class__" for a in n.args)
             if fn in _OPENERS and n.args:
                 a = n.args[0]
                 flags["read_own_file"] |= (isinstance(a, ast.Name) and a.id == "__file__") or dotted(a) == "sys.argv"
             flags["exit_call"] |= fn in ("exit", "quit", "sys.exit", "os._exit", "os.abort", "os.kill")
+        elif isinstance(n, ast.Global):
+            tamper |= bool(_TEST_BUILTINS & set(n.names))
         elif isinstance(n, ast.Raise) and n.exc is not None:
             exc = n.exc.func if isinstance(n.exc, ast.Call) else n.exc
             flags["exit_call"] |= isinstance(exc, ast.Name) and exc.id in ("SystemExit", "KeyboardInterrupt")
@@ -625,6 +650,10 @@ def scan_code(code: str) -> dict:
     mods |= {s for s in strs if s in ("atexit", "signal", "ctypes", "_ctypes") or s in _PROC_MODULES}
     flags["touch_frames"] = bool(calls & _FRAME_CALLS or (names | strs) & _FRAME_NAMES)
     flags["touch_builtins"] = any(m.split(".")[0] in ("builtins", "__builtins__") for m in mutated)
+    imported = {v.split(".")[0] for v in alias.values()} - {"sys"}
+    flags["helper_tamper"] = bool(tamper or (names | strs) & _TEST_HELPERS or "__globals__" in mutated
+                                  or flags["touch_builtins"]
+                                  or any(b.split(".")[0] in imported for b in attr_stores if b))
     flags["read_own_file"] |= any(s.endswith(_OWN_FILES) for s in strs)
     flags["exit_call"] |= "_exit" in strs
     flags["sys_modules"] = any(m == "sys.modules" or m.startswith("sys.modules.") for m in mutated)
@@ -645,26 +674,27 @@ def hack_flags(code: str, server: dict, solved: bool) -> dict:
 
 
 class _Window:
-    """Per-sample values for training samples scored since the last rollout log. Sample
-    metadata alone would miss groups the dynamic filter drops, and those include every group
-    a hack solves 8/8 (and, under the binary reward, every all-pass or all-fail group)."""
+    """(pass rate, hack_flags) of the training samples scored since the last rollout log, newest
+    CODE_HACK_WINDOW_MAX kept. Sample metadata alone would miss groups the dynamic filter drops,
+    and those include every group a hack solves 8/8 (and, under the binary reward, every all-pass
+    or all-fail group)."""
 
-    def __init__(self):
+    def __init__(self, maxlen: int):
         self.lock = threading.Lock()
-        self.items = []
+        self.items = collections.deque(maxlen=maxlen)
 
-    def add(self, item):
+    def add(self, rate: float, flags: dict):
         with self.lock:
-            self.items.append(item)
+            self.items.append((rate, flags))
 
-    def drain(self):
+    def drain(self) -> list:
         with self.lock:
-            out, self.items = self.items, []
+            out = list(self.items)
+            self.items.clear()
         return out
 
 
-HACKS = _Window()
-PASS_RATES = _Window()
+WINDOW = _Window(_WINDOW_MAX)
 
 
 def pass_rate_metrics(rates: list) -> dict:
@@ -717,9 +747,10 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics=None, roll
                     trained.append(meta["code_hack"])
                 if isinstance(meta.get("code_pass_rate"), (int, float)):
                     trained_rates.append(float(meta["code_pass_rate"]))
-        log_dict = {f"rollout/code_hack/{k}": v for k, v in hack_metrics(HACKS.drain()).items()}
+        window = WINDOW.drain()
+        log_dict = {f"rollout/code_hack/{k}": v for k, v in hack_metrics([f for _, f in window]).items()}
         log_dict |= {f"rollout/code_hack/trained/{k}": v for k, v in hack_metrics(trained).items()}
-        log_dict |= {f"rollout/code/{k}": v for k, v in pass_rate_metrics(PASS_RATES.drain()).items()}
+        log_dict |= {f"rollout/code/{k}": v for k, v in pass_rate_metrics([r for r, _ in window]).items()}
         log_dict |= {f"rollout/code/trained/{k}": v for k, v in pass_rate_metrics(trained_rates).items()}
         if log_dict:
             log_dict["rollout/step"] = compute_rollout_step(args, rollout_id)
@@ -790,8 +821,7 @@ def _score_one(sample, evaluation: bool = False) -> float:
         sample.metadata["code_hack"] = flags
         sample.metadata["code_pass_rate"] = rate
     if not evaluation:
-        HACKS.add(flags)
-        PASS_RATES.add(rate)
+        WINDOW.add(rate, flags)
     return raw * REWARD_SCALE
 
 
@@ -904,8 +934,7 @@ if __name__ == "__main__":
     ok &= flag == "ok "
     print(f"  {flag} [binary, threshold 0.5] reward={got:.3f} want={REWARD_SCALE:.3f}  (stdio half pass)")
     REWARD_MODE, PASS_THRESHOLD = env_mode, env_threshold
-    HACKS.drain()
-    PASS_RATES.drain()
+    WINDOW.drain()
     STATS.dump()
     if STATS.counts["api_error"]:
         print("  FAIL api_error > 0: the service dropped requests")
