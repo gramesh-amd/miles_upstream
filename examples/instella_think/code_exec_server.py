@@ -45,6 +45,7 @@ hooks), so do not expose this service beyond the training cluster.
 import argparse
 import collections
 import functools
+import hashlib
 import json
 import os
 import re
@@ -319,9 +320,13 @@ class Runner:
         self.python = python
         self.scratch_root = scratch_root
         os.makedirs(scratch_root, exist_ok=True)
-        self.guard = os.path.join(scratch_root, "_guard.py")
-        with open(self.guard, "w") as f:
+        # named by content so servers of different versions can share a scratch root
+        tag = hashlib.sha256(GUARD_SOURCE.encode()).hexdigest()[:12]
+        self.guard = os.path.join(scratch_root, f"_guard_{tag}.py")
+        tmp = f"{self.guard}.{os.getpid()}"
+        with open(tmp, "w") as f:
             f.write(GUARD_SOURCE)
+        os.replace(tmp, self.guard)
         self.env = {
             "PATH": "/usr/bin:/bin",
             "LANG": "C.UTF-8",
