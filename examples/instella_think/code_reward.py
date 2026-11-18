@@ -237,6 +237,15 @@ def _lines_equal(a: str, b: str, float_tol=None, case_insensitive=False) -> bool
         if x == y:
             continue
         xt, yt = x.split(), y.split()
+        if float_tol is None and not case_insensitive:
+            from decimal import Decimal, InvalidOperation
+
+            try:
+                if [Decimal(t) for t in xt] != [Decimal(t) for t in yt]:
+                    return False
+            except (InvalidOperation, ValueError):
+                return False
+            continue
         if len(xt) != len(yt) or not all(_tokens_equal(p, q, float_tol, case_insensitive) for p, q in zip(xt, yt)):
             return False
     return True

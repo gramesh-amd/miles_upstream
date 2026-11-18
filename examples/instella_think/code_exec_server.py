@@ -183,6 +183,14 @@ def _lines_equal_with_decimal(a: str, b: str, float_tol=None, case_insensitive=F
         if al == bl:
             continue
         at, bt = al.split(), bl.split()
+        if float_tol is None and not case_insensitive:
+            # eval path: every token of a differing line must be numeric (LCB rule).
+            try:
+                if [Decimal(t) for t in at] != [Decimal(t) for t in bt]:
+                    return False
+            except (InvalidOperation, ValueError):
+                return False
+            continue
         if len(at) != len(bt) or not all(_tokens_equal(x, y, float_tol, case_insensitive) for x, y in zip(at, bt)):
             return False
     return True
@@ -190,56 +198,67 @@ def _lines_equal_with_decimal(a: str, b: str, float_tol=None, case_insensitive=F
 
 # strict (training) equality: both sides of `assert A == B` pass through __canon, which
 # reduces values to builtin types, so an object whose __eq__ always returns True cannot pass.
-# numpy, fractions, decimal, datetime and collections values are reduced or kept; any other
-# type must use identity equality (object.__eq__).
+# Every type it relies on is taken from literals and bound as a default when the prelude is
+# defined, so rebinding builtins (type, isinstance, ...) in the solution does not reach it.
+# Heap types (any class defined in Python) must keep identity equality; C types with their
+# own equality (Decimal, datetime, deque, slice, ...) have their referents checked the same way.
 CANON_PRELUDE = r'''
-def __canon(x, _d=0):
+def __canon(x, _d=0, _T=().__class__.__class__, _O=().__class__.__mro__[-1],
+            _B=True.__class__, _I=(0).__class__, _F=(0.0).__class__, _C=(0j).__class__,
+            _S="".__class__, _Y=b"".__class__, _L=[].__class__, _U=().__class__,
+            _D={}.__class__, _ST={0}.__class__, _FS=None, _W=None, _R=None,
+            _TD=().__class__.__class__.__dict__):
     if _d > 200:
         raise TypeError("value nested too deeply")
-    t = type(x)
-    if x is None or t in (bool, int, float, complex, str, bytes):
+    t = _T(x)
+    if x is None or t is _B or t is _I or t is _F or t is _C or t is _S or t is _Y:
         return x
-    m = getattr(t, "__module__", "") or ""
-    if m == "numpy" or m.startswith("numpy."):
-        return __canon(x.tolist(), _d + 1)
-    if m in ("fractions", "decimal", "datetime"):
-        return x
-    if isinstance(x, bool):
-        return bool(x)
-    if isinstance(x, int):
-        return int(x)
-    if isinstance(x, float):
-        return float(x)
-    if isinstance(x, str):
-        return str.__str__(x)
-    if isinstance(x, bytes):
-        return bytes(x)
-    if isinstance(x, dict):
-        return {__canon(k, _d + 1): __canon(v, _d + 1) for k, v in dict.items(x)}
-    if isinstance(x, list):
-        return [__canon(v, _d + 1) for v in list.__iter__(x)]
-    if isinstance(x, tuple):
-        return tuple(__canon(v, _d + 1) for v in tuple.__iter__(x))
-    if isinstance(x, (set, frozenset)):
-        return frozenset(__canon(v, _d + 1) for v in x)
-    if m == "collections":
-        return [__canon(v, _d + 1) for v in x]
-    import types as __ty, gc as __gc
+    mro = _TD["__mro__"].__get__(t)
+    for k in mro:
+        if _TD["__flags__"].__get__(k) & 512 == 0 and _TD["__module__"].__get__(k) == "numpy":
+            return __canon(x.tolist(), _d + 1)
+    for k in mro:
+        if k is _B:
+            return _I.__bool__(x)
+        if k is _I:
+            return _I.__int__(x)
+        if k is _F:
+            return _F.__float__(x)
+        if k is _C:
+            return _C.__add__(x, 0j)
+        if k is _S:
+            return _S.__str__(x)
+        if k is _Y:
+            return b"".join((x,))
+        if k is _D:
+            return {__canon(a, _d + 1): __canon(v, _d + 1) for a, v in _D.items(x)}
+        if k is _L:
+            return [__canon(v, _d + 1) for v in _L.__iter__(x)]
+        if k is _U:
+            return _U(__canon(v, _d + 1) for v in _U.__iter__(x))
+        if k is _ST or k is _FS:
+            return _FS(__canon(v, _d + 1) for v in k.__iter__(x))
     identity = True
     for name in ("__eq__", "__ne__"):
-        for k in t.__mro__:
-            if name in k.__dict__:
-                f = k.__dict__[name]
-                if not isinstance(f, __ty.WrapperDescriptorType):
-                    raise TypeError("user-defined %s on %s in strict comparison" % (name, t.__name__))
-                identity = identity and k is object
+        for k in mro:
+            kd = _TD["__dict__"].__get__(k)
+            if name in kd:
+                if _TD["__flags__"].__get__(k) & 512 or _T(kd[name]) is not _W:
+                    raise TypeError("user-defined equality in strict comparison")
+                identity = identity and k is _O
                 break
-    # C-level equality (slice, range, list[int], ...) can still delegate to the
-    # objects it holds, so those must pass the same check; identity needs nothing.
-    if not identity and not isinstance(x, type):
-        for r in __gc.get_referents(x):
+    if not identity and t is not _T:
+        for r in _R(x):
             __canon(r, _d + 1)
     return x
+import gc as __v7_gc
+__canon.__defaults__ = __canon.__defaults__[:-4] + (
+    [k for k in ().__class__.__mro__[-1].__subclasses__()
+     if ().__class__.__class__.__dict__["__name__"].__get__(k) == "frozenset"
+     and not ().__class__.__class__.__dict__["__flags__"].__get__(k) & 512][0],
+    ().__class__.__mro__[-1].__dict__["__eq__"].__class__,
+    __v7_gc.get_referents, ().__class__.__class__.__dict__)
+del __v7_gc
 '''
 
 
