@@ -94,6 +94,8 @@ fi
 
 # --- reward -----------------------------------------------------------------------
 export CUSTOM_RM_PATH="${CUSTOM_RM_PATH:-code_reward.batched_reward}"
+# rollout/code_hack/* reward-hack rates in W&B (set to "" to disable)
+export CUSTOM_ROLLOUT_LOG_PATH="${CUSTOM_ROLLOUT_LOG_PATH-code_reward.log_rollout_data}"
 if [ -z "${CODE_EXEC_API_URL:-}" ]; then
    _tok="$(tr -d '[:space:]' < "${CODE_EXEC_TOKEN_FILE}" 2>/dev/null)"
    [ -n "${_tok}" ] || { echo "FATAL: no CODE_EXEC_API_URL and no ${CODE_EXEC_TOKEN_FILE}; run cluster/code_exec.sh start" >&2; exit 1; }

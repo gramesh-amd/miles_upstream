@@ -174,6 +174,11 @@ if [ -n "${CUSTOM_RM_PATH:-}" ]; then
 else
    RM_ARGS=(--rm-type "${RM_TYPE:-deepscaler}")
 fi
+# Optional extra rollout metrics (run_code.sh: rollout/code_hack/*). The hook returns False,
+# so miles' default rollout logging still runs.
+if [ -n "${CUSTOM_ROLLOUT_LOG_PATH:-}" ]; then
+   RM_ARGS+=(--custom-rollout-log-function-path "${CUSTOM_ROLLOUT_LOG_PATH}")
+fi
 
 ROLLOUT_ARGS=(
    --rollout-function-path fully_async_rollout.generate_rollout_fully_async

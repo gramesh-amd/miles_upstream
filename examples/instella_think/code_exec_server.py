@@ -8,6 +8,7 @@ Implements the API the Instella reward client already speaks:
     POST <prefix>/test_program_call   {"program", "tests": [{"input","output"}], "fn_name", ...}
     POST <prefix>/test_program_checker {"program", "tests": [{"input","output"}], "checker"?, ...}
         -> {"results": [0|1, ...]}   one entry per test, in order
+           plus "flags": {"early_exit", "strict_reject", "timeout"}, tests per outcome (monitoring)
     GET  <prefix>/health              -> {"ok": true, ...}
 
 Optional request fields, used by the benchmark evals (prepare_code_benchmarks.py):
@@ -114,7 +115,8 @@ def _hook(event, args):
                 and not any(_inside(real, p) for p in _OWN):
             raise PermissionError("sandbox: read not allowed: %s" % real)
 
-def _call(g, case, loads, dumps, isinstance=isinstance, tuple=tuple, list=list, getattr=getattr):
+def _call(g, case, loads, dumps, isinstance=isinstance, tuple=tuple, list=list, getattr=getattr,
+          TypeError=TypeError, ValueError=ValueError):
     # LiveCodeBench grade_call_based: one JSON value per input line, tuples compared as lists.
     obj = g["Solution"]() if case["solution"] else None
     m = getattr(obj, case["fn"]) if obj is not None else g[case["fn"]]
@@ -122,8 +124,13 @@ def _call(g, case, loads, dumps, isinstance=isinstance, tuple=tuple, list=list, 
     if isinstance(p, tuple):
         p = list(p)
     if case["strict"]:
-        # open-instruct's JSON round trip: only plain JSON values can compare equal.
-        p = loads(dumps(p, allow_nan=False))
+        # open-instruct's JSON round trip: only plain JSON values can compare equal. None marks
+        # a rejected value; strict compares builtins, so the result is otherwise a bool.
+        try:
+            p = dumps(p, allow_nan=False)
+        except (TypeError, ValueError):
+            return None
+        p = loads(p)
     return p == loads(case["output"])
 
 
@@ -173,13 +180,29 @@ def _main(call=_call):
         for k in list(vars(m)):
             if k in ("_exit", "fork", "forkpty", "kill", "killpg") or k.startswith(("exec", "spawn", "posix_spawn")):
                 delattr(m, k)
+    # Exit status on failure is informational only (the server passes nothing but status 0 with
+    # the done file): 3 if a strict check rejected a value, 4 if the program tried to exit.
+    status, exc_info, exiting, subclass = 1, sys.exc_info, SystemExit, issubclass
     try:
         exec(code, g)
-        ok = True if case is None or call(g, case, loads, dumps) else False
+        r = True if case is None else call(g, case, loads, dumps)
+        if case is not None and case["strict"] and r is None:
+            status = 3
+        ok = True if r else False
     except BaseException:
         ok = False
+        try:
+            et, _, tb = exc_info()
+            while tb.tb_next is not None:
+                tb = tb.tb_next
+            if subclass(et, exiting):
+                status = 4
+            elif tb.tb_frame.f_code.co_name == "__v7canon__" and tb.tb_frame.f_code.co_filename == "solution.py":
+                status = 3
+        except BaseException:
+            pass
     if not ok:
-        raise fail(1)
+        raise fail(status)
     oclose(oopen(done, oflags, 0o600))
 
 
@@ -189,13 +212,36 @@ _main()
 
 _TLS = threading.local()
 STATS_LOCK = threading.Lock()
-STATS = {"requests": 0, "tests": 0, "passed": 0, "timeouts": 0, "errors": 0, "early_exits": 0, "busy_s": 0.0}
+STATS = {"requests": 0, "tests": 0, "passed": 0, "timeouts": 0, "errors": 0, "early_exits": 0, "strict_rejects": 0,
+         "busy_s": 0.0}
 
 
 def _bump(**kw):
     with STATS_LOCK:
         for k, v in kw.items():
             STATS[k] += v
+
+
+# Guard exit statuses on the must_finish routes (see the end of _main in GUARD_SOURCE).
+RC_STRICT_REJECT, RC_EARLY_EXIT = 3, 4
+
+
+class _Flags:
+    """Per-request counts returned beside "results" (monitoring only, never the verdict)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.counts = {"early_exit": 0, "strict_reject": 0, "timeout": 0}
+
+    def note(self, rc, must_finish=False):
+        key = "timeout" if rc is None else None
+        if must_finish and rc == RC_EARLY_EXIT:
+            key = "early_exit"
+        elif must_finish and rc == RC_STRICT_REJECT:
+            key = "strict_reject"
+        if key:
+            with self.lock:
+                self.counts[key] += 1
 
 
 _INT_RE = re.compile(r"[+-]?\d+")
@@ -463,8 +509,8 @@ class Runner:
         `case`, if given, is the call route's test (see _call in GUARD_SOURCE); `files` maps
         file names to contents written beside it; `args` follow it on the command line.
         With must_finish, a clean exit only counts if control reached the end of the
-        program: exiting early (sys.exit(0) before appended tests run) returns -1, and the
-        guard unlinks the program and the case before running anything."""
+        program: exiting early (sys.exit(0) before appended tests run) returns RC_EARLY_EXIT,
+        and the guard unlinks the program and the case before running anything."""
         token = secrets.token_hex(16) if must_finish else None
         if token:
             stdin = token + "\n" + stdin
@@ -497,8 +543,9 @@ class Runner:
                     out, _ = p.communicate(stdin.encode("utf-8", "replace"), timeout=timeout)
                     rc = p.returncode
                     if token and rc == 0 and not _finished(d, token):
+                        rc = RC_EARLY_EXIT
+                    if token and rc == RC_EARLY_EXIT:
                         _bump(early_exits=1)
-                        rc = -1
                     return rc, out.decode("utf-8", "replace")
                 except subprocess.TimeoutExpired:
                     try:
@@ -542,31 +589,38 @@ class Runner:
 
         return list(self.pool.map(guarded, tests))
 
-    def assert_tests(self, program, tests, timeout, name="__main__", stop_on_fail=False, strict=False):
+    def assert_tests(self, program, tests, timeout, name="__main__", stop_on_fail=False, strict=False, flags=None):
         if strict:
             tests = [strict_assert(tc) for tc in tests]
         module = strict and name != "__main__"
+        flags = flags or _Flags()
 
         def one(tc):
             rc, _ = self.run_one(f"{program}\n\n{tc}\n", "", timeout, name=name, must_finish=True, module=module)
+            flags.note(rc, must_finish=True)
             return 1 if rc == 0 else 0
 
         return self._map(one, tests, stop_on_fail)
 
-    def stdio_tests(self, program, tests, timeout, stop_on_fail=False, float_tol=None, case_insensitive=False):
+    def stdio_tests(self, program, tests, timeout, stop_on_fail=False, float_tol=None, case_insensitive=False,
+                    flags=None):
+        flags = flags or _Flags()
+
         def one(tc):
             if not isinstance(tc, dict):
                 return 0
             rc, out = self.run_one(program, str(tc.get("input", "")), timeout)
+            flags.note(rc)
             return 1 if rc == 0 and _lines_equal_with_decimal(
                 out, str(tc.get("output", "")), float_tol, case_insensitive) else 0
 
         return self._map(one, tests, stop_on_fail)
 
-    def call_tests(self, program, tests, timeout, fn_name, stop_on_fail=False, strict=False):
+    def call_tests(self, program, tests, timeout, fn_name, stop_on_fail=False, strict=False, flags=None):
         """LiveCodeBench call-based grading (lcb_runner testing_util.grade_call_based): the
         program is imported, not run as __main__; inputs are one JSON value per line."""
         solution = "class Solution" in program
+        flags = flags or _Flags()
 
         def one(tc):
             if not isinstance(tc, dict):
@@ -574,6 +628,7 @@ class Runner:
             case = {"input": str(tc.get("input", "")), "output": str(tc.get("output", "")),
                     "fn": fn_name, "solution": solution, "strict": bool(strict)}
             rc, _ = self.run_one(program, "", timeout, name="tmp_sol", case=case, must_finish=True, module=bool(strict))
+            flags.note(rc, must_finish=True)
             return 1 if rc == 0 else 0
 
         return self._map(one, tests, stop_on_fail)
@@ -589,11 +644,14 @@ class Runner:
                                    args=("input.txt", "correct_output.txt", "solution_output.txt"))
         return 1 if rc == 0 and "".join(verdict.split()) in ("1", "100") else 0
 
-    def checker_tests(self, program, tests, timeout, checker=None, stop_on_fail=False):
+    def checker_tests(self, program, tests, timeout, checker=None, stop_on_fail=False, flags=None):
+        flags = flags or _Flags()
+
         def one(tc):
             if not isinstance(tc, dict):
                 return 0
             rc, out = self.run_one(program, str(tc.get("input", "")), timeout)
+            flags.note(rc)
             return self.judge_output(out, tc, checker) if rc == 0 else 0
 
         return self._map(one, tests, stop_on_fail)
@@ -704,17 +762,19 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
             if total > max_tests:
                 tests = tests[:max_tests]
             padded = total - len(tests)
+            flags = _Flags()
             if route == "/test_program":
-                res = runner.assert_tests(program, [str(t) for t in tests], timeout, name, stop_on_fail, strict)
+                res = runner.assert_tests(program, [str(t) for t in tests], timeout, name, stop_on_fail, strict, flags)
             elif route == "/test_program_stdio":
-                res = runner.stdio_tests(program, tests, timeout, stop_on_fail, float_tol, case_insensitive)
+                res = runner.stdio_tests(program, tests, timeout, stop_on_fail, float_tol, case_insensitive, flags)
             elif route == "/test_program_checker":
-                res = runner.checker_tests(program, tests, timeout, checker, stop_on_fail)
+                res = runner.checker_tests(program, tests, timeout, checker, stop_on_fail, flags)
             else:
-                res = runner.call_tests(program, tests, timeout, fn_name, stop_on_fail, strict)
-            _bump(requests=1, tests=len(res), passed=sum(res))
-            # Tests beyond the cap count as failed so the client's length check holds.
-            self._send(200, {"results": res + [0] * padded})
+                res = runner.call_tests(program, tests, timeout, fn_name, stop_on_fail, strict, flags)
+            _bump(requests=1, tests=len(res), passed=sum(res), strict_rejects=flags.counts["strict_reject"])
+            # Tests beyond the cap count as failed so the client's length check holds. "flags"
+            # counts tests per outcome (early_exit and strict_reject on the assert and call routes).
+            self._send(200, {"results": res + [0] * padded, "flags": flags.counts})
 
     return Handler
 
@@ -758,6 +818,7 @@ def main():
                 s = dict(STATS)
             print(f"[{time.strftime('%F %T')}] requests={s['requests']} tests={s['tests']} "
                   f"passed={s['passed']} timeouts={s['timeouts']} errors={s['errors']} "
+                  f"early_exits={s['early_exits']} strict_rejects={s['strict_rejects']} "
                   f"busy={s['busy_s']:.0f}s", flush=True)
 
     threading.Thread(target=report, daemon=True).start()
