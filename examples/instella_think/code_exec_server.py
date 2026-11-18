@@ -36,7 +36,10 @@ unprivileged user namespaces, so programs run as the service's own user with:
   * a permanent audit hook (sys.addaudithook cannot be removed from Python) that
     blocks sockets, subprocess/exec/fork, signals, ctypes, deletes/renames/chmod,
     writes outside the per-test scratch dir, and reads under /home, /shared_nfs,
-    /root, /mnt.
+    /root, /mnt;
+  * on the assert and call routes, the program file (tests appended) and the expected output
+    are unlinked before the program runs, os._exit / exec / fork / kill are removed, and any
+    exception or exit before the tests complete fails the test.
 That stops accidental damage from model-written code. It is not a security
 boundary against code written to escape it (a C extension can bypass audit
 hooks), so do not expose this service beyond the training cluster.
@@ -111,33 +114,77 @@ def _hook(event, args):
                 and not any(_inside(real, p) for p in _OWN):
             raise PermissionError("sandbox: read not allowed: %s" % real)
 
-sys.addaudithook(_hook)
-del _hook
+def _call(g, case, loads, dumps, isinstance=isinstance, tuple=tuple, list=list, getattr=getattr):
+    # LiveCodeBench grade_call_based: one JSON value per input line, tuples compared as lists.
+    obj = g["Solution"]() if case["solution"] else None
+    m = getattr(obj, case["fn"]) if obj is not None else g[case["fn"]]
+    p = m(*[loads(ln) for ln in case["input"].split("\n")])
+    if isinstance(p, tuple):
+        p = list(p)
+    if case["strict"]:
+        # open-instruct's JSON round trip: only plain JSON values can compare equal.
+        p = loads(dumps(p, allow_nan=False))
+    return p == loads(case["output"])
 
-_prog = sys.argv[1]
-with open(_prog) as _f:
-    _src = _f.read()
-sys.argv = [_prog] + sys.argv[2:]
-_code = compile(_src, "solution.py", "exec")
-_g = {"__name__": os.environ.get("CODE_EXEC_NAME", "__main__"), "__file__": "solution.py",
-      "__builtins__": builtins}
 
-
-def _run(code, g, must_finish):
-    # must_finish: the per-run token arrives on stdin's first line and is consumed here, so the
-    # program can neither read it nor create the done file; the file is written only if exec
-    # returns. Kept in this frame, not module globals, so `import __main__` cannot reach it
+def _main(call=_call):
+    # Everything lives in this frame, not module globals, so `import __main__` cannot reach it
     # (frame introspection still could: same limit as EvalPlus / open-instruct).
+    globals().pop("_main")
+    must_finish = os.environ.get("CODE_EXEC_MUST_FINISH") == "1"
+    prog = sys.argv[1]
+    with open(prog) as f:
+        src = f.read()
+    case = loads = dumps = None
     if must_finish:
-        done = os.path.join(_SCRATCH, "_done_" + sys.stdin.readline().strip())
-        oopen, oclose, oflags = os.open, os.close, os.O_WRONLY | os.O_CREAT
-    exec(code, g)
-    if must_finish:
-        oclose(oopen(done, oflags, 0o600))
+        # The program with its tests appended, and the call route's expected output, are read
+        # here and unlinked (which the hook forbids) before any of the program runs.
+        os.unlink(prog)
+        if os.path.exists("_case.json"):
+            import json
+            with open("_case.json") as f:
+                case = json.load(f)
+            os.unlink("_case.json")
+            loads, dumps = json.loads, json.dumps
+    sys.addaudithook(globals().pop("_hook"))
+    sys.argv = [prog] + sys.argv[2:]
+    code = compile(src, "solution.py", "exec")
+    name = os.environ.get("CODE_EXEC_NAME", "__main__")
+    if os.environ.get("CODE_EXEC_MODULE") == "1":
+        # a real module in sys.modules, as dataclasses and typing.get_type_hints expect
+        mod = type(sys)(name)
+        mod.__file__ = "solution.py"
+        sys.modules[name] = mod
+        g = mod.__dict__
+        g["__builtins__"] = builtins
+    else:
+        g = {"__name__": name, "__file__": "solution.py", "__builtins__": builtins}
+    if not must_finish:
+        exec(code, g)
+        return
+    # The per-run token arrives on stdin's first line and is consumed here, so the program can
+    # neither read it nor create the done file; the file is written only if the tests return.
+    done = os.path.join(_SCRATCH, "_done_" + sys.stdin.readline().strip())
+    oopen, oclose, oflags, fail = os.open, os.close, os.O_WRONLY | os.O_CREAT, SystemExit
+    # reliability_guard (human-eval / EvalPlus): with no os._exit / exec left, and every exception
+    # failing, a program cannot end with status 0 before its tests ran, even with a forged done file.
+    import posix
+    for m in (os, posix):
+        for k in list(vars(m)):
+            if k in ("_exit", "fork", "forkpty", "kill", "killpg") or k.startswith(("exec", "spawn", "posix_spawn")):
+                delattr(m, k)
+    try:
+        exec(code, g)
+        ok = True if case is None or call(g, case, loads, dumps) else False
+    except BaseException:
+        ok = False
+    if not ok:
+        raise fail(1)
+    oclose(oopen(done, oflags, 0o600))
 
 
-_run(_code, _g, os.environ.get("CODE_EXEC_MUST_FINISH") == "1")
-del _run
+del _call
+_main()
 '''
 
 _TLS = threading.local()
@@ -168,7 +215,7 @@ def _tokens_equal(x: str, y: str, float_tol, case_insensitive: bool) -> bool:
         return False
     if _INT_RE.fullmatch(x) and _INT_RE.fullmatch(y):
         return False
-    # Codeforces-style: absolute or relative error within float_tol.
+    # Codeforces testlib doubleCompare: absolute or relative error within float_tol.
     return abs(dx - dy) <= Decimal(str(float_tol)) * max(Decimal(1), abs(dy))
 
 
@@ -197,27 +244,39 @@ def _lines_equal_with_decimal(a: str, b: str, float_tol=None, case_insensitive=F
     return True
 
 
-# strict (training) equality: both sides of `assert A == B` pass through __canon, which
-# reduces values to builtin types, so an object whose __eq__ always returns True cannot pass.
-# Every type it relies on is taken from literals and bound as a default when the prelude is
-# defined, so rebinding builtins (type, isinstance, ...) in the solution does not reach it.
-# Heap types (any class defined in Python) must keep identity equality; C types with their
-# own equality (Decimal, datetime, deque, slice, ...) have their referents checked the same way.
+# strict (training) asserts: every value an assert compares or truth-tests passes through
+# __v7canon__, which reduces it to builtin types, so an object whose __eq__ (or __lt__, __bool__,
+# __contains__, ...) is rigged cannot pass. Every type it relies on is taken from literals and
+# bound as a default when the prelude is defined, so rebinding builtins (type, isinstance, ...)
+# in the solution does not reach it. Heap types (any class defined in Python) must keep identity
+# comparisons; C types with their own (Decimal, datetime, deque, slice, ...) have their referents
+# checked, and a referent may not be a heap type with its own equality at all, since the C
+# comparison would call it. The dunder name is not mangled inside `class TestX:` bodies.
+# _m: 0 compared value, 1 truth-tested value, 2 right side of `in`, 3 operand of abs(a - b).
 CANON_PRELUDE = r'''
-def __canon(x, _d=0, _T=().__class__.__class__, _O=().__class__.__mro__[-1],
-            _B=True.__class__, _I=(0).__class__, _F=(0.0).__class__, _C=(0j).__class__,
-            _S="".__class__, _Y=b"".__class__, _L=[].__class__, _U=().__class__,
-            _D={}.__class__, _ST={0}.__class__, _FS=None, _W=None, _R=None,
-            _TD=().__class__.__class__.__dict__):
+def __v7canon__(x, _m=0, _d=0, _T=().__class__.__class__, _O=().__class__.__mro__[-1],
+                _B=True.__class__, _I=(0).__class__, _F=(0.0).__class__, _C=(0j).__class__,
+                _S="".__class__, _Y=b"".__class__, _L=[].__class__, _U=().__class__,
+                _D={}.__class__, _ST={0}.__class__,
+                _EQ=("__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"),
+                _XN=((), ("__bool__", "__len__"), ("__contains__", "__iter__", "__getitem__")),
+                _FS=None, _W=None, _R=None, _TD=().__class__.__class__.__dict__):
     if _d > 200:
         raise TypeError("value nested too deeply")
     t = _T(x)
     if x is None or t is _B or t is _I or t is _F or t is _C or t is _S or t is _Y:
         return x
     mro = _TD["__mro__"].__get__(t)
+    if _m == 3:
+        for k in mro:
+            if k is _B or k is _I or k is _F or k is _C:
+                return __v7canon__(x, 0, _d + 1)
+        if _TD["__flags__"].__get__(t) & 512:
+            raise TypeError("non-number in a numeric tolerance check")
+        return x
     for k in mro:
         if _TD["__flags__"].__get__(k) & 512 == 0 and _TD["__module__"].__get__(k) == "numpy":
-            return __canon(x.tolist(), _d + 1)
+            return __v7canon__(x.tolist(), _m, _d + 1)
     for k in mro:
         if k is _B:
             return _I.__bool__(x)
@@ -232,28 +291,38 @@ def __canon(x, _d=0, _T=().__class__.__class__, _O=().__class__.__mro__[-1],
         if k is _Y:
             return b"".join((x,))
         if k is _D:
-            return {__canon(a, _d + 1): __canon(v, _d + 1) for a, v in _D.items(x)}
+            return {__v7canon__(a, 0, _d + 1): __v7canon__(v, 0, _d + 1) for a, v in _D.items(x)}
         if k is _L:
-            return [__canon(v, _d + 1) for v in _L.__iter__(x)]
+            return [__v7canon__(v, 0, _d + 1) for v in _L.__iter__(x)]
         if k is _U:
-            return _U(__canon(v, _d + 1) for v in _U.__iter__(x))
+            return _U(__v7canon__(v, 0, _d + 1) for v in _U.__iter__(x))
         if k is _ST or k is _FS:
-            return _FS(__canon(v, _d + 1) for v in k.__iter__(x))
+            return _FS(__v7canon__(v, 0, _d + 1) for v in k.__iter__(x))
+    for name in _XN[_m]:
+        for k in mro:
+            if _TD["__flags__"].__get__(k) & 512 and name in _TD["__dict__"].__get__(k):
+                raise TypeError("user-defined %s in strict assert" % name)
     identity = True
-    for name in ("__eq__", "__ne__"):
+    for name in _EQ:
         for k in mro:
             kd = _TD["__dict__"].__get__(k)
             if name in kd:
                 if _TD["__flags__"].__get__(k) & 512 or _T(kd[name]) is not _W:
-                    raise TypeError("user-defined equality in strict comparison")
+                    raise TypeError("user-defined comparison in strict assert")
                 identity = identity and k is _O
                 break
     if not identity and t is not _T:
         for r in _R(x):
-            __canon(r, _d + 1)
+            for k in _TD["__mro__"].__get__(_T(r)):
+                if _TD["__flags__"].__get__(k) & 512:
+                    kd = _TD["__dict__"].__get__(k)
+                    for name in _EQ:
+                        if name in kd:
+                            raise TypeError("user-defined comparison inside a builtin container")
+            __v7canon__(r, 0, _d + 1)
     return x
 import gc as __v7_gc
-__canon.__defaults__ = __canon.__defaults__[:-4] + (
+__v7canon__.__defaults__ = __v7canon__.__defaults__[:-4] + (
     [k for k in ().__class__.__mro__[-1].__subclasses__()
      if ().__class__.__class__.__dict__["__name__"].__get__(k) == "frozenset"
      and not ().__class__.__class__.__dict__["__flags__"].__get__(k) & 512][0],
@@ -264,8 +333,13 @@ del __v7_gc
 
 
 def strict_assert(test: str) -> str:
-    """`assert A == B[, msg]` and `assert _v7_close(A, B)` (the v7 data's tolerant float
-    compare) -> both operands through __canon; any other test is left as is."""
+    """Rewrites the condition of every `assert` (and `if C: raise AssertionError`) so each value
+    it compares or truth-tests goes through __v7canon__: Compare operands (all ops but is/is not,
+    which cannot be rigged and must not see canon's copies), and/or/not operands, the elements of
+    all()/any() over a comprehension, the arguments of the v7 data's _v7_close, both operands of
+    abs(a - b), and whatever else the condition is. Values that only feed a method call, an
+    argument, or arithmetic are left alone: canon would turn a Counter into a dict or an ndarray
+    into a list and break `c().most_common()` or `arr() / 3`."""
     import ast
 
     try:
@@ -274,21 +348,51 @@ def strict_assert(test: str) -> str:
         return test
     if not hasattr(ast, "unparse"):
         return test
-    wrap = lambda e: ast.Call(func=ast.Name(id="__canon", ctx=ast.Load()), args=[e], keywords=[])
-    changed = False
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assert):
-            continue
-        t = node.test
-        if isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.ops[0], (ast.Eq, ast.NotEq)):
-            t.left, t.comparators = wrap(t.left), [wrap(t.comparators[0])]
-            changed = True
-        elif isinstance(t, ast.Call) and isinstance(t.func, ast.Name) and t.func.id == "_v7_close" \
-                and len(t.args) == 2 and not t.keywords:
-            t.args = [wrap(a) for a in t.args]
-            changed = True
-    if not changed:
+
+    def canon(e, mode=0):
+        args = [e, ast.Constant(mode)] if mode else [e]
+        return ast.Call(func=ast.Name(id="__v7canon__", ctx=ast.Load()), args=args, keywords=[])
+
+    def named(e, *names):
+        return isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in names and not e.keywords
+
+    def truth(e):
+        if isinstance(e, ast.BoolOp):
+            e.values = [truth(v) for v in e.values]
+            return e
+        if isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.Not):
+            e.operand = truth(e.operand)
+            return e
+        if isinstance(e, ast.Compare):
+            vals = [e.left] + e.comparators
+            for i, v in enumerate(vals):
+                if all(isinstance(op, (ast.Is, ast.IsNot)) for op in e.ops[max(i - 1, 0):i + 1]):
+                    continue
+                if named(v, "abs") and len(v.args) == 1 and isinstance(v.args[0], ast.BinOp) \
+                        and isinstance(v.args[0].op, ast.Sub):
+                    v.args[0].left, v.args[0].right = canon(v.args[0].left, 3), canon(v.args[0].right, 3)
+                vals[i] = canon(v, 2 if i and isinstance(e.ops[i - 1], (ast.In, ast.NotIn)) else 0)
+            e.left, e.comparators = vals[0], vals[1:]
+            return e
+        if named(e, "_v7_close") and len(e.args) == 2:
+            e.args = [canon(a) for a in e.args]
+        elif named(e, "all", "any") and len(e.args) == 1 \
+                and isinstance(e.args[0], (ast.GeneratorExp, ast.ListComp, ast.SetComp)):
+            e.args[0].elt = truth(e.args[0].elt)
+        return canon(e, 1)
+
+    def raises_assertion(body):
+        if len(body) != 1 or not isinstance(body[0], ast.Raise):
+            return False
+        exc = body[0].exc.func if isinstance(body[0].exc, ast.Call) else body[0].exc
+        return isinstance(exc, ast.Name) and exc.id == "AssertionError"
+
+    nodes = [n for n in ast.walk(tree) if isinstance(n, ast.Assert)
+             or (isinstance(n, ast.If) and not n.orelse and raises_assertion(n.body))]
+    if not nodes:
         return test
+    for node in nodes:
+        node.test = truth(node.test)
     return CANON_PRELUDE + "\n" + ast.unparse(ast.fix_missing_locations(tree)) + "\n"
 
 
@@ -353,12 +457,14 @@ class Runner:
         return apply
 
     def run_one(self, program: str, stdin: str, timeout: float, name: str = "__main__", case=None,
-                files=None, args=(), must_finish=False):
+                files=None, args=(), must_finish=False, module=False):
         """Returns (returncode or None on timeout, stdout). `name` is the program's
-        __name__; `case`, if given, is written to _case.json beside it; `files` maps
+        __name__, and with `module` it runs in a module registered as sys.modules[name];
+        `case`, if given, is the call route's test (see _call in GUARD_SOURCE); `files` maps
         file names to contents written beside it; `args` follow it on the command line.
         With must_finish, a clean exit only counts if control reached the end of the
-        program: exiting early (sys.exit(0) before appended tests run) returns -1."""
+        program: exiting early (sys.exit(0) before appended tests run) returns -1, and the
+        guard unlinks the program and the case before running anything."""
         token = secrets.token_hex(16) if must_finish else None
         if token:
             stdin = token + "\n" + stdin
@@ -381,7 +487,7 @@ class Runner:
                     with open(os.path.join(d, fname), "w") as f:
                         f.write(content)
                 env = dict(self.env, HOME=d, TMPDIR=d, CODE_EXEC_SCRATCH=d, CODE_EXEC_NAME=name,
-                           CODE_EXEC_MUST_FINISH="1" if token else "0")
+                           CODE_EXEC_MUST_FINISH="1" if token else "0", CODE_EXEC_MODULE="1" if module else "0")
                 p = subprocess.Popen(
                     [self.python, "-I", self.guard, prog, *args],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -439,9 +545,10 @@ class Runner:
     def assert_tests(self, program, tests, timeout, name="__main__", stop_on_fail=False, strict=False):
         if strict:
             tests = [strict_assert(tc) for tc in tests]
+        module = strict and name != "__main__"
 
         def one(tc):
-            rc, _ = self.run_one(f"{program}\n\n{tc}\n", "", timeout, name=name, must_finish=True)
+            rc, _ = self.run_one(f"{program}\n\n{tc}\n", "", timeout, name=name, must_finish=True, module=module)
             return 1 if rc == 0 else 0
 
         return self._map(one, tests, stop_on_fail)
@@ -459,14 +566,14 @@ class Runner:
     def call_tests(self, program, tests, timeout, fn_name, stop_on_fail=False, strict=False):
         """LiveCodeBench call-based grading (lcb_runner testing_util.grade_call_based): the
         program is imported, not run as __main__; inputs are one JSON value per line."""
-        target = "Solution()" if "class Solution" in program else None
-        program = program + "\n\n" + CALL_HARNESS.format(fn=fn_name, target=target, strict=bool(strict))
+        solution = "class Solution" in program
 
         def one(tc):
             if not isinstance(tc, dict):
                 return 0
-            case = {"input": str(tc.get("input", "")), "output": str(tc.get("output", ""))}
-            rc, _ = self.run_one(program, "", timeout, name="tmp_sol", case=case, must_finish=True)
+            case = {"input": str(tc.get("input", "")), "output": str(tc.get("output", "")),
+                    "fn": fn_name, "solution": solution, "strict": bool(strict)}
+            rc, _ = self.run_one(program, "", timeout, name="tmp_sol", case=case, must_finish=True, module=bool(strict))
             return 1 if rc == 0 else 0
 
         return self._map(one, tests, stop_on_fail)
@@ -493,28 +600,6 @@ class Runner:
 
 
 CHECKER_TIMEOUT = 10.0  # piston runs checker.py under `timeout 10`
-
-
-# Appended to call-based programs. Names are dunder-prefixed so the solution's own
-# globals (it may star-import json, sys, io...) cannot shadow them.
-CALL_HARNESS = r'''
-def __grade():
-    import json as __j
-    import builtins as __b
-    with __b.open("_case.json") as __f:
-        __c = __j.load(__f)
-    __obj = {target}
-    __m = getattr(__obj, {fn!r}) if __obj is not None else globals()[{fn!r}]
-    __p = __m(*[__j.loads(__l) for __l in __c["input"].split("\n")])
-    if isinstance(__p, tuple):
-        __p = list(__p)
-    if {strict}:
-        # open-instruct's JSON round trip: only plain JSON values can compare equal.
-        __p = __j.loads(__j.dumps(__p, allow_nan=False))
-    if not (__p == __j.loads(__c["output"])):
-        raise SystemExit(1)
-__grade()
-'''
 
 
 def make_tests_loader(tests_dir):
