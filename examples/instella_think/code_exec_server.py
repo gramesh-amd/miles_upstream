@@ -11,10 +11,17 @@ Implements the API the Instella reward client already speaks:
            plus "flags": {"early_exit", "strict_reject", "timeout"}, tests per outcome (monitoring)
     GET  <prefix>/health              -> {"ok": true, ...}
 
-Optional request fields, used by the benchmark evals (prepare_code_benchmarks.py):
-    "tests_ref": path under --tests-dir, sent instead of "tests"
-    "stop_on_fail": skip (and fail) tests not yet started once one has failed
-    "name": the program's __name__ (default "__main__")
+"flags" never changes a verdict. A request that cannot be parsed gets HTTP 400, a grader error 500,
+both with {"error": ...}.
+
+Optional request fields:
+    "tests_ref": path under --tests-dir, sent instead of "tests" (benchmark evals)
+    "stop_on_fail": skip (and fail) tests not yet started once one has failed (benchmark evals)
+    "name": the program's __name__ (default "__main__"; training and benchmarks send "tmp_sol")
+    "strict": assert and call routes, training only: compared values must reduce to builtin types
+        (strict_assert), and with a name other than "__main__" the program runs as a real module
+    "float_tol", "case_insensitive": stdio route, training only (see _lines_equal_with_decimal);
+        float_tol must be finite and >= 0
 /test_program_call follows LiveCodeBench's call-based grading: the program is imported as
 a module and fn_name (on Solution() if the code defines it) is called per test.
 /test_program_checker follows open-r1's Codeforces judge (piston packages/codeforces run):
@@ -41,6 +48,8 @@ unprivileged user namespaces, so programs run as the service's own user with:
   * on the assert and call routes, the program file (tests appended) and the expected output
     are unlinked before the program runs, os._exit / exec / fork / kill are removed, and any
     exception or exit before the tests complete fails the test.
+The --python interpreter must be <= 3.12: from 3.13 (PEP 667) frame.f_locals writes through, so a
+program could rewrite the guard's verdict locals, and Runner refuses to start.
 That stops accidental damage from model-written code. It is not a security
 boundary against code written to escape it (a C extension can bypass audit
 hooks), so do not expose this service beyond the training cluster.
@@ -51,6 +60,7 @@ import collections
 import functools
 import hashlib
 import json
+import math
 import os
 import re
 import resource
@@ -115,44 +125,34 @@ def _hook(event, args):
                 and not any(_inside(real, p) for p in _OWN):
             raise PermissionError("sandbox: read not allowed: %s" % real)
 
-def _call(g, case, loads, dumps, isinstance=isinstance, tuple=tuple, list=list, getattr=getattr,
-          TypeError=TypeError, ValueError=ValueError):
-    # LiveCodeBench grade_call_based: one JSON value per input line, tuples compared as lists.
-    obj = g["Solution"]() if case["solution"] else None
-    m = getattr(obj, case["fn"]) if obj is not None else g[case["fn"]]
-    p = m(*[loads(ln) for ln in case["input"].split("\n")])
-    if isinstance(p, tuple):
-        p = list(p)
-    if case["strict"]:
-        # open-instruct's JSON round trip: only plain JSON values can compare equal. None marks
-        # a rejected value; strict compares builtins, so the result is otherwise a bool.
-        try:
-            p = dumps(p, allow_nan=False)
-        except (TypeError, ValueError):
-            return None
-        p = loads(p)
-    return p == loads(case["output"])
-
-
-def _main(call=_call):
-    # Everything lives in this frame, not module globals, so `import __main__` cannot reach it
-    # (frame introspection still could: same limit as EvalPlus / open-instruct).
+def _main():
+    # Everything lives in this frame, not module globals, so `import __main__` cannot reach it.
+    # Frame introspection can read this frame, so what decides the verdict is never a mutable or
+    # patchable Python object: the call route's case stays strings, parsed by a C JSON scanner
+    # captured here, and the expected output only after the program's function has returned.
     globals().pop("_main")
     must_finish = os.environ.get("CODE_EXEC_MUST_FINISH") == "1"
     prog = sys.argv[1]
     with open(prog) as f:
         src = f.read()
-    case = loads = dumps = None
+    case = False
     if must_finish:
         # The program with its tests appended, and the call route's expected output, are read
         # here and unlinked (which the hook forbids) before any of the program runs.
         os.unlink(prog)
         if os.path.exists("_case.json"):
             import json
+            from json.decoder import JSONDecoder
+            from json.scanner import c_make_scanner
             with open("_case.json") as f:
-                case = json.load(f)
+                c = json.load(f)
             os.unlink("_case.json")
-            loads, dumps = json.loads, json.dumps
+            case, fn, solution, strict = True, str(c["fn"]), bool(c["solution"]), bool(c["strict"])
+            inp, out = str(c["input"]), str(c["output"])
+            del c
+            scan = c_make_scanner(JSONDecoder())
+    typ, gattr, inst, lst, tup, dct = type, getattr, isinstance, list, tuple, dict
+    s_t, i_t, b_t, f_t, ws = str, int, bool, float, " \t\n\r"
     sys.addaudithook(globals().pop("_hook"))
     sys.argv = [prog] + sys.argv[2:]
     code = compile(src, "solution.py", "exec")
@@ -173,8 +173,7 @@ def _main(call=_call):
     # neither read it nor create the done file; the file is written only if the tests return.
     done = os.path.join(_SCRATCH, "_done_" + sys.stdin.readline().strip())
     oopen, oclose, oflags, fail = os.open, os.close, os.O_WRONLY | os.O_CREAT, SystemExit
-    # reliability_guard (human-eval / EvalPlus): with no os._exit / exec left, and every exception
-    # failing, a program cannot end with status 0 before its tests ran, even with a forged done file.
+    # With no os._exit / exec left, and every exception failing, a program cannot end with status 0 before its tests ran, even with a forged done file.
     import posix
     for m in (os, posix):
         for k in list(vars(m)):
@@ -185,9 +184,48 @@ def _main(call=_call):
     status, exc_info, exiting, subclass = 1, sys.exc_info, SystemExit, issubclass
     try:
         exec(code, g)
-        r = True if case is None else call(g, case, loads, dumps)
-        if case is not None and case["strict"] and r is None:
-            status = 3
+        r = True
+        if case:
+            # LiveCodeBench grade_call_based: one JSON value per input line (json.loads rules),
+            # a returned tuple compared as a list.
+            obj = g["Solution"]() if solution else None
+            meth = gattr(obj, fn) if obj is not None else g[fn]
+            vals = []
+            for ln in inp.split("\n") + [None]:
+                if ln is None:
+                    p = meth(*vals)
+                    if inst(p, tup):
+                        p = lst(p)
+                    vals, ln = [], out
+                ln = ln.strip(ws)
+                v, end = scan(ln, 0)
+                if end != len(ln):
+                    raise ValueError("extra data after a JSON value")
+                vals.append(v)
+            expected = vals[0]
+            if strict:
+                # exact JSON types only (no subclasses, str keys, finite floats), so == below only
+                # ever compares builtins; None marks a rejected value
+                todo, n = [p], 0
+                while todo and r is not None:
+                    v, n = todo.pop(), n + 1
+                    t = typ(v)
+                    if t is lst or t is tup:
+                        todo.extend(v)
+                    elif t is dct:
+                        for k in v:
+                            if typ(k) is not s_t:
+                                r = None
+                        todo.extend(dct.values(v))
+                    elif t is f_t:
+                        if v - v != 0:
+                            r = None
+                    elif not (v is None or t is s_t or t is i_t or t is b_t) or n > 1000000:
+                        r = None
+            if r is not None:
+                r = p == expected
+            if strict and r is None:
+                status = 3
         ok = True if r else False
     except BaseException:
         ok = False
@@ -206,7 +244,6 @@ def _main(call=_call):
     oclose(oopen(done, oflags, 0o600))
 
 
-del _call
 _main()
 '''
 
@@ -253,10 +290,10 @@ def _tokens_equal(x: str, y: str, float_tol, case_insensitive: bool) -> bool:
         return True
     try:
         dx, dy = Decimal(x), Decimal(y)
+        if dx == dy:
+            return True
     except (InvalidOperation, ValueError):
         return False
-    if dx == dy:
-        return True
     if float_tol is None or not (dx.is_finite() and dy.is_finite()):
         return False
     if _INT_RE.fullmatch(x) and _INT_RE.fullmatch(y):
@@ -378,6 +415,7 @@ del __v7_gc
 '''
 
 
+@functools.lru_cache(maxsize=4096)
 def strict_assert(test: str) -> str:
     """Rewrites the condition of every `assert` (and `if C: raise AssertionError`) so each value
     it compares or truth-tests goes through __v7canon__: Compare operands (all ops but is/is not,
@@ -388,11 +426,11 @@ def strict_assert(test: str) -> str:
     into a list and break `c().most_common()` or `arr() / 3`."""
     import ast
 
+    if not hasattr(ast, "unparse"):
+        return test
     try:
         tree = ast.parse(test)
-    except SyntaxError:
-        return test
-    if not hasattr(ast, "unparse"):
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
         return test
 
     def canon(e, mode=0):
@@ -437,9 +475,12 @@ def strict_assert(test: str) -> str:
              or (isinstance(n, ast.If) and not n.orelse and raises_assertion(n.body))]
     if not nodes:
         return test
-    for node in nodes:
-        node.test = truth(node.test)
-    return CANON_PRELUDE + "\n" + ast.unparse(ast.fix_missing_locations(tree)) + "\n"
+    try:
+        for node in nodes:
+            node.test = truth(node.test)
+        return CANON_PRELUDE + "\n" + ast.unparse(ast.fix_missing_locations(tree)) + "\n"
+    except (ValueError, RecursionError, MemoryError):
+        return test
 
 
 def _finished(d: str, token: str) -> bool:
@@ -468,6 +509,12 @@ class Runner:
         self.pool = ThreadPoolExecutor(max_workers=workers * 8)
         self.mem_bytes = mem_mb * 1024 * 1024
         self.python = python
+        ver = subprocess.run([python, "-I", "-c", "import sys; print(*sys.version_info[:2])"], capture_output=True,
+                             text=True, timeout=60).stdout.split()
+        if len(ver) != 2 or (int(ver[0]), int(ver[1])) >= (3, 13):
+            raise SystemExit(f"code_exec_server: --python {python} is Python {'.'.join(ver) or '?'}; it must be "
+                             "<= 3.12, because from 3.13 (PEP 667) a program can write the guard's frame locals "
+                             "and pass every test")
         self.scratch_root = scratch_root
         os.makedirs(scratch_root, exist_ok=True)
         # named by content so servers of different versions can share a scratch root
@@ -506,7 +553,7 @@ class Runner:
                 files=None, args=(), must_finish=False, module=False):
         """Returns (returncode or None on timeout, stdout). `name` is the program's
         __name__, and with `module` it runs in a module registered as sys.modules[name];
-        `case`, if given, is the call route's test (see _call in GUARD_SOURCE); `files` maps
+        `case`, if given, is the call route's test (see the call route in GUARD_SOURCE's _main); `files` maps
         file names to contents written beside it; `args` follow it on the command line.
         With must_finish, a clean exit only counts if control reached the end of the
         program: exiting early (sys.exit(0) before appended tests run) returns RC_EARLY_EXIT,
@@ -754,6 +801,8 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
                     raise ValueError("checker must be Python source")
                 float_tol = req.get("float_tol")
                 float_tol = None if float_tol is None else float(float_tol)
+                if float_tol is not None and not (math.isfinite(float_tol) and float_tol >= 0):
+                    raise ValueError("float_tol must be finite and >= 0")
                 case_insensitive = bool(req.get("case_insensitive", False))
                 strict = bool(req.get("strict", False))
             except (OSError, ValueError, KeyError, TypeError) as e:
@@ -763,20 +812,34 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
                 tests = tests[:max_tests]
             padded = total - len(tests)
             flags = _Flags()
-            if route == "/test_program":
-                res = runner.assert_tests(program, [str(t) for t in tests], timeout, name, stop_on_fail, strict, flags)
-            elif route == "/test_program_stdio":
-                res = runner.stdio_tests(program, tests, timeout, stop_on_fail, float_tol, case_insensitive, flags)
-            elif route == "/test_program_checker":
-                res = runner.checker_tests(program, tests, timeout, checker, stop_on_fail, flags)
-            else:
-                res = runner.call_tests(program, tests, timeout, fn_name, stop_on_fail, strict, flags)
+            common = dict(stop_on_fail=stop_on_fail, flags=flags)
+            try:
+                if route == "/test_program":
+                    res = runner.assert_tests(program, [str(t) for t in tests], timeout, name=name, strict=strict,
+                                              **common)
+                elif route == "/test_program_stdio":
+                    res = runner.stdio_tests(program, tests, timeout, float_tol=float_tol,
+                                             case_insensitive=case_insensitive, **common)
+                elif route == "/test_program_checker":
+                    res = runner.checker_tests(program, tests, timeout, checker=checker, **common)
+                else:
+                    res = runner.call_tests(program, tests, timeout, fn_name, strict=strict, **common)
+            except Exception as e:
+                _bump(errors=1)
+                return self._send(500, {"error": f"grader error: {type(e).__name__}: {e}"})
             _bump(requests=1, tests=len(res), passed=sum(res), strict_rejects=flags.counts["strict_reject"])
             # Tests beyond the cap count as failed so the client's length check holds. "flags"
             # counts tests per outcome (early_exit and strict_reject on the assert and call routes).
             self._send(200, {"results": res + [0] * padded, "flags": flags.counts})
 
     return Handler
+
+
+class Server(ThreadingHTTPServer):
+    # Training opens 64+ connections per rollout worker at once; socketserver's backlog of 5 resets
+    # them. The kernel caps this at net.core.somaxconn.
+    request_queue_size = 1024
+    daemon_threads = True
 
 
 def main():
@@ -806,10 +869,8 @@ def main():
 
     runner = Runner(args.workers, args.mem_mb, args.python, args.scratch)
     started = time.time()
-    srv = ThreadingHTTPServer((args.host, args.port),
-                              make_handler(runner, prefix, args.max_tests, args.max_timeout, started,
-                                           make_tests_loader(args.tests_dir)))
-    srv.daemon_threads = True
+    srv = Server((args.host, args.port), make_handler(runner, prefix, args.max_tests, args.max_timeout, started,
+                                                      make_tests_loader(args.tests_dir)))
 
     def report():
         while True:
