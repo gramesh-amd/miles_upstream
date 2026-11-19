@@ -877,8 +877,11 @@ fi
 # that accumulates dW into weight.main_grad following Megatron's own contract; see the unit
 # test at study_tim/test_fp32_logits.py. It bypasses tensor-parallel plumbing and therefore
 # asserts tp=1 for the head, which holds here (--tensor-model-parallel-size 1).
+# FP32_LM_HEAD_IMPL picks how (fp32_lm_head.py): fp32 GEMMs, or bf16 GEMMs with fp32 accumulation
+# and output ("mixed"; "split" keeps the weight gradient fp32-accurate too), which give the same
+# logits ~7x faster on MI355X.
 if [ "${FP32_TRAINER_READOUT:-1}" = "1" ]; then
-   GRPO_ARGS+=(--fp32-lm-head)
+   GRPO_ARGS+=(--fp32-lm-head --fp32-lm-head-impl "${FP32_LM_HEAD_IMPL:-fp32}")
 fi
 
 MISC_ARGS=(

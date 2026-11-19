@@ -40,9 +40,11 @@ gather, output gather, bias), so this refuses to install unless the head is genu
 untouched by tensor parallelism. It fails loudly rather than silently computing the wrong
 function.
 
-Cost: an fp32 copy of the head weight (vocab x hidden x 4 bytes) plus an fp32 weight-gradient
-temporary during backward. The fp32 logits themselves already exist today, since
-`Float16Module` upcasts them.
+Cost: with --fp32-lm-head-impl fp32, an fp32 copy of the head weight (vocab x hidden x 4 bytes)
+plus fp32 GEMMs, ~8% of trainer GPU time on MI355X after the backward fix (fp32 GEMMs run at
+~150 TFLOP/s there vs ~1.1 PFLOP/s for bf16). "mixed" / "split" get the same logits from bf16
+GEMMs with fp32 accumulation and output (see _Fp32Logits). The fp32 logits themselves already
+exist today, since `Float16Module` upcasts them.
 """
 
 from __future__ import annotations
@@ -89,13 +91,32 @@ def _assert_no_tensor_parallel(layer: Any) -> None:
         raise RuntimeError("fp32_lm_head does not handle a fused LM-head bias")
 
 
+def _mm_fp32_out(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """bf16 x bf16 GEMM with fp32 accumulation and an fp32 result."""
+    return torch.mm(a, b, out_dtype=torch.float32)
+
+
 class _Fp32Logits(torch.autograd.Function):
-    """y = x @ W^T computed in fp32, accumulating dW into Megatron's main_grad."""
+    """y = x @ W^T with fp32 logits, accumulating dW into Megatron's main_grad.
+
+    impl "fp32" upcasts both operands and runs fp32 GEMMs. "mixed" and "split" keep the bf16
+    operands and ask for fp32 accumulation and output: x and W hold bf16 values either way, so
+    the logits agree with the fp32 path to accumulation order (measured on MI355X: sampled-token
+    log-prob error vs fp64 2.8e-6 against 4.6e-6 for fp32), at ~7x the speed. In the backward
+    pass they round the fp32 logit gradient to bf16 for the GEMMs (dgrad is rounded to bf16 on
+    return anyway). "split" writes it as hi + lo, two bf16 terms, for the weight gradient, which
+    makes that fp32-accurate for one extra GEMM.
+    """
 
     @staticmethod
-    def forward(ctx, inp: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    def forward(ctx, inp: torch.Tensor, weight: torch.Tensor, impl: str = "fp32") -> torch.Tensor:
         ctx.save_for_backward(inp, weight)
-        return torch.matmul(inp.float(), weight.float().t())
+        ctx.impl = impl
+        if impl == "fp32":
+            return torch.matmul(inp.float(), weight.float().t())
+        x2 = inp.reshape(-1, inp.shape[-1]).to(torch.bfloat16)
+        out = _mm_fp32_out(x2, weight.to(torch.bfloat16).t())
+        return out.view(*inp.shape[:-1], weight.shape[0])
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
@@ -106,20 +127,30 @@ class _Fp32Logits(torch.autograd.Function):
         # MI355X (2.2 s per micro-batch, profiled 2026-11-15).
         g2 = grad_output.float().reshape(-1, grad_output.shape[-1]).contiguous()
 
-        grad_input = torch.matmul(g2, weight.float()).view(*grad_output.shape[:-1], weight.shape[-1]).to(inp.dtype)
-
-        # [tokens, vocab]^T @ [tokens, hidden] -> [vocab, hidden], matching weight.
-        i2 = inp.reshape(-1, inp.shape[-1]).float()
-        grad_weight_fp32 = torch.matmul(g2.t(), i2)
+        if ctx.impl == "fp32":
+            grad_input = torch.matmul(g2, weight.float())
+            # [tokens, vocab]^T @ [tokens, hidden] -> [vocab, hidden], matching weight.
+            i2 = inp.reshape(-1, inp.shape[-1]).float()
+            grad_weight_fp32 = torch.matmul(g2.t(), i2)
+        else:
+            w16 = weight.to(torch.bfloat16)
+            i2 = inp.reshape(-1, inp.shape[-1]).to(torch.bfloat16)
+            hi = g2.to(torch.bfloat16)
+            grad_input = _mm_fp32_out(hi, w16)
+            grad_weight_fp32 = _mm_fp32_out(hi.t(), i2)
+            if ctx.impl == "split":
+                lo = (g2 - hi.float()).to(torch.bfloat16)
+                grad_weight_fp32 += _mm_fp32_out(lo.t(), i2)
+        grad_input = grad_input.view(*grad_output.shape[:-1], weight.shape[-1]).to(inp.dtype)
 
         main_grad = getattr(weight, "main_grad", None)
         if main_grad is None:
-            return grad_input, grad_weight_fp32.to(weight.dtype)
+            return grad_input, grad_weight_fp32.to(weight.dtype), None
 
         main_grad.add_(grad_weight_fp32.to(main_grad.dtype))
         if not hasattr(weight, "grad_added_to_main_grad"):
             # Megatron returns None here; autograd treats it as a zero gradient.
-            return grad_input, None
+            return grad_input, None, None
 
         # DDP with overlap_grad_reduce needs a real tensor so its hooks stay on the main
         # backward thread; the contents are ignored because of the flag below.
@@ -127,7 +158,7 @@ class _Fp32Logits(torch.autograd.Function):
         dummy = torch.empty(
             main_grad.shape, dtype=inp.dtype, device=main_grad.device, requires_grad=False
         )
-        return grad_input, dummy
+        return grad_input, dummy, None
 
 
 @contextlib.contextmanager
@@ -141,6 +172,7 @@ def fp32_lm_head(args: Namespace, model: Sequence[Any]) -> Iterator[None]:
         yield
         return
 
+    impl = getattr(args, "fp32_lm_head_impl", "fp32") or "fp32"
     patched: list[tuple[Any, Any, bool]] = []
     try:
         for layer in _find_output_layers(model):
@@ -161,7 +193,7 @@ def fp32_lm_head(args: Namespace, model: Sequence[Any]) -> Iterator[None]:
                 effective = weight if weight is not None else getattr(_layer, "weight", None)
                 if effective is None:
                     return _original(input_, weight, runtime_gather_output)
-                output = _Fp32Logits.apply(input_, effective)
+                output = _Fp32Logits.apply(input_, effective, impl)
                 output_bias = _layer.bias if getattr(_layer, "skip_bias_add", False) else None
                 return output, output_bias
 
