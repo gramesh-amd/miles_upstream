@@ -879,7 +879,9 @@ async def batched_reward(args, samples, **kwargs):
     evaluation = bool(kwargs.get("evaluation", False))
     loop = asyncio.get_running_loop()
     if not isinstance(samples, (list, tuple)):
-        return await loop.run_in_executor(_executor(), _score_one, samples, evaluation)
+        reward = await loop.run_in_executor(_executor(), _score_one, samples, evaluation)
+        _note_domains([samples], [reward], evaluation)
+        return reward
     if not samples:
         return []
     sem = asyncio.Semaphore(max(1, _CONCURRENCY))
@@ -888,7 +890,23 @@ async def batched_reward(args, samples, **kwargs):
         async with sem:
             return await loop.run_in_executor(_executor(), _score_one, s, evaluation)
 
-    return await asyncio.gather(*[_one(s) for s in samples])
+    rewards = await asyncio.gather(*[_one(s) for s in samples])
+    _note_domains(samples, rewards, evaluation)
+    return rewards
+
+
+def _note_domains(samples, rewards, evaluation: bool) -> None:
+    """Hand graded training samples to per_domain_logger, so its per-domain stats include the
+    groups the dynamic filter drops (PER_DOMAIN_METRICS=0 turns it off)."""
+    if evaluation or os.environ.get("PER_DOMAIN_METRICS", "1") != "1":
+        return
+    try:
+        import per_domain_logger
+
+        keep = [(s, r) for s, r in zip(samples, rewards) if not _is_eval(getattr(s, "metadata", None) or {}, False)]
+        per_domain_logger.note([s for s, _ in keep], [r for _, r in keep])
+    except Exception as exc:  # metrics only
+        logger.warning("per-domain note failed (%s)", exc)
 
 
 # --- self-test ------------------------------------------------------------------

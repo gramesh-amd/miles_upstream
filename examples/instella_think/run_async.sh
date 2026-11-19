@@ -646,8 +646,9 @@ if [ "${OBSERVE_ENTROPY:-1}" = "1" ]; then
    GRPO_ARGS+=(--observe-training-entropy)
 fi
 # Rollout log hooks, all returning False so miles' own rollout metrics still run:
-#   per_domain_logger.py      domain/<dataset_source>/* (solve rate, reward spread, solved vs
-#                             unsolved length, truncation); PER_DOMAIN_METRICS=0 disables
+#   per_domain_logger.py      rollout/domain/<key>/<domain>/* for PER_DOMAIN_KEYS (default route, src,
+#                             src_route): solve/pass rate, lengths, truncation, all/none-solved
+#                             groups over every graded sample; PER_DOMAIN_METRICS=0 disables
 #   CUSTOM_ROLLOUT_LOG_PATH   e.g. run_code.sh's code_reward.log_rollout_data (rollout/code_hack/*,
 #                             rollout/code/*)
 # miles keeps only the last --custom-rollout-log-function-path, so two or more go through
@@ -1070,6 +1071,8 @@ RUNTIME_ENV_JSON="{
     \"ROUTER_LOG_EVERY\": \"${ROUTER_LOG_EVERY:-5}\",
 ${WANDB_BASE_URL_ENV}    \"ADAPTIVE_FILTER_MAX_PASS\": \"${ADAPTIVE_FILTER_MAX_PASS:-0.75}\",
     \"SOLVED_REWARD\": \"${SOLVED_REWARD:-1.0}\",
+    \"PER_DOMAIN_METRICS\": \"${PER_DOMAIN_METRICS:-1}\",
+    \"PER_DOMAIN_KEYS\": \"${PER_DOMAIN_KEYS:-route,src,src_route}\",
     \"WANDB_API_KEY\": \"${WANDB_KEY:-${WANDB_API_KEY:-}}\",
     \"NCCL_SOCKET_IFNAME\": \"${NET_IF}\",
     \"GLOO_SOCKET_IFNAME\": \"${NET_IF}\"${SERIALIZE_ENV}${PROFILE_ENV}
