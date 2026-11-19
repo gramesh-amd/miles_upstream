@@ -1,7 +1,14 @@
 # Code RL v7: grader, reward and data handoff
 
-Branch `code-rl-v7-fixes`, base `f610d0d915` (code-evals-v2). The branch closes reward hacks in the code grader,
-makes the training reward all-or-nothing by default, adds reward-hack monitoring, and grades checker rows.
+Branch `instella-code-rl-lux-v7`: `instella-code-rl-lux` (the branch Lux runs use) with `code-rl-v7-fixes` merged
+in (merge commit, both histories intact, a fast-forward of the lux branch). `code-rl-v7-fixes` (base `f610d0d915`,
+code-evals-v2) closes reward hacks in the code grader, makes the training reward all-or-nothing by default, adds
+reward-hack monitoring and grades checker rows; the lux side brings `code_exec_server --processes N`, the reward's
+own thread pool, any number of rollout nodes / an optional second sandbox node, the offline and online difficulty
+filters, `run.sbatch`, the sglang MLA rope patches and profiling.
+
+**Lux runs launched from `instella-code-rl-lux` before this merge: read "Changed defaults" below before resuming
+one from this branch.** The default code reward switches from partial (pass rate) to binary (all tests pass).
 
 **After pulling, restart both sandboxes** (`cluster/code_exec.sh stop`, then `start`; the same with `bench`). The
 server and the reward client change together.
@@ -32,12 +39,65 @@ use the checker route; no current eval set has any.
 | `641450c421` | `helper_tamper` scan key; one bounded metrics window; client/server compare parity test | review B1, S5, S6 |
 | `2565483787` | `CODE_STRICT_GRADING`, `CODE_EXEC_API_RETRIES`, `CODE_HACK_WINDOW_MAX` reach the Ray workers | review S4 (they were silently dropped) |
 | `03c1161742` | `test_grader.sh`, numpy skip, call-route tamper cases, early-exit checks | review S8, S9 |
+| merge into lux | `instella-code-rl-lux` + the above; conflicts in README, server `main`, `code_reward` (imports, gating, self-test), `run_code.sh` echo list | one branch for Lux runs |
+| lux-v7 follow-ups | `/health` and the log sum all `--processes`; port-in-use refusal; extra processes exit with the first | per-process STATS hid most of the server's traffic |
+| | `rollout_log_chain.py` | `per_domain_logger` silently replaced `code_reward.log_rollout_data` (miles keeps the last `--custom-rollout-log-function-path`) |
+| | `train_all_pass` grades like `_score_one` (checker, strict, stdio options); solve = full reward; cache header records them; Lux prefilter containers get N / MAX_PASS_RATE / `CODE_*` (`--cleanenv` dropped them); `PREFILTER_SHARDS` | the prefilter graded v7 rows more leniently than training |
+| | `run.sbatch` passes `CODE_EXEC_PROCESSES` / `CODE_BENCH_PROCESSES` to the sandbox node | spec sizing ignored |
 
 The evidence is in `/tmp/v7reg/{REVIEW,BEFORE_AFTER,FIXES,SURVEY}.md` on the login node. BEFORE_AFTER.md counts the
 hacks closed, the false negatives fixed and the labelled regressions. Those files are in `/tmp`, so copy them next
 to the data if they should outlive the node.
 
+## Changed defaults for runs from `instella-code-rl-lux`
+
+| what | before (lux) | now | to keep the old behaviour |
+|---|---|---|---|
+| training reward | pass rate (`CODE_PARTIAL_CREDIT=1` default) | `CODE_REWARD_MODE=binary`, threshold 1.0 | `CODE_REWARD_MODE=partial` (or `CODE_PARTIAL_CREDIT=1`) in the spec |
+| assert grading | plain asserts, program run as `__main__` | strict canon, module `tmp_sol` (`CODE_STRICT_GRADING=1`) | `CODE_STRICT_GRADING=0` |
+| early exit | `sys.exit(0)` before the asserts passed | fails the test (train and eval) | none (it was a reward hack) |
+| checker rows | plain stdout compare | `/test_program_checker` | none |
+| W&B group name | `...-passrate-...` | `...-allpass-...` (`passrate` under partial) | set `WANDB_GROUP` |
+| rollout log hooks | `per_domain_logger` only | `per_domain_logger` + `code_reward.log_rollout_data` via `rollout_log_chain.py` | `CUSTOM_ROLLOUT_LOG_PATH=""` |
+| prefilter cache header | 11 keys | + `code_solve_pass_rate`, `code_strict_grading` | an old cache is refused; use a new `OUTPUT=` or `RESET_CACHE=1` |
+
+A run resumed with the same `SAVE_TAG` keeps its W&B run (the id comes from `SAVE_TAG`), so a mid-run switch to the
+binary reward would show up as a step change in `rollout/raw_reward`; pin `CODE_REWARD_MODE=partial` in the spec of
+any resumed partial-credit run. Under the binary reward the dynamic filter drops every all-pass and all-fail group
+as `zero_std`, so `frac_kept` falls and steps pull more prompts. Restart the sandboxes (or resubmit `run.sbatch`)
+so server and client match.
+
 ## How to run
+
+### Lux (`run.sbatch`, one Slurm job per run)
+
+Node 0 runs the sandboxes (`SANDBOX_NODES=2`: node 0 rewards, node 1 benchmarks), the rest are GPU nodes (1 trainer +
+N-1 rollout nodes). The arguments are the run spec; `run_in_container.sh` exports it on the head before
+`run_code.sh`, and `run_async.sh` hands every `CODE_*` variable below to the Ray workers in the runtime env (checked
+with `DRY_RUN=1`: `CODE_REWARD_MODE`, `CODE_REWARD_PASS_THRESHOLD`, `CODE_STRICT_GRADING`, `CODE_EXEC_API_RETRIES`,
+`CODE_HACK_WINDOW_MAX`, `ROLLOUT_LOG_HOOKS` all arrive; `CODE_TRAIN` becomes `--prompt-data`). From `~/miles`:
+
+```bash
+# v7 data on Lux: copy final_v2/train.jsonl over first, e.g. to $LUX_ROOT/data/code-train/v7_final_v2.jsonl
+sbatch -A ven136 -N 4 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/run.sbatch \
+  SAVE_TAG=code32k_v7_binary CODE_TRAIN=/lustre/orion/ven136/scratch/$USER/instella/data/code-train/v7_final_v2.jsonl
+# add CHECK_ONLY=1 first: expect "reward : CODE_REWARD_MODE=binary threshold=1.0 CODE_STRICT_GRADING=1"
+```
+
+Sandbox sizing goes in the spec too: `CODE_EXEC_WORKERS`, `CODE_BENCH_WORKERS`, `CODE_EXEC_PROCESSES` (default 4),
+`CODE_BENCH_PROCESSES` (default 16 when `CODE_BENCH_WORKERS` >= 16). The Lux sandboxes run the SIF's
+`/opt/venv/bin/python` (3.10, numpy), so numpy rows grade there.
+
+**`--processes N`.** N server processes share the port (SO_REUSEPORT), each with `workers / N` workers, its own
+1024 listen backlog, scratch subdir `p<i>` (own content-named guard file), `tests_ref` cache and `strict_assert`
+cache. `/health` and the periodic log line sum the counters of all N (`per_process_requests` shows the split,
+`process` is the process that answered); per-request `flags` come from the process that ran the request. A server
+with N > 1 refuses a port that is already in use (a stale server would otherwise share the traffic), needs a fixed
+`--port`, and its extra processes exit when the first one does. One request's tests fan out over only `workers / N`
+workers, so a single many-test request is slower than on a one-process server with the same `--workers` (LCB call
+route: ~1.0 s vs ~0.4 s per answer at 12 workers, 2 vs 1 processes); throughput under load is higher.
+
+### Crusoe / Spur
 
 ```bash
 I=examples/instella_think
@@ -49,9 +109,44 @@ $I/cluster/on_node.sh $J $NODE cluster/launch.sh $HEAD_IP CHECK_ONLY=1 \
 # expect "reward : CODE_REWARD_MODE=binary threshold=1.0 CODE_STRICT_GRADING=1", then launch without CHECK_ONLY
 ```
 
-`CODE_TRAIN` still defaults to the old Dolci file, so v7 runs **must** set it. `cluster/code_exec.sh` starts the
+`CODE_TRAIN` still defaults to the old Dolci file, so v7 runs **must** set it (in the spec on Lux,
+`CODE_TRAIN=...` on `launch.sh` on Crusoe; `PROMPT_DATA` overrides it). `cluster/code_exec.sh` starts the
 training grader with the host's `python3` and no numpy, so numpy-using training rows score 0 there. To
 reproduce an old pass-rate run, set `CODE_REWARD_MODE=partial`.
+
+### Difficulty prefilter (offline, on the lux branch)
+
+`difficulty_filter.py` (OLMo 3 step 2: 8 rollouts per prompt from the starting checkpoint at T=1.0, drop prompts
+solved > 62.5% of the time, keep 0/8) driven by `prefilter.sh` on one node or `cluster/lux/prefilter.sbatch` across
+many (README "5b", `cluster/lux/README.md`). Code rows are graded by `code_reward.train_all_pass`, which grades
+exactly as `_score_one` does: think gate, `metadata.checker` rows, strict asserts (`CODE_STRICT_GRADING`), per-row
+`float_tol` / `case_insensitive`. A solve is a full training reward (pass rate >= `CODE_REWARD_PASS_THRESHOLD`
+under binary, every test under partial), so it never reads `code_pass_rate` and works with either mode. Set the
+grading knobs as the run will; they are recorded in the cache header.
+
+It works on the v7 data as is (`prompt` message list, `label`, `metadata`; checked on 3 final_v2 rows with a stub
+engine: rigged `__eq__` answers count 0/4 with strict grading and 2/4 without). On Lux, for final_v2:
+
+```bash
+L=examples/instella_think/cluster/lux
+export PREFILTER_SHARDS=$LUX_ROOT/data/prefilter/v7_shards     # beside the Dolci shards
+python3 $L/prefilter_shards.py split 14 $LUX_ROOT/data/code-train/v7_final_v2.jsonl
+sbatch -A ven136 -N 16 -t 9:00:00 -o ~/logs/%x-%j.out --export=ALL,PREFILTER_SHARDS=$PREFILTER_SHARDS \
+  $L/prefilter.sbatch                  # prefilter_node.sh passes N, MAX_PASS_RATE, CODE_* and PREFILTER_SHARDS on
+python3 $L/prefilter_shards.py status
+python3 $L/prefilter_shards.py merge $LUX_ROOT/data/prefilter/v7_final_v2.filtered.jsonl
+# then train with CODE_TRAIN=$LUX_ROOT/data/prefilter/v7_final_v2.filtered.jsonl
+```
+
+Each kept row gets `metadata.prefilter = {n, n_correct, n_truncated}`, so another band (the "drop 8/8, keep 20–25%
+at 6–7/8, cap 0/8 at ~15%" idea below) can be cut from the output without regenerating.
+
+### Online difficulty filter
+
+`ADAPTIVE_FILTER=1` (`adaptive_difficulty_filter.py`) drops groups whose share of solved samples exceeds
+`ADAPTIVE_FILTER_MAX_PASS` (0.75). Solved = reward >= `SOLVED_REWARD`, which `run_code.sh` sets to
+`CODE_REWARD_SCALE`: under binary that is pass rate >= threshold, under partial every test. `per_domain_logger`'s
+`solve_rate` uses the same rule. Neither reads `code_pass_rate`.
 
 ## Settings
 
@@ -72,29 +167,50 @@ Environment (reward client; all forwarded to the Ray workers by `run_async.sh`):
 | `CODE_REWARD_CONCURRENCY` | `64` | concurrent samples per batch |
 | `CODE_LOG_EVERY` | `200` | samples between `CODE_REWARD` log lines |
 | `CODE_EXEC_API_RETRIES` | `2` | HTTP retries per request |
-| `CUSTOM_ROLLOUT_LOG_PATH` | `code_reward.log_rollout_data` (run_code.sh) | `""` disables the W&B hook |
-| `CODE_EXEC_TESTS_CACHE` | `256` | server: cached `tests_ref` files |
+| `CUSTOM_ROLLOUT_LOG_PATH` | `code_reward.log_rollout_data` (run_code.sh) | `""` disables the W&B hook; runs beside `per_domain_logger` (`PER_DOMAIN_METRICS=1`) through `rollout_log_chain.py` |
+| `CODE_EXEC_TESTS_CACHE` | `256` | server: cached `tests_ref` files, per server process |
+| `SOLVED_REWARD` | `CODE_REWARD_SCALE` (run_code.sh) | full reward for the online filter and `domain/*/solve_rate` |
 
-Server flags (`code_exec_server.py`, unchanged on this branch apart from the 3.13 refusal): `--host 0.0.0.0`
-(use `127.0.0.1` anywhere but the sandbox host), `--port 18950`, `--token-file ~/.code-exec-token`,
-`--workers cpus-4`, `--mem-mb 2048`, `--max-tests 64`, `--max-timeout 10`, `--python <its own>` (<= 3.12),
-`--tests-dir ""`, `--scratch /tmp/code-exec-<uid>`, `--stats-every 60`. Request fields and the response `flags`
-are documented in the module docstring.
+Server flags (`code_exec_server.py`): `--host 0.0.0.0` (use `127.0.0.1` anywhere but the sandbox host),
+`--port 18950`, `--token-file ~/.code-exec-token`, `--workers cpus-4` (total over processes), `--processes 1`,
+`--mem-mb 2048`, `--max-tests 64`, `--max-timeout 10`, `--python <its own>` (<= 3.12), `--tests-dir ""`,
+`--scratch /tmp/code-exec-<uid>`, `--stats-every 60`. Request fields and the response `flags` are documented in the
+module docstring.
+
+The reward client grades on its own thread pool (`CODE_REWARD_CONCURRENCY` threads, lux `6183014a31`). `STATS`,
+`WINDOW` (the bounded metrics window) and the HTTP session are lock-protected, and each request's `flags` go into
+that sample's own dict, so concurrent `_score_one` calls are safe (`test_code_hack_monitor.py` checks 500 calls
+on 64 threads; the smoke below checks 256 through a real server). Both sandbox URLs (`CODE_EXEC_API_URL` for
+training and checker rows, `CODE_BENCH_API_URL` for benchmark rows, possibly on the second sandbox node) take the
+same routes, retries and flags.
 
 ## How to verify
 
 ```bash
 GRADER_PYTHON=<venv with numpy>/bin/python bash examples/instella_think/test_grader.sh
+GRADER_PROCESSES=4 GRADER_WORKERS=16 GRADER_PYTHON=... bash examples/instella_think/test_grader.sh  # Lux layout
 python3 examples/instella_think/test_code_hack_monitor.py     # offline part only, no server
 ```
 
-Expected results:
+Expected results, with one server process and with `--processes 4` alike (each run ~50 s on the login node):
 - hardening: 57/57;
 - adversarial: 116/143. The 27 failures are known (24 residual, 3 policy): 0 attacks succeed and there are
   0 false negatives;
-- hack monitor: 200/200 in both reward modes;
+- hack monitor: 216/216 in both reward modes (188 without a server);
 - self-test: all ok, `api_error=0`;
 - the 3.13 refusal and the lux copy check both pass.
+
+Merge verification (2026-11-18, `instella-code-rl-lux-v7`):
+- concurrency, `--processes 4` on a CPU node: 128 connections released together x 4 rounds = 512 requests in 7.1 s,
+  0 transport errors, 0 wrong results or flags, `/health` deltas exact (requests, early_exits, strict_rejects,
+  timeouts; errors +0), split 126/136/127/123; then 256 `batched_reward` samples at `CODE_REWARD_CONCURRENCY=64`:
+  per-sample rates, rewards and flags right, `STATS` and `WINDOW` sums exact;
+- eval parity, function benchmarks (5,420 answers, `--processes 4`, 469 s): 0 differences from
+  `code-rl-v7-fixes` on the same node; the 20 flips against `/tmp/v7reg/old_fn.json` (mbppplus/255,
+  HumanEval/39) are the v7 branch's own, pass sequentially on both branches, and were timeouts under load in the old run;
+- eval parity, LCB v3 (363 call-route + 100 stdio answers, login node, 258 s): stdio 0 flips; call 7 flips
+  False -> True against `old_lcb.json`, and those 7 (plus 2 timing flips of the v7 run) pass sequentially on
+  `code-rl-v7-fixes` too, so the merge changes nothing there.
 
 Without numpy in `GRADER_PYTHON` the numpy cases print `SKIP`. On the first training step, check that the
 `CODE_REWARD` line has `api_error=0` and the server log has `errors=0`.
@@ -172,8 +288,9 @@ Full details: `final_v1/LUX_PLAN.md` and `final_v1/GPU_REPAIRS.md`, both under
 - **`CODE_MAX_TESTS` 32 vs 64.** Training grades the first 32 tests, and 673 rows have more. Most merged and
   top-up tests sit beyond 32: only 476 of 4,944 are inside the graded prefix (`final_v1/REPORT.md`). Going to 64
   doubles sandbox load per sample, and the server caps at 64.
-- **Difficulty prefilter (P11).** Needs an Instella n=8 GPU pass on the final tests. Then drop 8/8, keep 20–25%
-  at 6–7/8, and cap 0/8 at about 15%. 22% of the v6 solve labels are stale.
+- **Difficulty prefilter (P11).** The tool exists (lux branch, "Difficulty prefilter" above) and grades like
+  training; what is open is the n=8 GPU pass on final_v2 and the band. Then drop 8/8, keep 20–25% at 6–7/8, and
+  cap 0/8 at about 15%. 22% of the v6 solve labels are stale.
 - **The 18 swapped Nemotron rows.** final_v2 replaced 18 verified Nemotron function rows with stdio copies of the
   same CF problem that have more tests. `final_v2/REPORT.md` section 1 explains how to revert.
 - **Prompt-format alignment (P8).** The training prompts have no answer-format instruction, while the eval
