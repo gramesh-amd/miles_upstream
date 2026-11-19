@@ -25,7 +25,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`); `OVERLONG_FILTER_DROP_UNCLOSED=1` also drops samples that stopped without closing `</think>`. |
 | `router_log_hook.py` | Optional trainer-side router telemetry (`ROUTER_LOG=1`): router weight and expert-bias drift from step 0, as JSONL. |
 | `adaptive_difficulty_filter.py` | Optional online difficulty filter (`ADAPTIVE_FILTER=1`): drops groups the current policy has already mastered. See "Other launch knobs". |
-| `per_domain_logger.py` | Per-source W&B metrics (`domain/<dataset_source>/*`), on by default (`PER_DOMAIN_METRICS=0` disables). |
+| `per_domain_logger.py` | Per-domain W&B metrics (`rollout/domain/<key>/<domain>/*` for route, src, src_route), on by default (`PER_DOMAIN_METRICS=0` disables). |
 | `rollout_log_chain.py` | Runs several rollout log hooks (`per_domain_logger` plus `CUSTOM_ROLLOUT_LOG_PATH`, e.g. code_reward's hack monitor); `run_async.sh` uses it when more than one is on, since miles keeps only one `--custom-rollout-log-function-path`. |
 | `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
 | `model_args.sh` | `MODEL_ARGS=(...)` + `MOE_LAYER_FREQ` (layer 0 dense, 1–26 MoE). MLA + `--gated-attention` + `--use-simple-farskip-layer`. **No `--spec`** (this Megatron forbids it for MoE; FarSkip is config-driven). |
@@ -289,7 +289,8 @@ All are `VAR=VALUE` overrides to `cluster/launch.sh`; defaults leave the recipe 
 | `ADVANTAGE_ESTIMATOR` | grpo | `gspo` only differs when there is more than one optimizer step per rollout. |
 | `ADAPTIVE_FILTER` | 0 | Online difficulty filter, see below. |
 | `OBSERVE_ENTROPY` | 1 | Logs the policy entropy (`train/entropy_loss`). With `--entropy-coef 0`, miles otherwise logs it as 0. |
-| `PER_DOMAIN_METRICS` | 1 | Per-source metrics under `domain/<dataset_source>/`, see "Watch it". |
+| `PER_DOMAIN_METRICS` | 1 | Per-domain metrics under `rollout/domain/<key>/<domain>/`, see "Watch it". |
+| `PER_DOMAIN_KEYS` | `route,src,src_route` | Groupings: `metadata.route`, `metadata.src`, their pair, or `source` (`dataset_source`). |
 | `DUMP_TRAIN_DATA` | 0 | Trainer-side per-rank tensors per step, next to the rollout dumps. One file per rank per step, so use it for a few steps only. |
 | `OVERLONG_FILTER_DROP_UNCLOSED` | 0 | With `OVERLONG_FILTER=1`, also drop samples that finished under the cap without closing `</think>` (a stray low-probability EOS, always scored 0). See `overlong_filter._is_unclosed`. |
 | `ROUTER_OFF` | 0 | No router training signal: aux loss 0, no load balancing, frozen expert bias. |
@@ -455,7 +456,7 @@ $I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench   # early_e
 grep "domain metrics" $L | tail -1          # per-source solve rate, length, truncation
 ```
 
-In W&B (`rollout/step` axis for `rollout/*` and `domain/*`), besides miles' own `rollout/*`, `eval/*` and `train/*`:
+In W&B (`rollout/step` axis for `rollout/*`), besides miles' own `rollout/*`, `eval/*` and `train/*`:
 - `rollout/code/pass_rate_mean` and `rollout/code/all_pass_rate` over every graded training sample;
   `rollout/code/trained/*` is the batch the trainer got (after the dynamic filter). Under `binary` the train
   reward is `all_pass_rate`.
@@ -465,10 +466,14 @@ In W&B (`rollout/step` axis for `rollout/*` and `domain/*`), besides miles' own 
   whose `metadata.code_hack.<k>` is set.
 - `rollout/code_hack/early_exit_rate` and `strict_reject_rate` are failed attempts; rising early in a run is
   the policy probing the grader.
-- `domain/<dataset_source>/*`: one panel per training source. `solve_rate` counts full-reward samples
+- `rollout/domain/<key>/<domain>/*`: one set of panels per domain, for each `PER_DOMAIN_KEYS` grouping
+  (v7 data: `route` = function / stdio, `src` = acecoder / klear / nemotron / synthetic2, `src_route`).
+  Computed over every graded training sample since the last step, including the groups the dynamic
+  filter drops (`trained_count` is what reached the trainer). `solve_rate` counts full-reward samples
   (`SOLVED_REWARD`); `nonzero_rate` equals it under the binary reward and counts any partial credit under
-  `partial`. `resp_len_solved` and `resp_len_unsolved` show whether failures are long, and
-  `truncation_rate` comes from the engine's finish status.
+  `partial`; `pass_rate_mean` is the mean fraction of tests passed. `group_all_solved` /
+  `group_none_solved` are the prompts with no learning signal. `resp_len_solved` and `resp_len_unsolved`
+  show whether failures are long, and `truncation_rate` comes from the engine's finish status.
 - `rollout/dynamic_filter/frac_<reason>`: the share of groups dropped by the dynamic filter
   for each reason (`zero_std_0.0` all wrong, `zero_std_1.0` all solved, `mastered_7of8` with
   `ADAPTIVE_FILTER=1`), plus `frac_kept`. These are comparable across steps; the raw counts
