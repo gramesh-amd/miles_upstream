@@ -28,6 +28,13 @@ SANDBOX_INDEX=$(( SLURM_PROCID % SANDBOX_NODES ))
 CONCURRENCY=${CONCURRENCY:-32}
 SGLANG_MAX_RUNNING_REQUESTS=${SGLANG_MAX_RUNNING_REQUESTS:-256}
 EOF
+# --cleanenv drops the submitting shell's environment, so prefilter.sh's settings and the grading
+# knobs that decide a solve (code_reward.py) are passed on explicitly when set.
+for v in N MAX_PASS_RATE DROP_UNSOLVED TEMPERATURE MAX_NEW_TOKENS CONTEXT_LEN HF_CKPT LIMIT PREFILTER_SHARDS \
+         CODE_REQUIRE_THINK CODE_MAX_TESTS CODE_EXEC_TIMEOUT CODE_REWARD_MODE CODE_PARTIAL_CREDIT \
+         CODE_REWARD_PASS_THRESHOLD CODE_STRICT_GRADING; do
+   if [ -n "${!v+x}" ]; then echo "${v}=${!v}" >> "${NL}/container.env"; fi
+done
 export APPTAINER_TMPDIR="${NL}/tmp"
 say "starting container for shard ${SHARD}"
 apptainer instance start --cleanenv --fakeroot --overlay "${NL}/overlay" --no-home \
@@ -44,7 +51,8 @@ apptainer exec --cleanenv --env-file "${NL}/container.env" "instance://${INST}" 
    until [ -s "${JOB_DIR}/sandbox${SANDBOX_INDEX}.ready" ]; do sleep 5; done
    TOK="$(tr -d "[:space:]" < "${CODE_EXEC_TOKEN_FILE}")"
    export CODE_EXEC_API_URL="http://$(cat "${JOB_DIR}/sandbox${SANDBOX_INDEX}.ready"):${CODE_EXEC_PORT}/${TOK}"
-   export INPUT="${DATA_ROOT}/prefilter/shards/shard_${SHARD}.jsonl" OUTPUT="${DATA_ROOT}/prefilter/shards/shard_${SHARD}.filtered.jsonl"
+   SHARDS="${PREFILTER_SHARDS:-${DATA_ROOT}/prefilter/shards}"
+   export INPUT="${SHARDS}/shard_${SHARD}.jsonl" OUTPUT="${SHARDS}/shard_${SHARD}.filtered.jsonl"
    [ -s "${INPUT}" ] || { say "FATAL: no ${INPUT}; run prefilter_shards.py split first"; exit 1; }
    [ -f "${OUTPUT}.stats.json" ] && { say "shard ${SHARD} already done"; exit 0; }
    # (Re)starts sglang when it does not answer. At long contexts and high load the server can die

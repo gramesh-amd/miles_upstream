@@ -27,9 +27,11 @@ than restated here:
   * sampling: sglang's native /generate with the rollout's sampling params (no_stop_trim,
     special tokens kept), so the response string is what the reward sees in training;
   * grading: --task code uses code_reward.train_all_pass (the reward's think gate, code
-    extraction and sandbox; a solve means every test passes, since training's partial
-    credit would count one passing test as solved); --task math uses miles' rm_hub with
-    --rm-type, the same function --rm-type selects in training.
+    extraction, checker rows from metadata.checker, strict asserts and per-row stdio options,
+    i.e. exactly _score_one's grading). A solve is a full training reward: pass rate >=
+    CODE_REWARD_PASS_THRESHOLD under the default CODE_REWARD_MODE=binary, every test under
+    partial, since partial credit would count one passing test as solved; --task math uses
+    miles' rm_hub with --rm-type, the same function --rm-type selects in training.
 --max-new-tokens must equal the run's ROLLOUT_MAX_RESPONSE_LEN: at a shorter budget the
 truncated rollouts score 0 and every pass rate is understated.
 
@@ -99,7 +101,7 @@ def _make_grader(args):
             )
 
         def grade(response, row):
-            return code_reward.train_all_pass(response, row.get(args.label_key))
+            return code_reward.train_all_pass(response, row.get(args.label_key), row.get(args.metadata_key))
 
         return grade
 
@@ -176,6 +178,11 @@ def _config(args) -> dict:
         cfg["code_require_think"] = os.environ.get("CODE_REQUIRE_THINK", "1")
         cfg["code_max_tests"] = os.environ.get("CODE_MAX_TESTS", "32")
         cfg["code_exec_timeout"] = os.environ.get("CODE_EXEC_TIMEOUT", "5")
+        import code_reward
+
+        # what decides a solve (train_all_pass): a full training reward under strict asserts or not
+        cfg["code_solve_pass_rate"] = code_reward.PASS_THRESHOLD if code_reward.REWARD_MODE == "binary" else 1.0
+        cfg["code_strict_grading"] = int(code_reward._STRICT)
     else:
         cfg["rm_type"] = args.rm_type
     return cfg

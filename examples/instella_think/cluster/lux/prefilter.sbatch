@@ -16,7 +16,8 @@
 #   python3 examples/instella_think/cluster/lux/prefilter_shards.py merge           # when all are done
 #
 # GPU node k (0-based) filters shard SHARD_BASE+k. Settings pass through the environment
-# (prefilter.sh's CONCURRENCY, SGLANG_MAX_RUNNING_REQUESTS, N, MAX_PASS_RATE, ...).
+# (prefilter.sh's CONCURRENCY, SGLANG_MAX_RUNNING_REQUESTS, N, MAX_PASS_RATE, ..., the CODE_* grading
+# knobs and PREFILTER_SHARDS; prefilter_node.sh lists what reaches the container).
 set -uo pipefail
 LUX_DIR="${LUX_DIR:-${SLURM_SUBMIT_DIR}/examples/instella_think/cluster/lux}"
 [ -f "${LUX_DIR}/lux_env.sh" ] || { echo "FATAL: submit from the miles checkout (or set LUX_DIR)"; exit 1; }

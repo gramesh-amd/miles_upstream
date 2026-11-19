@@ -6,7 +6,7 @@
     prefilter_shards.py merge [OUTPUT]      # all shards done -> one filtered set + summed stats
 
 Shards are round-robin by line (the set is shuffled by the run anyway) and live in
-$DATA_ROOT/prefilter/shards/shard_NN.jsonl; each shard's filter writes shard_NN.filtered.jsonl,
+$DATA_ROOT/prefilter/shards/shard_NN.jsonl ($PREFILTER_SHARDS overrides); each shard's filter writes shard_NN.filtered.jsonl,
 its .cache.jsonl (one graded prompt per line after a config header) and, when complete, .stats.json.
 The merged set defaults to $DATA_ROOT/prefilter/dolci-code-train.filtered.jsonl, the path
 README "5b" trains from (CODE_TRAIN=...).
@@ -20,7 +20,9 @@ import sys
 
 DATA_ROOT = os.environ.get("DATA_ROOT") or os.path.join(
     os.environ.get("LUX_ROOT", f"/lustre/orion/ven136/scratch/{os.environ.get('USER', '')}/instella"), "data")
-SHARDS = os.path.join(DATA_ROOT, "prefilter", "shards")
+# PREFILTER_SHARDS: a second shard set (another training set) beside an existing one; give
+# prefilter.sbatch the same value.
+SHARDS = os.environ.get("PREFILTER_SHARDS") or os.path.join(DATA_ROOT, "prefilter", "shards")
 
 
 def lines(path):

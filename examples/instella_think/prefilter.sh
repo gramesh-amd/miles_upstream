@@ -127,8 +127,11 @@ filter)
          export CODE_EXEC_API_URL="http://${CODE_EXEC_HOST}:${CODE_EXEC_PORT}/${_tok}"
       fi
       # Same reward gates as run_code.sh, which the filter's grading reads from the env.
+      # run_code.sh's grading defaults; CODE_REWARD_MODE (or legacy CODE_PARTIAL_CREDIT) is
+      # left to code_reward.py, which defaults to binary.
       export CODE_REQUIRE_THINK="${CODE_REQUIRE_THINK:-1}" CODE_MAX_TESTS="${CODE_MAX_TESTS:-32}" \
-             CODE_EXEC_TIMEOUT="${CODE_EXEC_TIMEOUT:-5}"
+             CODE_EXEC_TIMEOUT="${CODE_EXEC_TIMEOUT:-5}" CODE_STRICT_GRADING="${CODE_STRICT_GRADING:-1}" \
+             CODE_REWARD_PASS_THRESHOLD="${CODE_REWARD_PASS_THRESHOLD:-1.0}"
    else
       FARGS+=(--rm-type "${RM_TYPE:-deepscaler}")
    fi

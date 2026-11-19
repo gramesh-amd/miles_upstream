@@ -20,7 +20,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol, plus LCB v5/v6, HumanEval/MBPP Pro, CRUXEval and Codeforces. |
 | `validate_code_benchmarks.py` | Grades reference / always-wrong answers and old eval dumps against the bench sandbox. |
-| `difficulty_filter.py` | OLMo 3 offline difficulty filter: 8 rollouts per prompt from the starting checkpoint, graded by the run's own reward, drops prompts solved more than 62.5% of the time. `--task code` or `--task math`. Resumable. |
+| `difficulty_filter.py` | OLMo 3 offline difficulty filter: 8 rollouts per prompt from the starting checkpoint, graded by the run's own reward (`--task code`: `code_reward.train_all_pass`, which counts a full-reward sample, checker rows and strict asserts included), drops prompts solved more than 62.5% of the time. `--task code` or `--task math`. Resumable. |
 | `prefilter.sh` | Runs the filter on a node: `serve` (sglang with the rollout engine's settings), `filter`, `status`, `stop`. See "Optional: difficulty-prefilter the training set". |
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`); `OVERLONG_FILTER_DROP_UNCLOSED=1` also drops samples that stopped without closing `</think>`. |
 | `router_log_hook.py` | Optional trainer-side router telemetry (`ROUTER_LOG=1`): router weight and expert-bias drift from step 0, as JSONL. |
@@ -150,9 +150,11 @@ pass rate here describes the run you will launch:
 - **Prompt:** rendered with miles' `apply_chat_template` and sent to sglang as `input_ids`,
   as `sglang_rollout.py` sends it.
 - **Sampling:** the rollout's sampling params, with special tokens kept and no stop trimming.
-- **Grading:** `code_reward.train_all_pass`, which applies the reward's think gate, code
-  extraction and sandbox. A solve means every test passes. Training gives partial credit, and
-  counting reward > 0 as a solve would treat one passing test as solved.
+- **Grading:** `code_reward.train_all_pass`, which grades exactly as the training reward does:
+  think gate, code extraction, checker rows (`metadata.checker` is passed through), strict
+  asserts (`CODE_STRICT_GRADING`) and per-row stdio options. A solve is a full-reward sample:
+  pass rate >= `CODE_REWARD_PASS_THRESHOLD` under the default `CODE_REWARD_MODE=binary`, every
+  test under `partial` (where counting reward > 0 would treat one passing test as solved).
 
 Run it on a node that is not training: the server takes all 8 GPUs. It needs step 3's
 container setup and the training sandbox from step 5.
@@ -176,8 +178,9 @@ counts and truncation audit are in `<output>.stats.json` and at the end of the l
 **Settings that must match the run.** `MAX_NEW_TOKENS` defaults to `ROLLOUT_MAX_RESPONSE_LEN`
 (32768), and `HF_CKPT` to the same DPO checkpoint as `run_async.sh`. Change them together with
 the run: at a shorter budget, truncated rollouts score 0 and every pass rate is understated. The
-filter warns when more than 20% of rollouts truncate. `CODE_REQUIRE_THINK`, `CODE_MAX_TESTS` and
-`CODE_EXEC_TIMEOUT` take `run_code.sh`'s defaults. All of these are recorded in the cache's
+filter warns when more than 20% of rollouts truncate. `CODE_REQUIRE_THINK`, `CODE_MAX_TESTS`,
+`CODE_EXEC_TIMEOUT`, `CODE_REWARD_MODE`, `CODE_REWARD_PASS_THRESHOLD` and `CODE_STRICT_GRADING`
+take `run_code.sh`'s defaults; set them as the run will. All of these are recorded in the cache's
 first line, and a rerun under different settings refuses to reuse the cache (use a new
 `OUTPUT=` or `RESET_CACHE=1`).
 
