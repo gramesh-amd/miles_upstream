@@ -877,11 +877,14 @@ fi
 # that accumulates dW into weight.main_grad following Megatron's own contract; see the unit
 # test at study_tim/test_fp32_logits.py. It bypasses tensor-parallel plumbing and therefore
 # asserts tp=1 for the head, which holds here (--tensor-model-parallel-size 1).
-# FP32_LM_HEAD_IMPL picks how (fp32_lm_head.py): fp32 GEMMs, or bf16 GEMMs with fp32 accumulation
-# and output ("mixed"; "split" keeps the weight gradient fp32-accurate too), which give the same
-# logits ~7x faster on MI355X.
+# FP32_LM_HEAD_IMPL picks how (fp32_lm_head.py). Default "split": bf16 GEMMs with fp32 accumulation
+# and output, the logit gradient as two bf16 terms; numerically the fp32 path (replay of v6 steps:
+# grad_norm, pg_loss and train_rollout_logprob_abs_diff equal to 3-4 digits) at 3.4x the head's
+# speed, actor_train -7% and log_probs -12% on MI355X. "fp32": upcast fp32 GEMMs (the old path).
+# "mixed": bf16-rounded logit gradient, faster still. Plain bf16 logits (FP32_TRAINER_READOUT=0)
+# put 16% of sampled-token log-probs >0.05 nats off at Instella's logit scale.
 if [ "${FP32_TRAINER_READOUT:-1}" = "1" ]; then
-   GRPO_ARGS+=(--fp32-lm-head --fp32-lm-head-impl "${FP32_LM_HEAD_IMPL:-fp32}")
+   GRPO_ARGS+=(--fp32-lm-head --fp32-lm-head-impl "${FP32_LM_HEAD_IMPL:-split}")
 fi
 
 MISC_ARGS=(

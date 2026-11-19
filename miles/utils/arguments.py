@@ -1273,7 +1273,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--fp32-lm-head-impl",
                 choices=["fp32", "mixed", "split"],
-                default="fp32",
+                default="split",
                 help=(
                     "How --fp32-lm-head computes the head. fp32: fp32 GEMMs on upcast operands. "
                     "mixed: bf16 operands with fp32 accumulation and fp32 output (the operands are "
