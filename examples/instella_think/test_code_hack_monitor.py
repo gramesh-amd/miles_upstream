@@ -275,6 +275,112 @@ def test_checker_rows():
     return fails, total
 
 
+def test_train_all_pass():
+    """difficulty_filter.py's solve count (train_all_pass) grades like _score_one: same grader options,
+    and a solve is a full training reward in either mode."""
+    fails = total = 0
+
+    def expect(name, ok):
+        nonlocal fails, total
+        total += 1
+        fails += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {name}")
+
+    seen = []
+    saved = code_reward.REWARD_MODE, code_reward.PASS_THRESHOLD, code_reward.pass_rate
+    try:
+        for meta in ({"checker": PAIR_CHECKER}, {"float_tol": 1e-6}, {}):
+            code_reward.pass_rate = lambda code, tests, opts=None, flags=None: seen.append(opts) or 1.0
+            seen.clear()
+            code_reward._score_one(_S(ALT, PAIRS, dict(meta)))
+            code_reward.train_all_pass(_S(ALT, PAIRS).response, json.dumps(PAIRS), dict(meta))
+            expect(f"train_all_pass {sorted(meta)} sends _score_one's options", len(seen) == 2 and seen[0] == seen[1])
+        for mode, thr, rate, want in [("binary", 1.0, 1.0, True), ("binary", 1.0, 31 / 32, False),
+                                      ("binary", 0.5, 0.5, True), ("partial", 1.0, 0.75, False),
+                                      ("partial", 1.0, 1.0, True)]:
+            code_reward.REWARD_MODE, code_reward.PASS_THRESHOLD = mode, thr
+            code_reward.pass_rate = lambda code, tests, opts=None, flags=None, r=rate: r
+            got = code_reward.train_all_pass(_S(ALT, PAIRS).response, json.dumps(PAIRS))
+            reward = code_reward._score_one(_S(ALT, PAIRS))
+            expect(f"train_all_pass [{mode} thr={thr}] rate={rate:.3f} -> {want} (reward {reward})",
+                   got == (want, None) and (reward >= code_reward.REWARD_SCALE - 1e-9) == want)
+        code_reward.pass_rate = lambda code, tests, opts=None, flags=None: None
+        expect("train_all_pass api_error -> (None, api_error)",
+               code_reward.train_all_pass(_S(ALT, PAIRS).response, json.dumps(PAIRS)) == (None, "api_error"))
+        expect("train_all_pass unusable checker -> no_tests",
+               code_reward.train_all_pass(_S(ALT, PAIRS).response, json.dumps(PAIRS), {"checker": 5}) == (False, "no_tests"))
+        expect("train_all_pass no think -> think gate", code_reward.train_all_pass(ALT, json.dumps(PAIRS))
+               == ((False, "think_gate_fail") if code_reward._REQUIRE_THINK else (None, "api_error")))
+    finally:
+        code_reward.REWARD_MODE, code_reward.PASS_THRESHOLD, code_reward.pass_rate = saved
+        code_reward.WINDOW.drain()
+    return fails, total
+
+
+def test_thread_pool():
+    """batched_reward grades on its own pool (CODE_REWARD_CONCURRENCY threads): many concurrent
+    _score_one calls must leave STATS and WINDOW with exactly one entry per sample."""
+    import asyncio
+    import threading
+    import time
+
+    fails = total = 0
+
+    def expect(name, ok):
+        nonlocal fails, total
+        total += 1
+        fails += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {name}")
+
+    rates = [i % 5 / 4 for i in range(400)]
+    threads = set()
+    saved = code_reward.pass_rate
+
+    def slow(code, tests, opts=None, flags=None):
+        threads.add(threading.get_ident())
+        time.sleep(0.01)
+        if flags is not None:
+            flags["timeout"] = flags.get("timeout", 0) + 1
+        return rates[int(code.rsplit("#", 1)[1])]
+
+    code_reward.pass_rate = slow
+    code_reward.WINDOW.drain()
+    with code_reward.STATS.lock:
+        n0, sum0, all0 = code_reward.STATS.n, code_reward.STATS.pass_rate_sum, code_reward.STATS.all_pass
+    try:
+        samples = [_S(f"print(1)  #{i}", T) for i in range(len(rates))]
+        evals = [_S(f"print(1)  #{i}", T, {"split": "eval"}) for i in range(100)]
+
+        async def run():
+            batch = code_reward.batched_reward(None, samples)
+            singles = [code_reward.batched_reward(None, s) for s in evals]
+            return await asyncio.gather(batch, *singles)
+
+        t0 = time.time()
+        got = asyncio.run(run())
+        dt = time.time() - t0
+        window = code_reward.WINDOW.drain()
+        with code_reward.STATS.lock:
+            dn, dsum, dall = (code_reward.STATS.n - n0, code_reward.STATS.pass_rate_sum - sum0,
+                              code_reward.STATS.all_pass - all0)
+        want_sum = sum(rates) + sum(rates[:100])
+        want_all = sum(r == 1.0 for r in rates) + sum(r == 1.0 for r in rates[:100])
+        expect(f"thread pool: {len(rates)} batched + 100 single eval calls in {dt:.2f}s on {len(threads)} threads "
+               f"(pool {code_reward._CONCURRENCY})", 1 < len(threads) <= code_reward._CONCURRENCY)
+        expect(f"STATS counts every sample once: n {dn}, pass-rate sum {dsum:.2f} (want {want_sum:.2f}), "
+               f"all_pass {dall} (want {want_all})",
+               dn == len(rates) + 100 and abs(dsum - want_sum) < 1e-6 and dall == want_all)
+        expect(f"WINDOW holds exactly the {len(rates)} training samples, rates intact",
+               sorted(r for r, _ in window) == sorted(rates) and all(f["timeout"] for _, f in window))
+        expect("each sample's metadata has its own pass rate",
+               all(s.metadata["code_pass_rate"] == rates[i] for i, s in enumerate(samples)))
+        want = [code_reward.reward_from_pass_rate(r, False) * code_reward.REWARD_SCALE for r in rates]
+        expect("batched rewards in sample order", list(got[0]) == want)
+    finally:
+        code_reward.pass_rate = saved
+    return fails, total
+
+
 def test_mirror_parity():
     """code_reward's local stdio compare and checker timeout must match the server's."""
     import code_exec_server
@@ -314,6 +420,10 @@ def main():
     f, t = test_reward_modes()
     fails, total = fails + f, total + t
     f, t = test_checker_rows()
+    fails, total = fails + f, total + t
+    f, t = test_train_all_pass()
+    fails, total = fails + f, total + t
+    f, t = test_thread_pool()
     fails, total = fails + f, total + t
     f, t = test_mirror_parity()
     fails, total = fails + f, total + t
