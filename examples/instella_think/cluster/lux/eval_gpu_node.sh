@@ -21,9 +21,8 @@ mkdir -p "${NL}"/{overlay,tmp,triton,cache}
 NODE_IP="$(ip -o -4 route get 1 | grep -oP '(?<=src )\S+')"
 WANDB_MODE="$(source "${JOB_DIR}/spec.env"; echo "${WANDB_MODE:-online}")"
 WANDB_ENTITY="$(source "${JOB_DIR}/spec.env"; echo "${WANDB_ENTITY:-${LUX_WANDB_ENTITY}}")"
-# Requests ramp up (miles MILES_ROLLOUT_RAMP_S): thousands of requests at once onto idle engines
-# produced degenerate HumanEval+ generations.
-RAMP_S="$(source "${JOB_DIR}/spec.env"; echo "${EVAL_RAMP_S:-900}")"
+# Optional request ramp (miles MILES_ROLLOUT_RAMP_S, seconds; 0 = off); see run_gpu_node.sh.
+RAMP_S="$(source "${JOB_DIR}/spec.env"; echo "${EVAL_RAMP_S:-0}")"
 
 cat > "${NL}/container.env" <<EOF
 HOME=/root

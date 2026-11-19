@@ -239,7 +239,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="first N prompts only (pilot); 0 = all")
     ap.add_argument("--request-timeout", type=float, default=7200)
     ap.add_argument("--server-wait", type=int, default=1800, help="seconds to wait for the engine")
-    ap.add_argument("--ramp-s", type=float, default=600,
+    ap.add_argument("--ramp-s", type=float, default=0,
                     help="seconds over which prompts in flight rise from concurrency/16 to concurrency (0 = no ramp)")
     ap.add_argument("--max-consecutive-failures", type=int, default=32)
     ap.add_argument("--retry-backoff", type=float, default=20.0, help="seconds x attempt before a retry")

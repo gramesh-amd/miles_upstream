@@ -16,6 +16,10 @@
 # scripts in $LUX_ROOT/shared/diag/prefill_*). The triton extend kernel itself matches a torch
 # reference for Lq=544 (kernel_test.py), so the fault is in the fused aiter path.
 #
+# Root cause, fixed in the sglang515 overlay by Primus-Instella-Internal 001b7acd (mi355x_rl):
+# forward_mla took the fused kernel's 4th output (empty) as k, and the overlay's triton extend
+# guard zeroed attention when k was empty. With that overlay this workaround is not needed.
+#
 # Cause: sglang unpacks the fused kernel as `q, _, _, k = fused_qk_rope_cat_and_cache_mla(...)`,
 # but this container's aiter (7d604afe, June 2026) returns (q_out, decode_q_pe_out, k_pe_out,
 # q_nope_zeros_out), and the 4th is torch.empty((num_decode_toks_for_zeros=0, heads, 512)). The
