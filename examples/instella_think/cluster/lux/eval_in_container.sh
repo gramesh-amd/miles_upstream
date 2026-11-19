@@ -51,7 +51,13 @@ EOF
 
 # --- 1. per-container setup, as run_in_container.sh ----------------------------------------
 sleep $(( NODE_RANK * 20 ))
+# Jobs starting together race on the same build dir (2026-11-19: "could not delete
+# helpers_cpp...so" failed one of two v7 runs), so the install also takes a lock across jobs: an
+# atomic mkdir, which works on NFS and Lustre alike (after 10 minutes of waiting it installs anyway).
+_lock="${MEGATRON_PATH}/.miles-pip-install.lock"; _held=0
+for _ in $(seq 120); do mkdir "${_lock}" 2>/dev/null && { _held=1; break; }; sleep 5; done
 pip install -q -e "${MEGATRON_PATH}" --no-deps --no-build-isolation 2>&1 | grep -v "notice" || true
+if [ "${_held}" = 1 ]; then rmdir "${_lock}" 2>/dev/null || true; fi
 bash "${I}/cluster/env_setup.sh" || fail "env_setup.sh failed"
 touch "${JOB_DIR}/setup.${HOST}"
 
