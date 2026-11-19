@@ -13,10 +13,13 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `paths.sh` | Per-user locations (checkpoints, data, NFS logs, Primus checkout, sandbox token), all overridable; per-user overrides go in `~/.instella-env.sh`. Sourced by every script below. |
 | `cluster/` | Login-node tooling for Spur: `bringup.sh` (containers), `on_node.sh` (run a payload in a node's container), `env_setup.sh`, `ray_head.sh` / `ray_worker.sh`, `launch.sh`, `code_exec.sh` (sandbox). |
 | `run_code.sh` | **Code RL arm.** Dolci-Think-RL `code_rlvr`, unit-test reward, HumanEval+/MBPP+/LiveCodeBench v3 evals. Wrapper over `run_async.sh`. |
-| `code_reward.py` | The code reward (`--custom-rm-path code_reward.batched_reward`). Pass rate while training, all-or-nothing at eval. Self-tests with `python3 code_reward.py` (needs the sandbox). |
+| `code_reward.py` | The code reward (`--custom-rm-path code_reward.batched_reward`). All-or-nothing while training (`CODE_REWARD_MODE=binary`, default; `partial` restores the old pass-rate reward) and at eval; the pass rate is logged as `rollout/code/pass_rate_mean`. Self-tests with `python3 code_reward.py` (needs the sandbox). |
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
+| `test_grader.sh` | Runs every grader test (hardening, adversarial, hack monitor in both reward modes, reward self-test) against a private local server. |
+| `HANDOFF.md` | State of the v7 code-RL grader work: changes, env vars, verification, metrics, lux plan, open decisions. |
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
-| `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol. |
+| `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol, plus LCB v5/v6, HumanEval/MBPP Pro, CRUXEval and Codeforces. |
+| `validate_code_benchmarks.py` | Grades reference / always-wrong answers and old eval dumps against the bench sandbox. |
 | `difficulty_filter.py` | OLMo 3 offline difficulty filter: 8 rollouts per prompt from the starting checkpoint, graded by the run's own reward, drops prompts solved more than 62.5% of the time. `--task code` or `--task math`. Resumable. |
 | `prefilter.sh` | Runs the filter on a node: `serve` (sglang with the rollout engine's settings), `filter`, `status`, `stop`. See "Optional: difficulty-prefilter the training set". |
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`); `OVERLONG_FILTER_DROP_UNCLOSED=1` also drops samples that stopped without closing `</think>`. |
@@ -302,8 +305,9 @@ of the samples are fully solved by the *current* policy, so prompts graduate out
 masters them. The offline prefilter (5b) can't do this, because it only sees the starting
 checkpoint; on math, 22% of groups had drifted back above its threshold by step ~339.
 - *Solved* means the full reward (`SOLVED_REWARD`, which `run_code.sh` and `run_if.sh` set to
-  their reward scale), i.e. every test or constraint passes. Partial credit doesn't count, or
-  one passing test would make a group look mastered.
+  their reward scale): for code, pass rate >= `CODE_REWARD_PASS_THRESHOLD` under the default
+  binary reward (rewards are then 0 or the scale), every test under `partial`; for IF, every
+  constraint. Partial credit doesn't count, or one passing test would make a group look mastered.
 - The default threshold 0.75 drops 7/8 groups. 0.625 (the offline number) also drops 6/8, and
   on math that discarded 19-29% of groups every step, including the difficulty band AIME
   sits in. 0.875 drops nothing beyond the default filter at 8 samples.
@@ -355,25 +359,111 @@ saved checkpoints. `CODE_BENCH_SETS` picks a subset. Watch `cluster/code_exec.sh
 shares the CPU host with the training sandbox, and if `timeouts` climb, CPU contention is
 failing correct LiveCodeBench solutions (6 s per test).
 
+### More benchmarks (what recent reasoning-model reports use)
+
+`prepare_code_benchmarks.py` also builds these (`--sets ...`; Codeforces only with
+`--codeforces`). Pick them with `CODE_BENCH_SETS`, and per-set sample counts with
+`CODE_BENCH_N_SETS="lcb_v5=16 lcb_v6=16"`:
+
+| set | rows | source (pinned) | route / extract | notes |
+|---|---|---|---|---|
+| `lcb_v5` | 279 | LCB release_v5, 2024-08-01 <= date < 2025-02-01 | stdio, call / lcb | the "LCB v5 (2408-2502)" of DeepSeek-R1, AceReason, MiMo, DeepCoder |
+| `lcb_v6` | 175 | LCB test6.jsonl (2025-01-04 .. 04-06) | stdio, call / lcb | the "LCB v6 (2502-2505)" of AceReason, MiMo, Qwen3-2507 |
+| `lcb_v6_strict` | 131 | test6, date >= 2025-02-01 | stdio, call / lcb | shares `tests/lcb_v6` |
+| `humanevalpro` / `mbpppro` | 164 / 378 | CodeEval-Pro (self-invoking) | script / olmes | answer must define both functions |
+| `cruxeval_o` / `cruxeval_i` | 800 / 800 | cruxeval-org/cruxeval | script / crux | `[ANSWER]assert f(..) == ..[/ANSWER]`; O must be a literal |
+| `codeforces` | 422 | open-r1/codeforces `verifiable` test (2024-08 .. 2025-02) | checker / lcb | 45 with a checker; `metadata.rating` for buckets |
+
+LCB v5/v6 reuse lcb_v3's prompt, extraction, prefix and 6 s/test timeout; `lcb_v3` itself is
+byte-identical to before. Their tests add ~3.8 GB under `tests/` (v5 3.5 GB, v6 0.3 GB).
+CRUXEval is graded like cruxeval's `assert <gold> == <prediction>`, the prediction taken from
+the last `[ANSWER]` block (else the last `assert` line); output predictions with calls other than
+builtin constructors (`set()`, `tuple()`...) score 0.
+
+Codeforces is judged like open-r1 (piston): token diff with YES/NO case-insensitive, or the
+dataset's `generated_checker` run as `checker.py input correct output` (pass = exit 0 and prints
+1/100), on route `/test_program_checker`, so **restart the bench sandbox** after updating
+`code_exec_server.py`. Python gets `min(20, max(6, 3 x time limit))` seconds per test. Tests are
+the R1-generated hard tests then the official ones, at most 64, dropping tests over 8 MB and the
+largest ones beyond 64 MB per problem: 10,094 of 11,334 tests kept, 98 problems lose some
+(`metadata.tests_dropped`); ~8.3 GB. Dropping the largest inputs makes Codeforces somewhat
+lenient on Python time limits. Rows keep the LiveCodeBench system prompt and stdin instructions. Report pass@1 by rating
+bucket; it is not an Elo.
+
+Both LCB and Codeforces test files are parsed whole and cached by the sandbox
+(`CODE_EXEC_TESTS_CACHE` files, default 256). With LCB v3+v5+v6 (1,066 files) plus Codeforces
+(422) set `CODE_EXEC_TESTS_CACHE=2000` and give the host ~25 GB, or cache misses re-parse
+100 MB files with the GIL held and time out correct solutions.
+
+`validate_code_benchmarks.py` grades reference answers (Pro canonical solutions, CRUXEval gold,
+accepted Python Codeforces submissions), always-wrong answers, and an old eval dump against
+the sandbox.
+
+### Grader and reward
+
+**Reward.** Training is all-or-nothing by default; eval is always pass@1.
+
+| `CODE_REWARD_MODE` | training reward | note |
+|---|---|---|
+| `binary` (default) | 1 iff pass rate >= `CODE_REWARD_PASS_THRESHOLD` (default 1.0) | 0.99 differs from 1.0 only when `CODE_MAX_TESTS` >= 100 |
+| `partial` | the pass rate | the reward of the reference run below |
+
+The legacy `CODE_PARTIAL_CREDIT=1/0` still selects partial/binary when `CODE_REWARD_MODE` is unset, and a
+contradicting pair is fatal. Whatever the mode, the pass rate is logged as `rollout/code/pass_rate_mean`.
+
+**Strict grading** (`CODE_STRICT_GRADING=1`, default; training rows only). Every value an assert compares or
+truth-tests is reduced to builtin types before comparing, so objects with rigged `__eq__`, `__bool__`, `__lt__`,
+... fail. The program runs as module `tmp_sol`, so a `__main__` block neither runs nor exits early. Pure-Python
+`__eq__` (dataclasses, `Fraction`, a user class) is rejected by design. Evals keep the benchmarks' own rules.
+
+**Both train and eval:** on the assert and call routes, exiting before the tests finish fails the test (no
+`sys.exit(0)` pass), and the test code and expected output are deleted before the program runs. Responses
+carry `flags` (`early_exit`, `strict_reject`, `timeout`) for monitoring; they never change a verdict.
+
+**Checker rows** (several correct outputs): `metadata.checker` (Python source) or a label
+`{"tests": [...], "checker": "..."}` go to `/test_program_checker`. The checker runs as
+`checker.py input.txt correct_output.txt solution_output.txt`, and a test passes iff it exits 0 printing 1.
+
+**A local grader** (tests, debugging). Bind to 127.0.0.1, with its own token file and scratch dir, and an
+interpreter <= 3.12 (the server refuses 3.13+):
+
+```bash
+python3 $I/code_exec_server.py --host 127.0.0.1 --port 18977 --token-file /tmp/$USER-tok \
+  --scratch /tmp/$USER-scratch --python <venv>/bin/python &   # the token file is created mode 600
+bash $I/test_grader.sh     # or: every suite against its own private server (GRADER_PYTHON=<venv>/bin/python)
+```
+
 ### 7. Watch it
 
 ```bash
 L=$(ls -t $NFS_ROOT/rl-logs/launch-code*.out | head -1)
 grep "CODE_REWARD scored" $L | tail -1     # api_error must stay 0
 grep -o "'rollout/[a-z_]*': [0-9.e-]*" $L | tail -4
+grep -o "code_hack [0-9]*: .*" $L | tail -1  # rollout/code/* and rollout/code_hack/* of the last step
 grep -o "'eval/\(humanevalplus\|mbppplus\|lcb_v3\)': [0-9.]*" $L
-$I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench
+$I/cluster/code_exec.sh status; $I/cluster/code_exec.sh status bench   # early_exits= strict_rejects= errors=
 grep "domain metrics" $L | tail -1          # per-source solve rate, length, truncation
 ```
 
-In W&B, besides miles' own `rollout/*`, `eval/*` and `train/*`:
-- `domain/<dataset_source>/*`: one panel per training source. `solve_rate` counts full solves
-  and `nonzero_rate` any partial credit; `resp_len_solved` and `resp_len_unsolved` show
-  whether failures are long, and `truncation_rate` comes from the engine's finish status.
+In W&B (`rollout/step` axis for `rollout/*` and `domain/*`), besides miles' own `rollout/*`, `eval/*` and `train/*`:
+- `rollout/code/pass_rate_mean` and `rollout/code/all_pass_rate` over every graded training sample;
+  `rollout/code/trained/*` is the batch the trainer got (after the dynamic filter). Under `binary` the train
+  reward is `all_pass_rate`.
+- `rollout/code_hack/solved_any_rate`: the share of all-pass samples with any hack flag. Alarm if it trends up
+  over 20+ steps, or if `all_pass_rate` jumps with no eval gain. Then look at `solved_<k>_rate` for
+  `helper_tamper`, `touch_frames`, `touch_builtins`, `sys_modules` and `exit_call`, and read dumped samples
+  whose `metadata.code_hack.<k>` is set.
+- `rollout/code_hack/early_exit_rate` and `strict_reject_rate` are failed attempts; rising early in a run is
+  the policy probing the grader.
+- `domain/<dataset_source>/*`: one panel per training source. `solve_rate` counts full-reward samples
+  (`SOLVED_REWARD`); `nonzero_rate` equals it under the binary reward and counts any partial credit under
+  `partial`. `resp_len_solved` and `resp_len_unsolved` show whether failures are long, and
+  `truncation_rate` comes from the engine's finish status.
 - `rollout/dynamic_filter/frac_<reason>`: the share of groups dropped by the dynamic filter
   for each reason (`zero_std_0.0` all wrong, `zero_std_1.0` all solved, `mastered_7of8` with
   `ADAPTIVE_FILTER=1`), plus `frac_kept`. These are comparable across steps; the raw counts
-  in `rollout/async/*` are not.
+  in `rollout/async/*` are not. Under the binary reward every all-pass or all-fail group is
+  `zero_std`, so expect a larger dropped share than under `partial`.
 - `train/entropy_loss`: the policy entropy on training tokens. A steady fall is the
   sharpening that preceded collapse in the math runs.
 
@@ -386,7 +476,7 @@ Stop a run from inside the container: `RAY_ADDRESS=http://$HEAD_IP:8265 ray job 
 | | |
 |---|---|
 | step time | ~20 min (rollout-bound; the train step itself is ~2 min, weight sync ~3 s) |
-| train reward | 0.45 at step 1, 0.5-0.6 by step 30 |
+| pass rate (`rollout/code/pass_rate_mean`) | 0.45 at step 1, 0.5-0.6 by step 30. That run trained on the partial reward, i.e. this value. No all-pass baseline exists yet, so record `rollout/code/all_pass_rate` from the first binary run. |
 | eval cost | see "Evals" above; training waits while it runs |
 | checkpoint | ~207 GB, ~66 s to save |
 

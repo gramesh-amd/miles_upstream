@@ -4,7 +4,9 @@
 # Same recipe as run_if.sh (itself the rytwnj5z math recipe, see that file's header),
 # with the task swapped to unit-test-verified code generation:
 #   data   : Dolci-Think-RL code_rlvr (21k prompts, stdin/stdout + assert tests)
-#   reward : code_reward.batched_reward -- pass rate while training, all-or-nothing at eval
+#   reward : code_reward.batched_reward -- all-or-nothing (CODE_REWARD_MODE=binary) while
+#            training, CODE_REWARD_MODE=partial for the old pass-rate reward; always
+#            all-or-nothing at eval. The pass rate is logged as rollout/code/pass_rate_mean.
 #   eval   : HumanEval+, MBPP+ and LiveCodeBench v3 under OLMo 3's protocol (README)
 # Objective defaults (nostd + R3, per-sample loss, fp32 head) are run_if.sh's, for the
 # same reasons given there; this file only sets what differs.
@@ -63,8 +65,11 @@ export PROMPT_DATA="${PROMPT_DATA:-${CODE_TRAIN}}"
 # Eval: OLMo 3's code benchmarks (prepare_code_benchmarks.py builds them; `cluster/code_exec.sh
 # start bench` serves their tests). Sampling is OLMo 3 Think's (arXiv 2512.13961 Table 16):
 # 10 samples, temperature 0.6, top_p 0.95, 32768 tokens, so eval/<set> is their pass@1.
+# Other sets (README "More benchmarks"): lcb_v5 lcb_v6 lcb_v6_strict humanevalpro mbpppro
+# cruxeval_o cruxeval_i codeforces. CODE_BENCH_N_SETS="lcb_v5=16 lcb_v6=16" overrides n per set.
 CODE_BENCH_SETS="${CODE_BENCH_SETS:-humanevalplus mbppplus lcb_v3}"
 CODE_BENCH_N="${CODE_BENCH_N:-10}"
+CODE_BENCH_N_SETS="${CODE_BENCH_N_SETS:-}"
 CODE_BENCH_MAX_LEN="${CODE_BENCH_MAX_LEN:-32768}"
 for s in ${CODE_BENCH_SETS}; do
    [ -s "${CODE_BENCH_DIR}/${s}.jsonl" ] || {
@@ -84,7 +89,9 @@ if [ -z "${EVAL_CONFIG:-}" ]; then
       echo "eval:"
       echo "  datasets:"
       for s in ${CODE_BENCH_SETS}; do
-         echo "    - {name: ${s}, path: ${CODE_BENCH_DIR}/${s}.jsonl, n_samples_per_eval_prompt: ${CODE_BENCH_N},"
+         _n="${CODE_BENCH_N}"
+         for kv in ${CODE_BENCH_N_SETS}; do [ "${kv%%=*}" = "${s}" ] && _n="${kv#*=}"; done
+         echo "    - {name: ${s}, path: ${CODE_BENCH_DIR}/${s}.jsonl, n_samples_per_eval_prompt: ${_n},"
          echo "       temperature: 0.6, top_p: 0.95, top_k: -1, max_response_len: ${CODE_BENCH_MAX_LEN}}"
       done
    } > "${EVAL_CONFIG}"
@@ -92,6 +99,8 @@ fi
 
 # --- reward -----------------------------------------------------------------------
 export CUSTOM_RM_PATH="${CUSTOM_RM_PATH:-code_reward.batched_reward}"
+# rollout/code_hack/* reward-hack rates in W&B (set to "" to disable)
+export CUSTOM_ROLLOUT_LOG_PATH="${CUSTOM_ROLLOUT_LOG_PATH-code_reward.log_rollout_data}"
 if [ -z "${CODE_EXEC_API_URL:-}" ]; then
    _tok="$(tr -d '[:space:]' < "${CODE_EXEC_TOKEN_FILE}" 2>/dev/null)"
    [ -n "${_tok}" ] || { echo "FATAL: no CODE_EXEC_API_URL and no ${CODE_EXEC_TOKEN_FILE}; run cluster/code_exec.sh start" >&2; exit 1; }
@@ -100,11 +109,28 @@ if [ -z "${CODE_EXEC_API_URL:-}" ]; then
 fi
 export CODE_EXEC_TIMEOUT="${CODE_EXEC_TIMEOUT:-5}"
 export CODE_MAX_TESTS="${CODE_MAX_TESTS:-32}"
-export CODE_PARTIAL_CREDIT="${CODE_PARTIAL_CREDIT:-1}"
+# binary: 1 iff pass rate >= CODE_REWARD_PASS_THRESHOLD (1.0 = every test; 0.99 only differs
+# from it when CODE_MAX_TESTS >= 100). partial: the pass rate. Legacy CODE_PARTIAL_CREDIT=1/0
+# maps to partial/binary.
+case "${CODE_PARTIAL_CREDIT:-}" in ""|0|1) ;; *)
+   echo "FATAL: CODE_PARTIAL_CREDIT must be 0 or 1, got ${CODE_PARTIAL_CREDIT}" >&2; exit 1 ;; esac
+if [ -z "${CODE_REWARD_MODE:-}" ] && [ -n "${CODE_PARTIAL_CREDIT:-}" ]; then
+   [ "${CODE_PARTIAL_CREDIT}" = "1" ] && CODE_REWARD_MODE=partial || CODE_REWARD_MODE=binary
+fi
+export CODE_REWARD_MODE="${CODE_REWARD_MODE:-binary}"
+export CODE_REWARD_PASS_THRESHOLD="${CODE_REWARD_PASS_THRESHOLD:-1.0}"
+case "${CODE_REWARD_MODE}" in binary|partial) ;; *)
+   echo "FATAL: CODE_REWARD_MODE must be binary or partial, got ${CODE_REWARD_MODE}" >&2; exit 1 ;; esac
+if [ -n "${CODE_PARTIAL_CREDIT:-}" ] && [ "$([ "${CODE_PARTIAL_CREDIT}" = "1" ] && echo partial || echo binary)" != "${CODE_REWARD_MODE}" ]; then
+   echo "FATAL: CODE_REWARD_MODE=${CODE_REWARD_MODE} contradicts legacy CODE_PARTIAL_CREDIT=${CODE_PARTIAL_CREDIT}; unset one" >&2; exit 1
+fi
 export CODE_REQUIRE_THINK="${CODE_REQUIRE_THINK:-1}"
+# 1: training asserts graded strictly (README "Grader and reward"); evals never are.
+export CODE_STRICT_GRADING="${CODE_STRICT_GRADING:-1}"
 export CODE_REWARD_SCALE="${CODE_REWARD_SCALE:-1.0}"
-# Full reward = all tests pass; the adaptive filter and per-domain solve_rate count only
-# those, since with partial credit reward > 0 means one passing test.
+# Full reward: the adaptive filter and per-domain solve_rate count a sample solved iff its reward
+# reaches this. binary: rewards are 0 or CODE_REWARD_SCALE, so solved = pass rate >= threshold;
+# partial: solved = every test passes (reward > 0 would mean one passing test).
 export SOLVED_REWARD="${SOLVED_REWARD:-${CODE_REWARD_SCALE}}"
 
 # --- run identity -----------------------------------------------------------------
@@ -153,7 +179,9 @@ elif [ "${DRGRPO}" = "1" ]; then _n+=("drgrpo${DRGRPO_DIVISOR%%.*}")
 else _n+=("persample"); fi
 [ "${OVERLONG_FILTER}" = "1" ]      && _n+=("overlong")
 [ "${FP32_TRAINER_READOUT}" = "1" ] && _n+=("fp32head")
-[ "${CODE_PARTIAL_CREDIT}" = "1" ]  && _n+=("passrate")  || _n+=("allpass")
+if [ "${CODE_REWARD_MODE}" = "partial" ]; then _n+=("passrate")
+elif [ "${CODE_REWARD_PASS_THRESHOLD}" = "1.0" ] || [ "${CODE_REWARD_PASS_THRESHOLD}" = "1" ]; then _n+=("allpass")
+else _n+=("pass${CODE_REWARD_PASS_THRESHOLD}"); fi
 [ "${CODE_REQUIRE_THINK}" = "1" ]   || _n+=("nothink")
 [ "${EVAL_MAX_RESPONSE_LEN}" = "${ROLLOUT_MAX_RESPONSE_LEN}" ] || _n+=("evallen${EVAL_MAX_RESPONSE_LEN}")
 [ "${CONTEXT_LEN}" = "32768" ] || _n+=("ctx${CONTEXT_LEN}")
@@ -229,6 +257,7 @@ if [ "${CHECK_ONLY:-0}" = "1" ]; then
    echo "  project    : ${WANDB_PROJECT}"
    echo "  run name   : ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo "$(( ${ROLLOUT_NODES:-2} + 1 ))node")"
    echo "  train data : ${PROMPT_DATA} ($(wc -l < "${PROMPT_DATA}") prompts)"
+   echo "  reward     : CODE_REWARD_MODE=${CODE_REWARD_MODE} threshold=${CODE_REWARD_PASS_THRESHOLD} CODE_STRICT_GRADING=${CODE_STRICT_GRADING}"
    echo "  eval       : ${CODE_BENCH_SETS} (n=${CODE_BENCH_N}, ${CODE_BENCH_MAX_LEN} tokens) via ${EVAL_CONFIG}"
    echo "  save dir   : ${SAVE_DIR} (every ${SAVE_INTERVAL} steps)"
    exit 0
@@ -249,7 +278,8 @@ cp "${TARGET}" "${FROZEN}" || exit 1
 
 echo "=== code RL $(( ROLLOUT_MAX_RESPONSE_LEN / 1024 ))k arm ==="
 echo "  wandb: ${WANDB_PROJECT} / ${WANDB_GROUP}-$([ "${SINGLE_NODE:-0}" = "1" ] && echo 1node-smoke || echo "$(( ${ROLLOUT_NODES:-2} + 1 ))node")"
-for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_PARTIAL_CREDIT CODE_REQUIRE_THINK \
+for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_REWARD_MODE CODE_REWARD_PASS_THRESHOLD CODE_REQUIRE_THINK \
+         CODE_STRICT_GRADING CUSTOM_ROLLOUT_LOG_PATH \
          SAVE_INTERVAL EVAL_INTERVAL ROLLOUT_MAX_RESPONSE_LEN DISABLE_STD_NORM USE_ROUTING_REPLAY \
          CONTEXT_LEN PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER SOLVED_REWARD \
          ADAPTIVE_FILTER ADAPTIVE_FILTER_MAX_PASS ROLLOUT_TEMPERATURE EXTRA_ARGS; do

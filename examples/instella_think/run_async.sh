@@ -174,6 +174,11 @@ if [ -n "${CUSTOM_RM_PATH:-}" ]; then
 else
    RM_ARGS=(--rm-type "${RM_TYPE:-deepscaler}")
 fi
+# Optional extra rollout metrics (run_code.sh: rollout/code_hack/*). The hook returns False,
+# so miles' default rollout logging still runs.
+if [ -n "${CUSTOM_ROLLOUT_LOG_PATH:-}" ]; then
+   RM_ARGS+=(--custom-rollout-log-function-path "${CUSTOM_ROLLOUT_LOG_PATH}")
+fi
 
 # Online difficulty filter. The stock check_reward_nonzero_std drops only groups whose
 # rewards are all identical, so a 7/8 group trains at full generation cost for a nearly
@@ -980,7 +985,9 @@ echo "NCCL_SOCKET_IFNAME=${NET_IF}"
 # needed here). INSTELLA_DIR kept for convenience.
 #
 # The IF_* vars configure if_reward.py and are inert for math runs (nothing imports it);
-# the CODE_* vars do the same for code_reward.py (run_code.sh).
+# the CODE_* vars do the same for code_reward.py (run_code.sh). CODE_REWARD_MODE and the
+# legacy CODE_PARTIAL_CREDIT go through empty when unset, so code_reward.py resolves them
+# (default binary) and rejects a contradictory pair.
 # They have to be listed HERE rather than merely exported before launch: the reward runs
 # inside the Ray rollout workers, whose environment is exactly this runtime_env, so an
 # `export IF_REQUIRE_THINK=0` in the launching shell would otherwise be silently dropped
@@ -1039,11 +1046,16 @@ RUNTIME_ENV_JSON="{
     \"CODE_BENCH_API_URL\": \"${CODE_BENCH_API_URL:-}\",
     \"CODE_EXEC_TIMEOUT\": \"${CODE_EXEC_TIMEOUT:-5}\",
     \"CODE_MAX_TESTS\": \"${CODE_MAX_TESTS:-32}\",
-    \"CODE_PARTIAL_CREDIT\": \"${CODE_PARTIAL_CREDIT:-1}\",
+    \"CODE_REWARD_MODE\": \"${CODE_REWARD_MODE:-}\",
+    \"CODE_REWARD_PASS_THRESHOLD\": \"${CODE_REWARD_PASS_THRESHOLD:-1.0}\",
+    \"CODE_PARTIAL_CREDIT\": \"${CODE_PARTIAL_CREDIT:-}\",
     \"CODE_REQUIRE_THINK\": \"${CODE_REQUIRE_THINK:-1}\",
     \"CODE_REWARD_SCALE\": \"${CODE_REWARD_SCALE:-1.0}\",
     \"CODE_REWARD_CONCURRENCY\": \"${CODE_REWARD_CONCURRENCY:-64}\",
     \"CODE_LOG_EVERY\": \"${CODE_LOG_EVERY:-200}\",
+    \"CODE_STRICT_GRADING\": \"${CODE_STRICT_GRADING:-1}\",
+    \"CODE_EXEC_API_RETRIES\": \"${CODE_EXEC_API_RETRIES:-2}\",
+    \"CODE_HACK_WINDOW_MAX\": \"${CODE_HACK_WINDOW_MAX:-100000}\",
     \"DRGRPO_DIVISOR\": \"${DRGRPO_DIVISOR:-}\",
     \"OVERLONG_FILTER_DROP_UNCLOSED\": \"${OVERLONG_FILTER_DROP_UNCLOSED:-0}\",
     \"ROUTER_LOG_PATH\": \"${ROUTER_LOG_PATH:-${LOG_DIR}/router_log_${SAVE_TAG}.jsonl}\",
