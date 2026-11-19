@@ -174,11 +174,6 @@ if [ -n "${CUSTOM_RM_PATH:-}" ]; then
 else
    RM_ARGS=(--rm-type "${RM_TYPE:-deepscaler}")
 fi
-# Optional extra rollout metrics (run_code.sh: rollout/code_hack/*). The hook returns False,
-# so miles' default rollout logging still runs.
-if [ -n "${CUSTOM_ROLLOUT_LOG_PATH:-}" ]; then
-   RM_ARGS+=(--custom-rollout-log-function-path "${CUSTOM_ROLLOUT_LOG_PATH}")
-fi
 
 # Online difficulty filter. The stock check_reward_nonzero_std drops only groups whose
 # rewards are all identical, so a 7/8 group trains at full generation cost for a nearly
@@ -650,11 +645,23 @@ fi
 if [ "${OBSERVE_ENTROPY:-1}" = "1" ]; then
    GRPO_ARGS+=(--observe-training-entropy)
 fi
-# per_domain_logger.py adds domain/<dataset_source>/* (solve rate, reward spread, solved vs
-# unsolved length, truncation) on top of miles' own rollout metrics, which it leaves running.
-if [ "${PER_DOMAIN_METRICS:-1}" = "1" ]; then
-   GRPO_ARGS+=(--custom-rollout-log-function-path per_domain_logger.log_per_domain_metrics)
+# Rollout log hooks, all returning False so miles' own rollout metrics still run:
+#   per_domain_logger.py      domain/<dataset_source>/* (solve rate, reward spread, solved vs
+#                             unsolved length, truncation); PER_DOMAIN_METRICS=0 disables
+#   CUSTOM_ROLLOUT_LOG_PATH   e.g. run_code.sh's code_reward.log_rollout_data (rollout/code_hack/*,
+#                             rollout/code/*)
+# miles keeps only the last --custom-rollout-log-function-path, so two or more go through
+# rollout_log_chain.py, which reads the list from ROLLOUT_LOG_HOOKS (runtime env below).
+_hooks=()
+if [ "${PER_DOMAIN_METRICS:-1}" = "1" ]; then _hooks+=(per_domain_logger.log_per_domain_metrics); fi
+if [ -n "${CUSTOM_ROLLOUT_LOG_PATH:-}" ]; then _hooks+=("${CUSTOM_ROLLOUT_LOG_PATH}"); fi
+ROLLOUT_LOG_HOOKS="$(IFS=,; echo "${_hooks[*]}")"
+if [ "${#_hooks[@]}" -eq 1 ]; then
+   GRPO_ARGS+=(--custom-rollout-log-function-path "${_hooks[0]}")
+elif [ "${#_hooks[@]}" -gt 1 ]; then
+   GRPO_ARGS+=(--custom-rollout-log-function-path rollout_log_chain.log_rollout_chain)
 fi
+echo "rollout log hooks: ${ROLLOUT_LOG_HOOKS:-none}"
 
 OPTIMIZER_ARGS=(
    --optimizer adam
@@ -1056,6 +1063,7 @@ RUNTIME_ENV_JSON="{
     \"CODE_STRICT_GRADING\": \"${CODE_STRICT_GRADING:-1}\",
     \"CODE_EXEC_API_RETRIES\": \"${CODE_EXEC_API_RETRIES:-2}\",
     \"CODE_HACK_WINDOW_MAX\": \"${CODE_HACK_WINDOW_MAX:-100000}\",
+    \"ROLLOUT_LOG_HOOKS\": \"${ROLLOUT_LOG_HOOKS}\",
     \"DRGRPO_DIVISOR\": \"${DRGRPO_DIVISOR:-}\",
     \"OVERLONG_FILTER_DROP_UNCLOSED\": \"${OVERLONG_FILTER_DROP_UNCLOSED:-0}\",
     \"ROUTER_LOG_PATH\": \"${ROUTER_LOG_PATH:-${LOG_DIR}/router_log_${SAVE_TAG}.jsonl}\",
