@@ -9,7 +9,7 @@ Implements the API the Instella reward client already speaks:
     POST <prefix>/test_program_checker {"program", "tests": [{"input","output"}], "checker"?, ...}
         -> {"results": [0|1, ...]}   one entry per test, in order
            plus "flags": {"early_exit", "strict_reject", "timeout"}, tests per outcome (monitoring)
-    GET  <prefix>/health              -> {"ok": true, ...}
+    GET  <prefix>/health              -> {"ok": true, ...}   counters summed over all --processes
 
 "flags" never changes a verdict. A request that cannot be parsed gets HTTP 400, a grader error 500,
 both with {"error": ...}.
@@ -61,6 +61,7 @@ import functools
 import hashlib
 import json
 import math
+import mmap
 import os
 import re
 import resource
@@ -250,14 +251,47 @@ _main()
 
 _TLS = threading.local()
 STATS_LOCK = threading.Lock()
-STATS = {"requests": 0, "tests": 0, "passed": 0, "timeouts": 0, "errors": 0, "early_exits": 0, "strict_rejects": 0,
-         "busy_s": 0.0}
+STATS_KEYS = ("requests", "tests", "passed", "timeouts", "errors", "early_exits", "strict_rejects", "busy_s")
+STATS = {k: 0.0 if k == "busy_s" else 0 for k in STATS_KEYS}
+
+
+class _SharedStats:
+    """Every server process's STATS (--processes N): one row of doubles per process in an anonymous
+    shared mapping made before the fork. A process writes only its own row, under STATS_LOCK."""
+
+    def __init__(self, nproc: int):
+        self.nproc, self.row = nproc, 0
+        self.cells = memoryview(mmap.mmap(-1, 8 * len(STATS_KEYS) * nproc)).cast("d")
+
+    def publish(self):
+        base = self.row * len(STATS_KEYS)
+        for i, k in enumerate(STATS_KEYS):
+            self.cells[base + i] = STATS[k]
+
+    def rows(self) -> list:
+        n = len(STATS_KEYS)
+        return [{k: v if k == "busy_s" else int(v) for k, v in zip(STATS_KEYS, self.cells[r * n:(r + 1) * n].tolist())}
+                for r in range(self.nproc)]
+
+
+SHARED = None  # _SharedStats when --processes > 1
+
+
+def stats_snapshot() -> tuple:
+    """(totals over all server processes, per-process rows or None with one process)."""
+    if SHARED is None:
+        with STATS_LOCK:
+            return dict(STATS), None
+    rows = SHARED.rows()
+    return {k: sum(r[k] for r in rows) for k in STATS_KEYS}, rows
 
 
 def _bump(**kw):
     with STATS_LOCK:
         for k, v in kw.items():
             STATS[k] += v
+        if SHARED is not None:
+            SHARED.publish()
 
 
 # Guard exit statuses on the must_finish routes (see the end of _main in GUARD_SOURCE).
@@ -766,10 +800,15 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
         def do_GET(self):
             if self._route() != "/health":
                 return self._send(404, {"error": "not found"})
-            with STATS_LOCK:
-                stats = dict(STATS)
-            self._send(200, {"ok": True, "uptime_s": round(time.time() - started),
-                             "workers": runner.sem._initial_value, **stats})
+            # Totals cover every --processes process; "process" is the one that answered.
+            stats, rows = stats_snapshot()
+            nproc = 1 if rows is None else len(rows)
+            body = {"ok": True, "uptime_s": round(time.time() - started),
+                    "workers": runner.sem._initial_value * nproc, "processes": nproc,
+                    "process": f"{(SHARED.row if SHARED else 0) + 1}/{nproc}", **stats}
+            if rows is not None:
+                body["per_process_requests"] = [r["requests"] for r in rows]
+            self._send(200, body)
 
         def do_POST(self):
             route = self._route()
@@ -838,14 +877,42 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
 
 class Server(ThreadingHTTPServer):
     # Training opens 64+ connections per rollout worker at once; socketserver's backlog of 5 resets
-    # them. The kernel caps this at net.core.somaxconn.
+    # them. The kernel caps this at net.core.somaxconn. Each --processes process has its own
+    # listening socket, so each gets this backlog.
     request_queue_size = 1024
     daemon_threads = True
+    reuse_port = False
 
     def server_bind(self):
-        # --processes: several processes listen on one port; the kernel spreads connections across them
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        # --processes N: N sockets on one port, the kernel spreads connections across them
+        if self.reuse_port:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         super().server_bind()
+
+
+def _port_free(host: str, port: int) -> bool:
+    """A plain bind fails while any server (SO_REUSEPORT or not) listens there. Without this check
+    a --processes server started next to a stale one would silently share its traffic."""
+    s = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _die_with_parent(parent: int):
+    """Forked server processes exit when the first one does (Linux PR_SET_PDEATHSIG)."""
+    try:
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+    if os.getppid() != parent:
+        os._exit(0)
 
 
 def main():
@@ -877,36 +944,62 @@ def main():
     token = open(args.token_file).read().strip()
     prefix = "/" + token
 
-    # The first process serves too; the others are forked before anything is shared, and each
-    # keeps its own workers, scratch dir, tests cache and STATS (so /health reports one process).
+    # The first process serves too; the others are forked before anything else is set up. Each
+    # keeps its own workers, scratch subdir (its own content-named guard file), tests cache and
+    # strict_assert cache; STATS rows are shared, so /health and the log report all processes.
+    global SHARED
     nproc = max(1, args.processes)
+    if nproc > 1:
+        if args.port == 0:
+            raise SystemExit("code_exec_server: --processes > 1 needs a fixed --port")
+        if not _port_free(args.host, args.port):
+            raise SystemExit(f"code_exec_server: {args.host}:{args.port} is already in use")
+        SHARED = _SharedStats(nproc)
     workers = max(1, -(-args.workers // nproc))
-    index = 0
+    index, parent, children = 0, os.getpid(), []
     for i in range(1, nproc):
-        if os.fork() == 0:
-            index = i
+        pid = os.fork()
+        if pid == 0:
+            index, children = i, []
+            _die_with_parent(parent)
             break
+        children.append(pid)
+    if SHARED is not None:
+        SHARED.row = index
+    if children:
+        def stop(signum, frame):
+            for pid in children:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            os._exit(128 + signum)
+
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
     scratch = args.scratch if nproc == 1 else os.path.join(args.scratch, f"p{index}")
-    STATS["process"] = f"{index + 1}/{nproc}"
 
     runner = Runner(workers, args.mem_mb, args.python, scratch)
     started = time.time()
+    Server.reuse_port = nproc > 1
     srv = Server((args.host, args.port), make_handler(runner, prefix, args.max_tests, args.max_timeout, started,
                                                       make_tests_loader(args.tests_dir)))
 
     def report():
         while True:
             time.sleep(args.stats_every)
-            with STATS_LOCK:
-                s = dict(STATS)
+            s, rows = stats_snapshot()
             print(f"[{time.strftime('%F %T')}] requests={s['requests']} tests={s['tests']} "
                   f"passed={s['passed']} timeouts={s['timeouts']} errors={s['errors']} "
                   f"early_exits={s['early_exits']} strict_rejects={s['strict_rejects']} "
-                  f"busy={s['busy_s']:.0f}s", flush=True)
+                  f"busy={s['busy_s']:.0f}s"
+                  + ("" if rows is None else f" (all {nproc} processes; requests per process "
+                                             f"{[r['requests'] for r in rows]})"), flush=True)
 
-    threading.Thread(target=report, daemon=True).start()
-    print(f"[{time.strftime('%F %T')}] code-exec on {args.host}:{args.port} process {index + 1}/{nproc} workers={workers} "
-          f"mem={args.mem_mb}MB max_tests={args.max_tests} python={args.python}", flush=True)
+    if index == 0:
+        threading.Thread(target=report, daemon=True).start()
+    print(f"[{time.strftime('%F %T')}] code-exec on {args.host}:{args.port} process {index + 1}/{nproc} "
+          f"workers={workers} mem={args.mem_mb}MB max_tests={args.max_tests} python={args.python}", flush=True)
     srv.serve_forever()
 
 

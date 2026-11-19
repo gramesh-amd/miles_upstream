@@ -424,6 +424,12 @@ carry `flags` (`early_exit`, `strict_reject`, `timeout`) for monitoring; they ne
 `{"tests": [...], "checker": "..."}` go to `/test_program_checker`. The checker runs as
 `checker.py input.txt correct_output.txt solution_output.txt`, and a test passes iff it exits 0 printing 1.
 
+**Server processes** (`--processes N`, Lux sandboxes run 4 for rewards and 16 for benchmarks): N processes
+share the port through SO_REUSEPORT, each with `--workers / N` workers, its own listen backlog (1024), its own
+scratch subdir `p<i>` (with its own content-named guard file) and caches. `/health` and the periodic log line
+sum the counters over all N (`per_process_requests` shows the split; `process` is the one that answered).
+The server refuses to start N > 1 on a port that is already in use, and the extra processes exit with the first.
+
 **A local grader** (tests, debugging). Bind to 127.0.0.1, with its own token file and scratch dir, and an
 interpreter <= 3.12 (the server refuses 3.13+):
 

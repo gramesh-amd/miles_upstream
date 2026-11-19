@@ -28,7 +28,7 @@ for kv in "$@"; do
       # Eval-only jobs have no trainer: every GPU node serves inference (eval_gpu_node.sh).
       EVAL_ONLY=1) GPU_NODE_SCRIPT=eval_gpu_node.sh ;;
       # Sandbox sizing reaches the sandbox node(s) through this script's environment.
-      CODE_EXEC_WORKERS=*|CODE_BENCH_WORKERS=*) export "${kv?}" ;;
+      CODE_EXEC_WORKERS=*|CODE_BENCH_WORKERS=*|CODE_EXEC_PROCESSES=*|CODE_BENCH_PROCESSES=*) export "${kv?}" ;;
    esac
 done
 [ "${SANDBOX_NODES}" = 1 ] || [ "${SANDBOX_NODES}" = 2 ] || { echo "FATAL: SANDBOX_NODES must be 1 or 2"; exit 1; }
