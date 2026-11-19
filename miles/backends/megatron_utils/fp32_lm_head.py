@@ -103,9 +103,10 @@ class _Fp32Logits(torch.autograd.Function):
     operands and ask for fp32 accumulation and output: x and W hold bf16 values either way, so
     the logits agree with the fp32 path to accumulation order (measured on MI355X: sampled-token
     log-prob error vs fp64 2.8e-6 against 4.6e-6 for fp32), at ~7x the speed. In the backward
-    pass they round the fp32 logit gradient to bf16 for the GEMMs (dgrad is rounded to bf16 on
-    return anyway). "split" writes it as hi + lo, two bf16 terms, for the weight gradient, which
-    makes that fp32-accurate for one extra GEMM.
+    pass "mixed" rounds the fp32 logit gradient to bf16 for the GEMMs (weight-gradient error
+    ~1.7e-3 relative). "split" writes it as hi + lo, two bf16 terms, so both gradients match the
+    fp32 path (dW 2.6e-6 vs 2.3e-6 relative to fp64) for two extra GEMMs. Measured fwd+bwd per
+    16k-token micro-batch: fp32 174 ms, split 45 ms, mixed 28 ms.
     """
 
     @staticmethod
@@ -140,6 +141,7 @@ class _Fp32Logits(torch.autograd.Function):
             grad_weight_fp32 = _mm_fp32_out(hi.t(), i2)
             if ctx.impl == "split":
                 lo = (g2 - hi.float()).to(torch.bfloat16)
+                grad_input += _mm_fp32_out(lo, w16)
                 grad_weight_fp32 += _mm_fp32_out(lo.t(), i2)
         grad_input = grad_input.view(*grad_output.shape[:-1], weight.shape[-1]).to(inp.dtype)
 

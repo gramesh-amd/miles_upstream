@@ -1279,8 +1279,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "mixed: bf16 operands with fp32 accumulation and fp32 output (the operands are "
                     "bf16 values already, so the logits match fp32 to accumulation order) and the "
                     "logit gradient rounded to bf16 for the backward GEMMs; ~7x faster. split: as "
-                    "mixed, but the weight gradient uses the logit gradient as a sum of two bf16 "
-                    "terms, which keeps it fp32-accurate for one extra GEMM."
+                    "mixed, but the backward GEMMs take the logit gradient as a sum of two bf16 "
+                    "terms, so the gradients match the fp32 path too (two extra GEMMs)."
                 ),
             )
             # Off-Policy Correction using Importance Sampling: https://fengyao.notion.site/off-policy-rl
