@@ -948,8 +948,8 @@ SGLANG_USE_AITER="${SGLANG_USE_AITER:-1}"
 # MLA_UNFUSED_ROPE=1 works around a corruption with aiter=1 on gfx950: any prefill batch that runs
 # absorbed MLA (one holding a chunked-prefill continuation, i.e. several requests arriving
 # together or a prompt split across 2048-token chunks) comes out as gibberish or BOS spam -- very
-# likely the BOS-spam caveat above. See patch_sglang_mla_rope.sh. Default 0 so a run in progress
-# keeps its engine path; new runs should set it.
+# likely the BOS-spam caveat above. See patch_sglang_mla_rope.sh. Fixed properly in the sglang515
+# overlay (Primus-Instella-Internal 001b7acd, mi355x_rl), so default 0; kept as an opt-in fallback.
 if [ "${MLA_UNFUSED_ROPE:-0}" = "1" ] && ! python3 -c "import sys, sglang.srt.models.deepseek_common.attention_forward_methods.forward_mla as m; sys.exit('MLA_UNFUSED_ROPE' not in open(m.__file__).read())" 2>/dev/null; then
    echo "FATAL: MLA_UNFUSED_ROPE=1 but sglang's forward_mla.py is not patched (run patch_sglang_mla_rope.sh)" >&2
    exit 1
