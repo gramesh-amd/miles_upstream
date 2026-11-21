@@ -186,7 +186,7 @@ STATS = _Stats()
 def _clean_answer(response: str) -> str:
     """Return only the post-</think> answer, stripped of tags and special tokens."""
     if "</think>" in response:
-        response = response.split("</think>", 1)[-1]
+        response = response.rsplit("</think>", 1)[-1]
     elif _THINK_PREFILL or response.lstrip().startswith("<think>"):
         # An unclosed reasoning block means there is no answer to grade.
         return ""

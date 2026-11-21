@@ -164,7 +164,7 @@ def _has_clean_think(response: str) -> bool:
 
 def _answer_of(response: str) -> str:
     if "</think>" in response:
-        response = response.split("</think>", 1)[-1]
+        response = response.rsplit("</think>", 1)[-1]
     return _SPECIAL_TOKEN_RE.sub("", response).strip()
 
 
