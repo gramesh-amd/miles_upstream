@@ -5,6 +5,7 @@ from copy import deepcopy
 import wandb
 
 from miles.utils.env_report import decode_env_report
+from miles.utils.tracking_utils.env_vars import logged_env_vars
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +94,7 @@ def init_wandb_primary(args):
 def _compute_config_for_logging(args):
     output = deepcopy(args.__dict__)
 
-    whitelist_env_vars = [
-        "SLURM_JOB_ID",
-        # We may insert more default values here, and may also allow users to configure a whitelist
-    ]
-    output["env_vars"] = {k: v for k, v in os.environ.items() if k in whitelist_env_vars}
+    output["env_vars"] = logged_env_vars()
 
     if env_report_raw := args.env_report:
         if launcher_report := decode_env_report(env_report_raw):

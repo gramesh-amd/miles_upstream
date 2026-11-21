@@ -15,6 +15,8 @@ import re
 from copy import deepcopy
 from typing import Any
 
+from miles.utils.tracking_utils.env_vars import logged_env_vars
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,8 +29,7 @@ def _compute_config_for_logging(args) -> dict[str, str]:
     # Build a flat param dict from *args*, mirroring ``wandb_utils._compute_config_for_logging``.
     raw = deepcopy(args.__dict__)
 
-    whitelist_env_vars = ["SLURM_JOB_ID"]
-    raw["env_vars"] = {k: v for k, v in os.environ.items() if k in whitelist_env_vars}
+    raw["env_vars"] = logged_env_vars()
 
     return _flatten_dict(raw)
 
