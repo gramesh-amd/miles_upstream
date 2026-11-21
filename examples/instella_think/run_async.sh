@@ -540,6 +540,16 @@ fi
 if [ "${OVERLONG_FILTER:-0}" = "1" ]; then
    GRPO_ARGS+=(--custom-reward-post-process-path overlong_filter.overlong_filter_post_process)
 fi
+# The dynamic filter must judge a group on the samples the drop keeps, or {correct, truncated}
+# groups pass it and then train with zero advantage (20-35% of trained groups in math R1/R2,
+# code v6 and IF3). overlong_dynamic_filter applies DYNAMIC_FILTER_PATH to the survivors.
+OVERLONG_INNER_DYNAMIC_FILTER=""
+if [ "${OVERLONG_FILTER:-0}" = "1" ]; then
+   OVERLONG_INNER_DYNAMIC_FILTER="${DYNAMIC_FILTER_PATH}"
+   for i in "${!ROLLOUT_ARGS[@]}"; do
+      [ "${ROLLOUT_ARGS[$i]}" = "${DYNAMIC_FILTER_PATH}" ] && ROLLOUT_ARGS[$i]=overlong_filter.overlong_dynamic_filter
+   done
+fi
 # OVERLONG_FILTER_DROP_UNCLOSED=1 (needs OVERLONG_FILTER=1) also drops samples that finished
 # under the cap without closing </think>: a stray low-probability EOS, not an answer. See
 # overlong_filter._is_unclosed. Read in the rollout actor, so it travels in the runtime env.
@@ -1073,6 +1083,9 @@ RUNTIME_ENV_JSON="{
     \"ROLLOUT_LOG_HOOKS\": \"${ROLLOUT_LOG_HOOKS}\",
     \"DRGRPO_DIVISOR\": \"${DRGRPO_DIVISOR:-}\",
     \"OVERLONG_FILTER_DROP_UNCLOSED\": \"${OVERLONG_FILTER_DROP_UNCLOSED:-0}\",
+    \"OVERLONG_INNER_DYNAMIC_FILTER\": \"${OVERLONG_INNER_DYNAMIC_FILTER}\",
+    \"OVERLONG_FILTER\": \"${OVERLONG_FILTER:-0}\",
+    \"DRGRPO\": \"${DRGRPO:-0}\",
     \"ROUTER_LOG_PATH\": \"${ROUTER_LOG_PATH:-${LOG_DIR}/router_log_${SAVE_TAG}.jsonl}\",
     \"ROUTER_LOG_EVERY\": \"${ROUTER_LOG_EVERY:-5}\",
 ${WANDB_BASE_URL_ENV}    \"ADAPTIVE_FILTER_MAX_PASS\": \"${ADAPTIVE_FILTER_MAX_PASS:-0.75}\",

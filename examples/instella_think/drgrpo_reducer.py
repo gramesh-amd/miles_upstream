@@ -12,9 +12,10 @@ samples) 28% truncate at the cap, average 1.5x the mean length and score 0.03, s
 weighting under-pushes the largest pool of negatives per token. Dividing by a constant gives
 every token the same weight regardless of which sample it sits in.
 
-The flip side, measured on the same dumps: truncated samples' share of gradient mass rises from
-29% to 41% under this reducer, so pair it with OVERLONG_FILTER=1 (drops them from the loss and
-recentres the survivors; 71% of groups keep a reward spread).
+Truncated samples' share of gradient mass rises from 29% to 41% under this reducer (same dumps).
+That is intended: dropping them instead (OVERLONG_FILTER=1) makes truncation free, and code v5-v7,
+math R1/R2 and IF3 all drifted toward the cap that way. With truncated samples kept, set DIVISOR so
+the step-0 update matches the previous recipe (about 1.9x the drop-recipe divisor on code at 32K).
 
 WHY --calculate-per-token-loss MUST STAY OFF. With it on, loss.py returns num_tokens as
 Megatron's normalizer, i.e. it divides by the REALISED batch token count, which reintroduces

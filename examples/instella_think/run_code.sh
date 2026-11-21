@@ -158,8 +158,9 @@ export USE_ROUTING_REPLAY="${USE_ROUTING_REPLAY:-1}"
 export PER_TOKEN_LOSS="${PER_TOKEN_LOSS:-0}"
 export OVERLONG_FILTER="${OVERLONG_FILTER:-0}"
 # DRGRPO=1: constant loss denominator (drgrpo_reducer.py). Needs DRGRPO_DIVISOR = the step-0 mean
-# response length for this cap and checkpoint (10686 at a 16384 cap from the DPO base); use it
-# with OVERLONG_FILTER=1, or truncated samples carry ~41% of the gradient.
+# response length for this cap and checkpoint (10686 at a 16384 cap from the DPO base). With
+# OVERLONG_FILTER=0 truncated samples carry ~41% of the gradient, which is the length pressure we
+# want; scale the divisor so train/grad_norm at step 0 matches the previous recipe.
 export DRGRPO="${DRGRPO:-0}"
 export DRGRPO_DIVISOR="${DRGRPO_DIVISOR:-}"
 export ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-32768}"
@@ -198,7 +199,6 @@ if [ "${DRGRPO}" = "1" ]; then
    [ "${PER_TOKEN_LOSS}" = "0" ] || { echo "FATAL: DRGRPO=1 requires PER_TOKEN_LOSS=0" >&2; exit 1; }
    [[ "${DRGRPO_DIVISOR}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
       echo "FATAL: DRGRPO=1 needs DRGRPO_DIVISOR (step-0 mean response length, e.g. 10686 at a 16k cap)" >&2; exit 1; }
-   [ "${OVERLONG_FILTER}" = "1" ] || echo "WARNING: DRGRPO=1 without OVERLONG_FILTER=1: truncated samples get ~41% of the gradient" >&2
 fi
 
 # --- preflight: disk ----------------------------------------------------------------

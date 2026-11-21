@@ -173,3 +173,39 @@ def overlong_filter_post_process(args, samples):
         n_unclosed,
     )
     return raw_rewards, advantages
+
+
+def _inner_filter():
+    import importlib
+
+    path = (
+        os.environ.get("OVERLONG_INNER_DYNAMIC_FILTER")
+        or "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
+    )
+    module, _, name = path.rpartition(".")
+    return getattr(importlib.import_module(module), name)
+
+
+def overlong_dynamic_filter(args, samples, **kwargs):
+    """--dynamic-sampling-filter-path to use whenever OVERLONG_FILTER=1 (run_async.sh wires it).
+
+    The dynamic filter runs at rollout time, the drop above only later in the reward
+    post-process. On raw rewards a group like {4 correct, 4 truncated} has nonzero std and is
+    kept, then loses its truncated half here and trains with zero advantage while still taking a
+    batch slot. Measured share of such dead groups among trained groups: code v6 7.7% -> 18.5%
+    (stdio 35%), math R1/R2 20-33%, IF3 0.4% -> 34% as truncation rose. Judging the group on the
+    samples this hook will keep lets the async rollout refill with groups that carry gradient.
+
+    The survivors go through OVERLONG_INNER_DYNAMIC_FILTER (default: the stock nonzero-std check;
+    run_async.sh sets the adaptive filter there under ADAPTIVE_FILTER=1).
+    """
+    from miles.rollout.filter_hub.base_types import DynamicFilterOutput, call_dynamic_filter
+
+    flat = [x for s in samples for x in (s if isinstance(s, list) else [s])]
+    survivors = [s for s in flat if not (_is_truncated(s) or _is_unclosed(s))]
+    if len(survivors) < 2:
+        return DynamicFilterOutput(keep=False, reason="overlong_lt2_survivors")
+    out = call_dynamic_filter(_inner_filter(), args, survivors, **kwargs)
+    if not out.keep and out.reason:
+        out.reason = f"overlong_{out.reason}"
+    return out
