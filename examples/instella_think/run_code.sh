@@ -109,6 +109,14 @@ if [ -z "${CODE_EXEC_API_URL:-}" ]; then
 fi
 export CODE_EXEC_TIMEOUT="${CODE_EXEC_TIMEOUT:-5}"
 export CODE_MAX_TESTS="${CODE_MAX_TESTS:-32}"
+# The server pads tests past its --max-tests with failures, so a cap below CODE_MAX_TESTS makes
+# rows with more tests unsolvable without any error (v7 trained at 64 while asking for 128).
+# SKIP_SANDBOX_CHECK=1 for dry runs without a live sandbox.
+for _url in "${CODE_EXEC_API_URL}" "${CODE_BENCH_API_URL}"; do
+   _cap="$(curl -s -m 10 "${_url}/health" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("max_tests", 0))' 2>/dev/null)"
+   [ "${SKIP_SANDBOX_CHECK:-0}" = "1" ] || [ "${_cap:-0}" -ge "${CODE_MAX_TESTS}" ] || {
+      echo "FATAL: sandbox ${_url%/*}/... max_tests=${_cap:-unreachable} < CODE_MAX_TESTS=${CODE_MAX_TESTS}" >&2; exit 1; }
+done
 # binary: 1 iff pass rate >= CODE_REWARD_PASS_THRESHOLD (1.0 = every test; 0.99 only differs
 # from it when CODE_MAX_TESTS >= 100). partial: the pass rate. Legacy CODE_PARTIAL_CREDIT=1/0
 # maps to partial/binary.

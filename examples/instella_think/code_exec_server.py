@@ -805,7 +805,7 @@ def make_handler(runner: Runner, prefix: str, max_tests: int, max_timeout: float
             nproc = 1 if rows is None else len(rows)
             body = {"ok": True, "uptime_s": round(time.time() - started),
                     "workers": runner.sem._initial_value * nproc, "processes": nproc,
-                    "process": f"{(SHARED.row if SHARED else 0) + 1}/{nproc}", **stats}
+                    "process": f"{(SHARED.row if SHARED else 0) + 1}/{nproc}", "max_tests": max_tests, **stats}
             if rows is not None:
                 body["per_process_requests"] = [r["requests"] for r in rows]
             self._send(200, body)
@@ -923,7 +923,7 @@ def main():
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 4),
                     help="concurrent test processes (default: cpus - 4, leaving room for other users)")
     ap.add_argument("--mem-mb", type=int, default=2048, help="address-space limit per test")
-    ap.add_argument("--max-tests", type=int, default=64, help="tests run per request; the rest count as failed")
+    ap.add_argument("--max-tests", type=int, default=128, help="tests run per request; the rest count as failed")
     ap.add_argument("--max-timeout", type=float, default=10.0, help="cap on per-test seconds")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--tests-dir", default="",

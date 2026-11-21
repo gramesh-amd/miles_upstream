@@ -118,7 +118,7 @@ _ASSERT_FUNC_RE = re.compile(r"assert\s+(\w+)\s*\(")
 
 
 class _Stats:
-    KEYS = ("api_error", "no_tests", "think_gate_fail", "no_code")
+    KEYS = ("api_error", "no_tests", "think_gate_fail", "no_code", "multi_think_close")
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -699,9 +699,10 @@ WINDOW = _Window(_WINDOW_MAX)
 
 
 def pass_rate_metrics(rates: list) -> dict:
-    """Over graded samples (think-gate, no-code and api_error samples never reach the grader):
-    pass_rate_mean is the mean raw pass rate, the partial-credit reward; all_pass_rate is the
-    fraction passing every test, the binary reward at threshold 1.0."""
+    """Over graded samples only (think-gate, no-code and api_error samples never reach the grader),
+    so these rise when truncation rises; solve_rate_all / pass_rate_all in log_rollout_data count
+    every scored training sample. pass_rate_mean is the mean raw pass rate, the partial-credit
+    reward; all_pass_rate is the fraction passing every test, the binary reward at threshold 1.0."""
     n = len(rates)
     if not n:
         return {}
@@ -749,9 +750,15 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics=None, roll
                 if isinstance(meta.get("code_pass_rate"), (int, float)):
                     trained_rates.append(float(meta["code_pass_rate"]))
         window = WINDOW.drain()
-        log_dict = {f"rollout/code_hack/{k}": v for k, v in hack_metrics([f for _, f in window]).items()}
+        graded = [(r, f) for r, f in window if f is not None]
+        log_dict = {f"rollout/code_hack/{k}": v for k, v in hack_metrics([f for _, f in graded]).items()}
         log_dict |= {f"rollout/code_hack/trained/{k}": v for k, v in hack_metrics(trained).items()}
-        log_dict |= {f"rollout/code/{k}": v for k, v in pass_rate_metrics([r for r, _ in window]).items()}
+        log_dict |= {f"rollout/code/{k}": v for k, v in pass_rate_metrics([r for r, _ in graded]).items()}
+        if window:
+            log_dict["rollout/code/n_scored"] = len(window)
+            log_dict["rollout/code/solve_rate_all"] = sum(r >= 1.0 - 1e-9 for r, _ in window) / len(window)
+            log_dict["rollout/code/pass_rate_all"] = sum(r for r, _ in window) / len(window)
+            log_dict["rollout/code/gated_rate"] = 1.0 - len(graded) / len(window)
         log_dict |= {f"rollout/code/trained/{k}": v for k, v in pass_rate_metrics(trained_rates).items()}
         if log_dict:
             log_dict["rollout/step"] = compute_rollout_step(args, rollout_id)
@@ -839,12 +846,16 @@ def _score_one(sample, evaluation: bool = False) -> float:
         STATS.note_sample(0.0, False)
         return 0.0
 
+    if response.count("</think>") > 1:
+        STATS.note("multi_think_close")
     server = {}
     rate, reason, code = _gated_pass_rate(response, tests, evaluation, _grader_options(meta, checker, evaluation),
                                           server)
     if reason is not None:
         STATS.note(reason)
         STATS.note_sample(0.0, False)
+        if not evaluation and reason != "api_error":
+            WINDOW.add(0.0, None)
         return 0.0
 
     raw = reward_from_pass_rate(rate, evaluation)
