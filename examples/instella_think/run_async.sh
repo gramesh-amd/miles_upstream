@@ -28,8 +28,8 @@ SINGLE_NODE="${SINGLE_NODE:-0}"     # 1 => single 8-GPU node smoke (4 trainer + 
 # Response-length budget. The context is CONTEXT_LEN (default 32768, see below); miles sends
 # max_new_tokens unclamped, so SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION=CONTEXT_LEN in the runtime
 # env caps sglang's scheduler estimate of remaining tokens per request (it does not cap
-# generation; same as Primus-Instella-Internal/rl/examples/{if_rl,mopd}) rather than us
-# reserving prompt headroom here.
+# generation; as in Instella's own if_rl/mopd recipes) rather than reserving prompt headroom
+# here.
 #
 # TRAIN length is 32768, matching eval and the model's full context. This is deliberately
 # ABOVE Instella's own if_rl/mopd recipes (16384): the first 3-node run at 16384 truncated
@@ -54,8 +54,8 @@ SINGLE_NODE="${SINGLE_NODE:-0}"     # 1 => single 8-GPU node smoke (4 trainer + 
 #     --recompute-loss-function keep the cross-entropy workspace off the peak.
 #   * Generation gets slower, so expect perf/wait_time_ratio (already 0.74-0.80 at 16384,
 #     i.e. trainer idle waiting on rollouts) to rise. That is throughput, not stability.
-# The two 20260819 smoke OOMs were NOT length-driven -- they were the allocator config (see
-# PYTORCH_ALLOC_CONF below), which is why 30720 and 16384 both died.
+# Earlier smoke-run OOMs at 30720 and 16384 were NOT length-driven -- they were the allocator
+# config (see PYTORCH_ALLOC_CONF below).
 ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-32768}"
 EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-32768}"
 
@@ -150,7 +150,7 @@ CKPT_ARGS=(
    --save-interval "${SAVE_INTERVAL:-200}"
 )
 
-# BOS/EOS: this checkpoint ships INCONSISTENT token ids, verified 20260819. tokenizer.json is
+# BOS/EOS: this checkpoint ships INCONSISTENT token ids. tokenizer.json is
 # Think-style -- id 0 = <|begin of sentence|>, id 1 = <|end of sentence|>, id 2 = <|pad|> -- but
 # config.json and generation_config.json declare bos=1 / eos=2, i.e. they name EOS as BOS and PAD
 # as EOS. The MODEL agrees with the tokenizer, not the configs: fed a completed answer it emits
@@ -243,8 +243,8 @@ EVAL_ARGS=(
    # loop on 9.2% of AIME responses: pass@1 measured 0.6083 at 0.6 versus 0.7000 at 1.0. Loop
    # escape length is L/(1-p^L), so it crosses the 32k budget at p ~ 0.99997 and loops flip
    # from self-healing to absorbing. Keep 0.6 for continuity with Instella's published recipe
-   # and prior runs, and track the 1.0 number separately (study_tim/probe_collapse.py) so a
-   # temperature artefact is never mistaken for a capability loss again.
+   # and prior runs, and track the 1.0 number separately so a temperature artefact is never
+   # mistaken for a capability loss.
    --eval-temperature "${EVAL_TEMPERATURE:-0.6}"
    --eval-top-p 0.95
    # Instella's own recipe (HF model card + Instella-MoE/rl eval_config_mopd.yaml) uses
@@ -261,9 +261,9 @@ fi
 
 # train_async.py:59 runs a baseline eval at rollout_id==0 unless this is set. That eval fans
 # out 960 sequences (2 datasets x 30 prompts x 16 samples) at EVAL_MAX_RESPONSE_LEN on the
-# rollout engines, and it is exactly where BOTH prior 3-node runs died: rollout-engine
+# rollout engines, and it is exactly where two earlier 3-node runs died: rollout-engine
 # HSA_STATUS_ERROR_OUT_OF_RESOURCES with "Available Free mem : 14 MB" at "Eval aime2024 47%,
-# #running-req: 233" (20260813_203611 and 20260814_011033). It also costs ~45 min before the
+# #running-req: 233". It also costs ~45 min before the
 # first training step. --eval-interval still gives the first datapoint at step 20.
 # Set SKIP_EVAL_BEFORE_TRAIN=0 to restore the baseline eval.
 if [ "${SKIP_EVAL_BEFORE_TRAIN:-1}" = "1" ]; then
@@ -361,7 +361,7 @@ GRPO_ARGS=(
    # alongside FarSkip running two implementations (reference decoder layer in sglang vs
    # --use-simple-farskip-layer in Megatron) and aiter's shuffled-layout MoE GEMMs.
    --eps-clip "${EPS_CLIP:-0.2}"
-   # NOTE: pg_clipfrac has been exactly 0.0 at every logged step of the 20260819_054510 run, so
+   # NOTE: pg_clipfrac was exactly 0.0 at every logged step of a 115-step 3-node run, so
    # clip-higher is never actually binding and is doing nothing to hold entropy up here. Do not
    # count it as the entropy-collapse safeguard: entropy_loss still fell 0.0694 -> 0.0110 (6.3x)
    # over 115 steps with --entropy-coef 0 and no KL anchor.
@@ -369,29 +369,26 @@ GRPO_ARGS=(
    --use-tis
 )
 
-# The crash that forced this OFF is FIXED as of 20260824; the remaining caveat is that our own
-# measurement says it will not buy what it was reached for.
-#   1. Cause of the crash, now repaired. The Megatron on PYTHONPATH is the Primus fork, which
+# Routing replay (R3, USE_ROUTING_REPLAY=1): off by default here; run_code.sh and run_if.sh turn it on.
+#   1. Cause of an earlier crash, now repaired. The Megatron on PYTHONPATH is the Primus fork, which
 #      carries FarSkip but never had the R3 hooks, so no Replay was ever registered:
 #      replay_list stayed EMPTY and register_replay_list_moe died on replay_list[0] with
-#      "IndexError: list index out of range" (20260820_054007). It was never a FarSkip layer
+#      "IndexError: list index out of range". It was never a FarSkip layer
 #      layout problem -- register_replay_list_moe indexes replay_data by GLOBAL layer id, and
 #      sglang does emit num_layers=27 streams (sglang_rollout.py:278 reshapes to
 #      [tokens-1, num_layers, topk] and that reshape succeeded), so layer 0 being dense is
-#      handled correctly. The newer /root/Megatron-LM has the two hooks but no FarSkip, so we
-#      ported them into the Primus fork instead of switching trees: TopKRouter.__init__ now
+#      handled correctly. The newer /root/Megatron-LM has the two hooks but no FarSkip, so they
+#      are ported into the Primus fork instead of switching trees (patch_megatron_r3.sh): TopKRouter.__init__ now
 #      registers one Replay per router, and topk_routing_with_score_function routes its topk
-#      through the manager. Verified by study_tim/test_r3_port.py, which records a routing,
-#      perturbs the logits by -50 so re-derivation shares zero of 72 picks, and confirms the
+#      through the manager. Verified by a test that records a routing, perturbs the logits by -50 so re-derivation shares zero of 72 picks, and confirms the
 #      replayed routing still follows the recording on every token.
 #   2. It is worth ~4.3x on the logprob gap -- KEEP IT ON, but read the metric carefully.
 #      train_rollout_logprob_abs_diff is reduced by sum_of_sample_mean, and that reducer is
 #      itself switched by --calculate-per-token-loss (cp_utils.py:107 gives equal weight per
-#      SAMPLE, :115 equal weight per TOKEN), so this run's number is NOT directly comparable
-#      to 20260820_231843's 0.0433: R3 and the loss normalisation were turned on together.
-#      The clean control is the concurrent 20260824_001341, which has the same model, data and
-#      fp32 readout with R3 off and the old reducer: it reads 0.0538, i.e. no better than the
-#      run it replaced, so nothing improved on its own.
+#      SAMPLE, :115 equal weight per TOKEN), so the R3 run's number is NOT directly comparable
+#      to the previous run's 0.0433: R3 and the loss normalisation were turned on together.
+#      The clean control, a concurrent run with the same model, data and fp32 readout but R3
+#      off and the old reducer, reads 0.0538, i.e. no better than the run it replaced.
 #      That the underlying divergence really shrank, rather than just being re-weighted, is
 #      settled by three functionals of the SAME per-token divergence moving by three different
 #      powers, which is what must happen if the distribution's scale shrinks ~4.3x and cannot
@@ -406,8 +403,7 @@ GRPO_ARGS=(
 #      routing-CONDITIONED logprob gap. That is the right quantity for the PPO ratio, which
 #      needs the density that actually generated the tokens, but the metric no longer contains
 #      routing divergence at all and should not be read as full trainer/sampler agreement.
-#      This overturns the earlier conclusion recorded here, which said routing was a co-symptom
-#      because cross-tabulating 2048 token positions showed a 0.110 nat gap for positions with
+#      An earlier analysis had concluded routing was a co-symptom, because cross-tabulating 2048 token positions showed a 0.110 nat gap for positions with
 #      identical routing in all 27 layers versus 0.104 for positions with a flipped layer. That
 #      measurement was taken BEFORE the fp32 LM-head fix, when bf16 readout error (0.5 nat ULP
 #      at Instella's logit scale) swamped everything and conditioning on routing could not
@@ -447,8 +443,8 @@ fi
 # 0.195 -> 0.070 while the per-sample run stayed flat at 0.21-0.23, and pass@1/(1-truncated)
 # fell 0.92 -> 0.80 by step 139 where the per-sample run needed until step ~285.
 #
-# Do NOT read a mechanism into those ratios. Per-response probe data (study_tim/results/collapse,
-# 240 base + 120 step-401 responses, same matcher on both) refutes the obvious story:
+# Do NOT read a mechanism into those ratios. Per-response probe data (240 base + 120 step-401
+# responses, same matcher on both) refutes the obvious story:
 #   - "the policy commits earlier": FALSE. Among responses that FINISH and are WRONG, median
 #     length went UP, 16871 -> 20750 tokens at T=0.6.
 #   - "truncated always scores 0": FALSE. 3.8% of base and 13.3% of step-401 truncated responses
@@ -461,8 +457,8 @@ fi
 # Token sharpness over the same responses, at matched T=1.0: fraction of sampled tokens with
 # p>0.99 went 0.379 -> 0.623 (0.598 -> 0.771 at T=0.6), so the sharpening itself is real.
 #
-# CONFIRMED by probing this run's own engines at step ~170 (study_tim/results/olmo3_probe,
-# 120 responses per temperature). What token-level loss + a punitive truncation reward teaches
+# CONFIRMED by probing a token-level-loss run's own engines at step ~170 (120 responses per
+# temperature). What token-level loss + a punitive truncation reward teaches
 # is to GUESS BEFORE THE CAP. At T=1.0, outcome composition moved as:
 #     correct          75.4% -> 75.0%   (no gain at all)
 #     finished WRONG    1.2% -> 17.5%
@@ -478,8 +474,7 @@ fi
 # at step 401.
 #
 # THEORY, verified against the source (Ding et al., "On the Impossibility of Unbiased and
-# Length-Invariant Policy Optimization with Outcome Rewards", arxiv 2607.23364 -- NOT Shao et al.,
-# an attribution error made earlier here). Corollaries 8-9: the family f_alpha(L) = L^(alpha-1)
+# Length-Invariant Policy Optimization with Outcome Rewards", arxiv 2607.23364). Corollaries 8-9: the family f_alpha(L) = L^(alpha-1)
 # has alpha=0 = GRPO (per-sample), which satisfies length invariance but NOT gradient
 # unbiasedness, and alpha=1 = Dr. GRPO (token-level), which satisfies gradient unbiasedness but
 # NOT length invariance. So token-level loss genuinely does carry a length bias; this is a
@@ -490,7 +485,7 @@ fi
 # CRITICAL CAVEAT, in the paper's own words (section 6): "The practical importance of the tradeoff
 # depends on the variance of response lengths. When all responses to a given prompt have similar
 # lengths [...] the difference between alpha=0 and alpha=1 is negligible." Measured here on REAL
-# dapo-math batches (study_tim/online_cov.py on the step-0 dump), the within-prompt wrong/correct
+# dapo-math batches (the step-0 rollout dump), the within-prompt wrong/correct
 # length ratio is only 1.11x, giving an imbalance of -11.3% unfiltered and +4.8% WITH overlong
 # filtering. The 1.65-1.76x ratios behind the -19.9%/-24.7% figures above came from AIME probes,
 # which are NOT representative of the training distribution. By the paper's own criterion this
@@ -500,8 +495,6 @@ fi
 # NOTE ON DAPO: overlong filtering and soft overlong punishment are DAPO's (arxiv 2503.14476),
 # NOT Olmo3's -- the Olmo3 Think recipe is zero-gradient filtering, active sampling, token-level
 # loss, no KL, clip-higher, TIS, and no std-dev normalisation, with no overlong filtering in it.
-# Per-component point values from DAPO's ablation were quoted here previously; they are UNVERIFIED
-# against the paper and must not be relied on until checked.
 if [ "${PER_TOKEN_LOSS:-0}" = "1" ]; then
    GRPO_ARGS+=(--calculate-per-token-loss)
 fi
@@ -530,7 +523,7 @@ fi
 # survivors net POSITIVE: measured +19.4% token-level / +25.6% per-sample at step ~170, and
 # +83.5%/+91.6% on the DPO base's 23% truncation rate. A uniform positive push on sampled tokens
 # is a sharpening pressure, which is this model's actual failure mode, so the stock flag would
-# accelerate the collapse. See study_tim/overlong_filter_test.py for the 2x2.
+# accelerate the collapse.
 #
 # RISK, and why the filter logs every call. Truncated samples are where nearly all the NEGATIVE
 # examples live: at T=1.0 the base is 75.4% correct / 1.2% finished-wrong / 23.3% truncated, so
@@ -543,8 +536,8 @@ if [ "${OVERLONG_FILTER:-0}" = "1" ]; then
    GRPO_ARGS+=(--custom-reward-post-process-path overlong_filter.overlong_filter_post_process)
 fi
 # The dynamic filter must judge a group on the samples the drop keeps, or {correct, truncated}
-# groups pass it and then train with zero advantage (20-35% of trained groups in math R1/R2,
-# code v6 and IF3). overlong_dynamic_filter applies DYNAMIC_FILTER_PATH to the survivors.
+# groups pass it and then train with zero advantage (20-35% of trained groups in the math R1/R2,
+# code and IF runs). overlong_dynamic_filter applies DYNAMIC_FILTER_PATH to the survivors.
 OVERLONG_INNER_DYNAMIC_FILTER=""
 if [ "${OVERLONG_FILTER:-0}" = "1" ]; then
    OVERLONG_INNER_DYNAMIC_FILTER="${DYNAMIC_FILTER_PATH}"
@@ -592,7 +585,7 @@ fi
 # can be measured on the ACTUAL training batches instead of on AIME probes standing in for them.
 # One .pt per step holding every sample's reward, response_length and rollout_log_probs is
 # sufficient for both, because GRPO advantages are a deterministic function of the group's
-# rewards (that is exactly what study_tim/mass_balance.py recomputes):
+# rewards:
 #     Cov(A, L)      -> the token-level gradient imbalance, i.e. the -19.9% number
 #     Cov(log p, A)  -> the per-step entropy drift (arxiv 2505.22617); positive => collapse
 #
@@ -782,9 +775,9 @@ SGLANG_ARGS=(
    #      amortise their weight reads better than 8 full replicas do.
    #   3. It shrinks the prefill chunk 8x. With dp-attention on, sglang divides chunked-prefill
    #      by dp_size -- logging "DP attention is enabled. The chunked prefill size is adjusted
-   #      to N to avoid MoE kernel issues" -- so we get 16384//8 = 2048 (confirmed in this run's
-   #      server_args) instead of the 288 GB-tier default of 16384. Turning dp-attention off
-   #      hands the MoE an 8x bigger prefill chunk, which is how both 3-node runs OOM'd.
+   #      to N to avoid MoE kernel issues" -- so it runs at 16384//8 = 2048 (confirmed in the
+   #      engines' server_args) instead of the 288 GB-tier default of 16384. Turning dp-attention off
+   #      hands the MoE an 8x bigger prefill chunk, which is how two earlier 3-node runs OOM'd.
    # ENABLE_DP_ATTENTION=0 is a debug-only escape hatch; see the else-branch below for the
    # extra flags it then needs just to avoid reproducing that OOM.
    # Required at ROLLOUT/EVAL_MAX_RESPONSE_LEN 32768 (see the length block at the top): without
@@ -795,7 +788,8 @@ SGLANG_ARGS=(
    # The rollout runs triton attention while Megatron trains with --attention-backend flash
    # (below), so every logprob comparison crosses two different attention implementations. The
    # Qwen3.6-35B-A3B baseline left this at sglang's default and reached
-   # train_rollout_logprob_abs_diff 0.0150 where we start at 0.122, so this is on the suspect list.
+   # train_rollout_logprob_abs_diff 0.0150 where this recipe started at 0.122, so this is on the
+   # suspect list.
    # HAZARD before you change it: the triton backend is load-bearing here. The empty-KV
    # out-of-bounds fault under dp-attention is fixed by the k.shape[0]==0 guard *in
    # sglang's triton_backend* (reason 1 above). Switching backends with ENABLE_DP_ATTENTION=1
@@ -815,7 +809,7 @@ SGLANG_ARGS=(
    #   * Intermittent + varying addresses => suspected small OOB read inside an aiter
    #     kernel that only faults when the OOB page is unmapped (fresh-allocator replay
    #     never hits it). Precise attribution needs rocgdb/ROCm ATT.
-   # NOTE (Primus-Instella-Internal#2): SGLANG_USE_AITER=0 is NOT a safe mitigation --
+   # NOTE: SGLANG_USE_AITER=0 is NOT a safe mitigation --
    # it stops the crash but SILENTLY corrupts output (the sglang515 overlay stores MoE
    # weights in aiter's shuffled layout; the non-aiter path reads them unshuffled =>
    # gibberish, e.g. "2+2=5", arc_challenge 0.195 which is below the random-chance floor).
@@ -825,7 +819,7 @@ SGLANG_ARGS=(
    #   * aiter=1 + dp-attn   -> WAS the OOB "Memory access fault" under load; now fixed,
    #                            and this is the default (see the dp-attention block above)
    #   * aiter=1, dp-attn=0  -> correct, but drops the chunked-prefill clamp and OOMs
-   #                            without it (HSA_STATUS_ERROR_OUT_OF_RESOURCES, run 023 dpoff)
+   #                            without it (HSA_STATUS_ERROR_OUT_OF_RESOURCES)
    # Residual cleanup (not a blocker) = tune aiter for this model's MLA GEMM shapes (N=544,
    # K=2048, large prefill M) so the untuned fallback ("not found tuned") is never taken.
    #
@@ -840,7 +834,7 @@ SGLANG_ARGS=(
 # Concurrency cap for the rollout engines. Unset by default (sglang decides), which is what
 # the math runs used -- and what made the eval fan-out fatal: with no cap the engines took
 # #running-req 233 during eval and died with HSA_STATUS_ERROR_OUT_OF_RESOURCES at
-# "Available Free mem : 14 MB" (both 20260813/20260814 3-node runs). Capping bounds peak KV
+# "Available Free mem : 14 MB" (two earlier 3-node runs). Capping bounds peak KV
 # and scratch WITHOUT shortening responses, so the eval measurement is untouched -- a
 # shorter --eval-max-response-len would instead truncate answers, and a truncated response
 # never closes </think>, which scores 0 and biases the metric down. 64 also matches
@@ -856,7 +850,7 @@ if [ "${ENABLE_DP_ATTENTION:-1}" = "1" ]; then
 else
    # Without dp-attention sglang skips its "// dp_size ... to avoid MoE kernel issues" division,
    # so chunked-prefill stays at the 288 GB-tier default of 16384 -- 8x the 2048 the dp-attention
-   # path runs at. Long-context prefills then OOM: run 023 dpoff died with
+   # path runs at. Long-context prefills then OOM: a dp-attention-off run died with
    # HSA_STATUS_ERROR_OUT_OF_RESOURCES / "Available Free mem : 14 MB" during its first eval
    # (960 sequences at --eval-max-response-len). So set 2048 explicitly to match what the
    # default path actually gets. SKIP_EVAL_BEFORE_TRAIN=1 only moves that first big fan-out to
@@ -905,11 +899,10 @@ fi
 # so promoting one side alone would push a sixth of all tokens outside eps_clip every step.
 # The gradient pass cannot just run Megatron's linear in fp32 (its fused wgrad kernels take
 # half-precision operands), so fp32_lm_head.py implements the matmul as an autograd Function
-# that accumulates dW into weight.main_grad following Megatron's own contract; see the unit
-# test at study_tim/test_fp32_logits.py. It bypasses tensor-parallel plumbing and therefore
+# that accumulates dW into weight.main_grad following Megatron's own contract. It bypasses tensor-parallel plumbing and therefore
 # asserts tp=1 for the head, which holds here (--tensor-model-parallel-size 1).
 # FP32_LM_HEAD_IMPL picks how (fp32_lm_head.py). Default "split": bf16 GEMMs with fp32 accumulation
-# and output, the logit gradient as two bf16 terms; numerically the fp32 path (replay of v6 steps:
+# and output, the logit gradient as two bf16 terms; numerically the fp32 path (replayed training steps:
 # grad_norm, pg_loss and train_rollout_logprob_abs_diff equal to 3-4 digits) at 3.4x the head's
 # speed, actor_train -7% and log_probs -12% on MI355X. "fp32": upcast fp32 GEMMs (the old path).
 # "mixed": bf16-rounded logit gradient, faster still. Plain bf16 logits (FP32_TRAINER_READOUT=0)
@@ -981,7 +974,7 @@ echo "RAY_ADDRESS=${RAY_ADDRESS}  MASTER_ADDR=${MASTER_ADDR}  SINGLE_NODE=${SING
 # --- Debug toggles (override at launch) ---
 # CORRECTNESS: aiter=1 is REQUIRED. The sglang515 overlay stores MoE weights in aiter's
 # shuffled layout, so the non-aiter path reads them unshuffled and SILENTLY produces
-# gibberish (Primus-Instella-Internal#2: "2+2=5", arc_challenge 0.195, below chance).
+# gibberish ("2+2=5", arc_challenge 0.195, below chance).
 # Throughput looks normal, so there is no crash to alert you -- hence the default is 1.
 # aiter=1 + dp-attention is now the correct AND stable combo: the empty-KV out-of-bounds
 # fault that used to force ENABLE_DP_ATTENTION=0 is fixed by the k.shape[0]==0 guard in
@@ -999,7 +992,7 @@ SGLANG_USE_AITER="${SGLANG_USE_AITER:-1}"
 # absorbed MLA (one holding a chunked-prefill continuation, i.e. several requests arriving
 # together or a prompt split across 2048-token chunks) comes out as gibberish or BOS spam -- very
 # likely the BOS-spam caveat above. See patch_sglang_mla_rope.sh. Fixed properly in the sglang515
-# overlay (Primus-Instella-Internal 001b7acd, mi355x_rl), so default 0; kept as an opt-in fallback.
+# overlay, so default 0; kept as an opt-in fallback.
 if [ "${MLA_UNFUSED_ROPE:-0}" = "1" ] && ! python3 -c "import sys, sglang.srt.models.deepseek_common.attention_forward_methods.forward_mla as m; sys.exit('MLA_UNFUSED_ROPE' not in open(m.__file__).read())" 2>/dev/null; then
    echo "FATAL: MLA_UNFUSED_ROPE=1 but sglang's forward_mla.py is not patched (run patch_sglang_mla_rope.sh)" >&2
    exit 1
@@ -1048,11 +1041,11 @@ echo "NCCL_SOCKET_IFNAME=${NET_IF}"
 # distinct large size a non-reusable cached block, so the pool grows monotonically until the
 # ROCm runtime can no longer allocate kernel scratch. That surfaces as an
 # HSA_STATUS_ERROR_OUT_OF_RESOURCES abort at an NCCL dispatch with ~0 MB free and NO torch
-# OOM -- exactly how the 20260819_0122 (30720 len) and _0233 (16384 len) smokes died, which
-# is why halving the response length did not help. HSA_NO_SCRATCH_RECLAIM is deliberately
+# OOM -- exactly how earlier smokes at 30720 and 16384 died, which is why halving the response
+# length did not help. HSA_NO_SCRATCH_RECLAIM is deliberately
 # unset (neither reference recipe sets it); pinning scratch compounds the same failure.
 # Canonical name is PYTORCH_ALLOC_CONF; PYTORCH_HIP_ALLOC_CONF is deprecated and warns.
-# Self-hosted W&B (e.g. WANDB_BASE_URL=https://api.forge.coreweave.com); omitted when unset so
+# Self-hosted W&B (e.g. WANDB_BASE_URL=https://<your W&B host>); omitted when unset so
 # wandb falls back to its default host rather than to an empty URL.
 WANDB_BASE_URL_ENV=""
 if [ -n "${WANDB_BASE_URL:-}" ]; then

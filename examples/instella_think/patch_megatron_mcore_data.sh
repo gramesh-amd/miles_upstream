@@ -2,17 +2,16 @@
 # Make Megatron's checkpoint load tolerate a .metadata without `mcore_data`.
 # Idempotent. Run in EVERY node's container, like the other megatron patches.
 #
-# WHY. Resuming from any checkpoint this run produced dies with:
+# WHY. Resuming from any checkpoint these recipes save dies with:
 #   AttributeError: 'Metadata' object has no attribute 'mcore_data'
 #   .../dist_checkpointing/strategies/torch.py:874 in get_reformulation_metadata
 #
-# Every iter_* we saved (199, 339, 359 -- including ones that never left local
-# disk) has a 4,371,823-byte .metadata holding a plain torch DCP `Metadata`,
+# Every iter_* checked (including ones that never left local disk) has a
+# .metadata holding a plain torch DCP `Metadata`,
 # which carries planner_data/state_dict_metadata/storage_data but no
-# `mcore_data`. So this is not corruption and not the bucket round-trip; the
-# save simply never wrote Megatron's extended field. The run itself never hit
-# this because it started from REF_LOAD (a weights-only `release` checkpoint)
-# and ran straight through -- resume was never exercised.
+# `mcore_data`. So this is not corruption and not a copy round-trip; the save
+# simply never wrote Megatron's extended field. A run that starts from REF_LOAD
+# (a weights-only `release` checkpoint) and runs straight through never hits this.
 #
 # The fix is to treat a MISSING attribute the same as a missing KEY, which the
 # function already handles: for 1-D flattened tensors it warns "Legacy

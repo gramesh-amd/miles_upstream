@@ -192,8 +192,8 @@ export CUSTOM_EVAL_LOG_PATH="${CUSTOM_EVAL_LOG_PATH:-if_eval_log.log_eval_rollou
 # constraint set includes both "at least N words" and "fewer than N" families, so upweighting
 # long responses trades one constraint family against the other.
 #
-# USE_ROUTING_REPLAY=1 -- R3. Off in the reference run only because that run (20260820)
-# predates the 20260824 fix that ported the two missing hooks into the Primus Megatron. It
+# USE_ROUTING_REPLAY=1 -- R3. Off in the reference run only because that run predates the
+# port of the two missing hooks into the Primus Megatron (patch_megatron_r3.sh). It
 # is worth ~4.3x on the train/inference logprob gap (0.0116 vs 0.0538 on the concurrent
 # no-R3 control), which directly sharpens the --use-tis correction this recipe relies on.
 export DISABLE_STD_NORM="${DISABLE_STD_NORM:-1}"
@@ -316,7 +316,7 @@ OUT="${LOG_DIR}/launch-if32k-$(hostname -s)-${TS}.out"
 
 # Freeze run_async.sh, not this wrapper: bash reads a script incrementally, so editing the
 # live file mid-run makes the open shell resume at a stale byte offset and execute a garbled
-# fragment (observed 20260820). The snapshot must stay in this directory because these
+# fragment (this has happened). The snapshot must stay in this directory because these
 # scripts derive SCRIPT_DIR from their own location and source model_args.sh from there.
 FROZEN="${SCRIPT_DIR}/.run-frozen-${TS}.sh"
 cp "${TARGET}" "${FROZEN}" || exit 1

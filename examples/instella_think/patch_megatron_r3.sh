@@ -14,15 +14,14 @@
 # actually register a Replay per router and route top-k through the manager live in
 # MEGATRON, not in miles. The Primus FarSkip fork carries FarSkip but never had
 # them, so `replay_list` stayed EMPTY and register_replay_list_moe died on
-# replay_list[0] with "IndexError: list index out of range" (MI355 run
-# 20260820_054007). The image's newer /root/Megatron-LM HAS both hooks but has no
-# FarSkip, so -- following what MI355 did -- we port the hooks into the FarSkip
-# fork rather than switching Megatron trees.
+# replay_list[0] with "IndexError: list index out of range". The image's newer
+# /root/Megatron-LM HAS both hooks but has no FarSkip, so this ports the hooks into
+# the FarSkip fork rather than switching Megatron trees.
 #
 # The upstream hooks cannot be copied verbatim: /root/Megatron-LM is newer and
 # wraps them in scaffolding this fork lacks (`is_mtp_layer`, `RouterReplay`,
 # `config.moe_enable_routing_replay`, and an `is_mtp`/`router_replay` signature on
-# topk_routing_with_score_function). So we insert the minimal equivalent.
+# topk_routing_with_score_function). So this inserts the minimal equivalent.
 #
 # Both hooks are INERT when R3 is off: register_to_module() early-returns unless
 # the manager is enabled, and get_topk_fn()'s wrapper falls through to the original

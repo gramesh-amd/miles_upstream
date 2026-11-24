@@ -42,7 +42,7 @@ def segment_chart(metric):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("run_regex", help="regex on run names, e.g. 'lux-v6' or '^holdtest'")
+    ap.add_argument("run_regex", help="regex on run names, e.g. 'code32k' or '^miles_code'")
     ap.add_argument("--view-name", default=None)
     ap.add_argument("--metric", action="append", default=None)
     ap.add_argument("--entity", default=os.environ.get("WANDB_ENTITY") or None,

@@ -22,8 +22,8 @@ WANDB_MODE="$(source "${JOB_DIR}/spec.env"; echo "${WANDB_MODE:-online}")"
 # miles passes no W&B entity; with none set here either, runs land in the key owner's default entity.
 WANDB_ENTITY="$(source "${JOB_DIR}/spec.env"; echo "${WANDB_ENTITY:-${LUX_WANDB_ENTITY}}")"
 # Optional request ramp after the engines start (miles MILES_ROLLOUT_RAMP_S, seconds; 0 = off). It was
-# the workaround for degenerate generations on request bursts, fixed in the sglang515 overlay by
-# Primus-Instella-Internal 001b7acd (mi355x_rl); off by default since. TRAIN_RAMP_S / EVAL_RAMP_S.
+# the workaround for degenerate generations on request bursts, since fixed in the sglang515
+# overlay; off by default. TRAIN_RAMP_S / EVAL_RAMP_S.
 RAMP_S="$(source "${JOB_DIR}/spec.env"; [ "${EVAL_ONLY:-0}" = 1 ] && echo "${EVAL_RAMP_S:-0}" || echo "${TRAIN_RAMP_S:-0}")"
 
 # --cleanenv drops Slurm's GPU masks (all 8 GPUs stay visible) and the ORNL proxy, so traffic

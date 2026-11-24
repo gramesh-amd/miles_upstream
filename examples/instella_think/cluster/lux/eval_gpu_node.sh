@@ -5,7 +5,7 @@
 #
 # A separate file rather than a switch in run_gpu_node.sh: a training job reads run_gpu_node.sh
 # and run_in_container.sh for its whole life, and replacing them under it (git pull) breaks it
-# with "Stale file handle". TODO: fold back into run_gpu_node.sh at a moment no job is running.
+# with "Stale file handle".
 set -uo pipefail
 source "${LUX_DIR:?}/lux_env.sh"
 : "${JOB_DIR:?}" "${SANDBOX_HOST:?}" "${HEAD_HOST:?}" "${GPU_NODE_COUNT:?}" "${ALL_HOSTS:?}"

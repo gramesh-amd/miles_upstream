@@ -9,7 +9,7 @@
 #     -t  wait at most SECS (default 1800), then print the log tail; the command keeps running
 #   NODE '-' means the job's first node.
 #
-# e.g. cluster/lux/on_node.sh 386700 - 'cd ~/miles && bash examples/instella_think/cluster/env_setup.sh'
+# e.g. cluster/lux/on_node.sh <JOBID> - 'cd ~/miles && bash examples/instella_think/cluster/env_setup.sh'
 set -uo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)/lux_env.sh"
 

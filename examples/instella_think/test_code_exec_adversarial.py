@@ -18,7 +18,7 @@ expected to fail against a grader with known holes; the report groups failures i
 RESIDUAL names known holes left open on purpose (each with the reason) and POLICY the [policy] cases; both
 are still run and reported, but only other failures count toward the exit status.
 
-Assert shapes in v7 function data (fixed.jsonl: 10,153 rows, 135,854 tests, 9,429 multi-line; per assert node):
+Assert shapes in the function-call training data (10,153 rows, 135,854 tests, 9,429 multi-line; per assert node):
 == / != 127,329 (92.4%), _v7_close 4,419, and/or 1,528, in 1,237, abs-diff < eps 751, < <= > >= 668,
 all/any 573, is 522, isinstance 397, other bare call 249, chained compare 78, constant 57, not 34.
 Of the == forms, the left side is len() 1,005, sorted() 359, list() 269, set() 191 times.

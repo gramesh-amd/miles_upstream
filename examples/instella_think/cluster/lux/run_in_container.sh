@@ -12,7 +12,7 @@
 # Every run starts from a fresh Ray cluster and in a subshell, so nothing leaks between runs.
 set -uo pipefail
 # No core dumps: a killed sglang dumps ~2.4 GB per GPU process into the working directory (the NFS
-# home), which filled the home quota on 2026-11-09 (see eval_in_container.sh).
+# home), enough to fill a home quota (see eval_in_container.sh).
 ulimit -c 0
 source /opt/venv/bin/activate
 cd "${USER_HOME}/miles" || exit 1
@@ -33,7 +33,7 @@ await() {  # <file> <timeout_s> <what>
 
 # Kills what a run leaves behind on this node once its Ray cluster is down. sglang's scheduler and
 # detokenizer processes outlive a force-stopped Ray; orphaned, their watchdog kills its new parent,
-# which is this container session (job 408063: the worker's session died 40 s after its run failed).
+# which is this container session (a worker's session died 40 s after its run failed).
 kill_leftovers() {
    pkill -9 -f 'sglang::' 2>/dev/null
    pkill -9 -f 'ray::' 2>/dev/null
@@ -44,8 +44,8 @@ kill_leftovers() {
 # --- 1. per-container setup (lost with the container, so every job) ------------------------
 # The editable install writes into the shared Megatron checkout on NFS; stagger the nodes.
 sleep $(( NODE_RANK * 20 ))
-# Jobs starting together race on the same build dir (2026-11-19: "could not delete
-# helpers_cpp...so" failed one of two v7 runs), so the install also takes a lock across jobs: an
+# Jobs starting together race on the same build dir ("could not delete helpers_cpp...so" failed
+# one of two runs started together), so the install also takes a lock across jobs: an
 # atomic mkdir, which works on NFS and Lustre alike (after 10 minutes of waiting it installs anyway).
 _lock="${MEGATRON_PATH}/.miles-pip-install.lock"; _held=0
 for _ in $(seq 120); do mkdir "${_lock}" 2>/dev/null && { _held=1; break; }; sleep 5; done

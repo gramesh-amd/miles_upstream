@@ -32,7 +32,7 @@ for d in "${SAVE_DIR}"/iter_*; do
    [ -e "${MARKS}/${step}" ] && continue
    # Engine cap: 256 per engine (32/GPU) unless the spec sets one. At 64/GPU, sustained full load
    # crashed every prefilter server within ~35 min (HSA_STATUS_ERROR_EXCEPTION); 32/GPU plus the
-   # eval request ramp (EVAL_RAMP_S) scored the same as 16/GPU (v5 iter 599, 2026-11-11).
+   # eval request ramp (EVAL_RAMP_S) scored the same as 16/GPU on the same checkpoint.
    cap=SGLANG_MAX_RUNNING_REQUESTS=256
    for kv in "$@"; do case "${kv}" in SGLANG_MAX_RUNNING_REQUESTS=*) cap="${kv}" ;; esac; done
    # The training spec's sandbox sizing favours rewards; an eval job grades benchmarks.

@@ -14,7 +14,7 @@
 # for its weight updates to sglang (--megatron-to-hf-mode raw, the default).
 set -uo pipefail
 # No core dumps: stopping the engines at the end makes every GPU process dump ~2.4 GB into the
-# working directory (the NFS home), which filled the home quota (234 files, 48 GB, 2026-11-09).
+# working directory (the NFS home), which can fill the home quota (one eval left 234 files, 48 GB).
 ulimit -c 0
 source /opt/venv/bin/activate
 cd "${USER_HOME}/miles" || exit 1
@@ -33,8 +33,7 @@ await() {  # <file> <timeout_s> <what>
 }
 
 # Each shard must be as long as its header says. Engines have read a freshly converted shard as
-# truncated on a node other than the one that wrote it (evals 408873 and 409375, 2026-11-12: an
-# 8 MB view of a 5.4 GB file) and the eval hung, though the files were whole. So the head checks
+# truncated on a node other than the one that wrote it (an 8 MB view of a 5.4 GB file) and the eval hung, though the files were whole. So the head checks
 # after converting, and each worker re-checks (and waits) before it joins.
 check_shards() {
    python3 - "$1" <<'EOF'
@@ -51,8 +50,8 @@ EOF
 
 # --- 1. per-container setup, as run_in_container.sh ----------------------------------------
 sleep $(( NODE_RANK * 20 ))
-# Jobs starting together race on the same build dir (2026-11-19: "could not delete
-# helpers_cpp...so" failed one of two v7 runs), so the install also takes a lock across jobs: an
+# Jobs starting together race on the same build dir ("could not delete helpers_cpp...so" failed
+# one of two runs started together), so the install also takes a lock across jobs: an
 # atomic mkdir, which works on NFS and Lustre alike (after 10 minutes of waiting it installs anyway).
 _lock="${MEGATRON_PATH}/.miles-pip-install.lock"; _held=0
 for _ in $(seq 120); do mkdir "${_lock}" 2>/dev/null && { _held=1; break; }; sleep 5; done

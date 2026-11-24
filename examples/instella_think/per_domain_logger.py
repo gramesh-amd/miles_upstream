@@ -3,7 +3,7 @@
 Every training sample is put in one domain per grouping key and the stats of each domain are
 logged under rollout/domain/<key>/<domain>/ (rollout/* is bound to the rollout/step axis in W&B).
 The keys come from PER_DOMAIN_KEYS (comma-separated, default "route,src,src_route"):
-  route      metadata["route"]   e.g. function / stdio (the v7 code data)
+  route      metadata["route"]   e.g. function / stdio (the code training data)
   src        metadata["src"]     e.g. acecoder / klear / nemotron / synthetic2
   src_route  "<src>_<route>"
   source     metadata["dataset_source"], else metadata["rm_type"] (the old single grouping)

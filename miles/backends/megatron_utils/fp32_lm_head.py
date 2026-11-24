@@ -22,7 +22,7 @@ exp(new - old): `old` comes from the forward-only log-prob pass (`rollout_data["
 and `new` from the training pass, two separate computations of the same quantity. The
 readout error is spiky rather than smooth -- median 0.026 but P(>0.2) = 17% and P(>0.28) =
 9.9% -- so promoting one side alone would push about a sixth of all tokens outside the
-eps_clip band on every step, which is worse than the ~8% `pg_clipfrac` seen today at a point
+eps_clip band on every step, which is worse than the ~8% `pg_clipfrac` observed at a point
 where the ratio should be exactly 1. Both sides move together or neither does.
 
 Implementation
@@ -125,7 +125,7 @@ class _Fp32Logits(torch.autograd.Function):
         # One contiguous [tokens, vocab] matrix for both products. grad_output arrives
         # non-contiguous, and torch.matmul on a non-contiguous 3-D tensor cannot fold it into a
         # single GEMM: it ran as a bmm of one-row products, 27% of the trainer's GPU time on
-        # MI355X (2.2 s per micro-batch, profiled 2026-11-15).
+        # MI355X (2.2 s per micro-batch).
         g2 = grad_output.float().reshape(-1, grad_output.shape[-1]).contiguous()
 
         if ctx.impl == "fp32":

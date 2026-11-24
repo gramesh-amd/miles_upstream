@@ -786,7 +786,7 @@ The `IF_*` passthrough is not cosmetic: the reward executes in the Ray rollout w
 whose environment is that `runtime_env` dict, so exporting `IF_REQUIRE_THINK=0` in the
 launching shell alone would be silently ignored.
 
-### Things the old `Instella-MoE/rl` IF example got wrong or can no longer do
+### Differences from the earlier `Instella-MoE/rl` IF example
 
 Checked rather than copied, since that repo pins `radixark/miles@2b5b7fc` plus a 761-line
 core patch that does not apply here.

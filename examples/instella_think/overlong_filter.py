@@ -13,7 +13,7 @@ That flag exists and looks like the right tool, but its own help states the limi
 That is the MASK form of overlong filtering -- zero the loss, leave the sample in the group mean --
 and it is actively harmful here. Truncated samples carry negative advantage, so deleting them from
 the gradient while leaving them in the mean deletes negative push and leaves the survivors net
-POSITIVE. Measured on real grouped rollouts (study_tim/overlong_filter_test.py, T=1.0, strict
+POSITIVE. Measured on real grouped rollouts (T=1.0, strict
 grader), as signed gradient-mass imbalance:
 
     filtering                  per-sample   token-level
@@ -192,8 +192,8 @@ def overlong_dynamic_filter(args, samples, **kwargs):
     The dynamic filter runs at rollout time, the drop above only later in the reward
     post-process. On raw rewards a group like {4 correct, 4 truncated} has nonzero std and is
     kept, then loses its truncated half here and trains with zero advantage while still taking a
-    batch slot. Measured share of such dead groups among trained groups: code v6 7.7% -> 18.5%
-    (stdio 35%), math R1/R2 20-33%, IF3 0.4% -> 34% as truncation rose. Judging the group on the
+    batch slot. Measured share of such dead groups among trained groups: code 7.7% -> 18.5%
+    (stdio 35%), math R1/R2 20-33%, IF 0.4% -> 34% as truncation rose. Judging the group on the
     samples this hook will keep lets the async rollout refill with groups that carry gradient.
 
     The survivors go through OVERLONG_INNER_DYNAMIC_FILTER (default: the stock nonzero-std check;

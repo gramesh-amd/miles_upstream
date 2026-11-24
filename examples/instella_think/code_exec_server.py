@@ -455,7 +455,7 @@ def strict_assert(test: str) -> str:
     """Rewrites the condition of every `assert` (and `if C: raise AssertionError`) so each value
     it compares or truth-tests goes through __v7canon__: Compare operands (all ops but is/is not,
     which cannot be rigged and must not see canon's copies), and/or/not operands, the elements of
-    all()/any() over a comprehension, the arguments of the v7 data's _v7_close, both operands of
+    all()/any() over a comprehension, the arguments of the training data's _v7_close helper, both operands of
     abs(a - b), and whatever else the condition is. Values that only feed a method call, an
     argument, or arithmetic are left alone: canon would turn a Counter into a dict or an ndarray
     into a list and break `c().most_common()` or `arr() / 3`."""

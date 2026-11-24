@@ -57,7 +57,7 @@ apptainer exec --cleanenv --env-file "${NL}/container.env" "instance://${INST}" 
    [ -f "${OUTPUT}.stats.json" ] && { say "shard ${SHARD} already done"; exit 0; }
    # (Re)starts sglang when it does not answer. At long contexts and high load the server can die
    # with HSA_STATUS_ERROR_EXCEPTION (a GPU memory fault): all 14 nodes at 512 running requests,
-   # 2 of 14 after 2.5 h at 256 (2026-11-09/10); a dead server is restarted, not waited on.
+   # 2 of 14 after 2.5 h at 256; a dead server is restarted, not waited on.
    ensure_server() {
       curl -sf -m 5 http://127.0.0.1:30000/health >/dev/null && return 0
       say "starting sglang"

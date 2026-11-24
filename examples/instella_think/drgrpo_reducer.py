@@ -7,14 +7,14 @@ WHAT IT REPLACES. With --calculate-per-token-loss off, miles' default reducer is
 sum_of_sample_mean (cp_utils.py): each sample's token sum divided by ITS OWN length, then
 loss.py divides by global_batch_size (a sample count, constant per step). So every sample gets
 equal total weight and a token in a long sample gets proportionally less. On code that matters
-because the long samples are the truncated ones: on the code16k run's dumps (52 steps, 13,312
+because the long samples are the truncated ones: on a 16k code run's dumps (52 steps, 13,312
 samples) 28% truncate at the cap, average 1.5x the mean length and score 0.03, so per-sample
 weighting under-pushes the largest pool of negatives per token. Dividing by a constant gives
 every token the same weight regardless of which sample it sits in.
 
 Truncated samples' share of gradient mass rises from 29% to 41% under this reducer (same dumps).
-That is intended: dropping them instead (OVERLONG_FILTER=1) makes truncation free, and code v5-v7,
-math R1/R2 and IF3 all drifted toward the cap that way. With truncated samples kept, set DIVISOR so
+That is intended: dropping them instead (OVERLONG_FILTER=1) makes truncation free, and earlier code,
+math (R1/R2) and IF runs all drifted toward the cap that way. With truncated samples kept, set DIVISOR so
 the step-0 update matches the previous recipe (about 1.9x the drop-recipe divisor on code at 32K).
 
 WHY --calculate-per-token-loss MUST STAY OFF. With it on, loss.py returns num_tokens as

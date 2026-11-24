@@ -110,7 +110,7 @@ fi
 export CODE_EXEC_TIMEOUT="${CODE_EXEC_TIMEOUT:-5}"
 export CODE_MAX_TESTS="${CODE_MAX_TESTS:-32}"
 # The server pads tests past its --max-tests with failures, so a cap below CODE_MAX_TESTS makes
-# rows with more tests unsolvable without any error (v7 trained at 64 while asking for 128).
+# rows with more tests unsolvable without any error (e.g. a server at 64 with CODE_MAX_TESTS=128).
 # SKIP_SANDBOX_CHECK=1 for dry runs without a live sandbox.
 for _url in "${CODE_EXEC_API_URL}" "${CODE_BENCH_API_URL}"; do
    _cap="$(curl -s -m 10 "${_url}/health" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("max_tests", 0))' 2>/dev/null)"

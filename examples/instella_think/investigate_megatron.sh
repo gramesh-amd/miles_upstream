@@ -1,6 +1,6 @@
 #!/bin/bash
 # Assemble a FarSkip-capable Megatron, faithfully reproducing the CURRENT known-good
-# recipe: Primus-Instella-Internal/rl/setup/primus_instella_patch.sh (2026-07-23).
+# recipe: Primus-Instella-Internal/rl/setup/primus_instella_patch.sh.
 #
 #   1. git submodule update --init --force training/third_party/Megatron-LM
 #      -> checks out the SUBMODULE PIN (847781764...), the commit the FarSkip patch

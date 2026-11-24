@@ -11,8 +11,8 @@ against the row's tests. Test formats, all JSON in `label`:
                                            graded by oe-eval's rules (see _score_bench)
 
 Checker rows (problems with several correct outputs): the stdin/stdout list plus a Python
-checker, either as metadata.checker = "<python source>" next to the usual label (what the v7
-data uses) or self-contained as label = {"tests": [{"input", "output"}, ...], "checker": "..."}.
+checker, either as metadata.checker = "<python source>" next to the usual label (what the code
+training data uses) or self-contained as label = {"tests": [{"input", "output"}, ...], "checker": "..."}.
 They go to the service's /test_program_checker route (open-r1's Codeforces judge): the checker
 runs sandboxed as `checker.py input.txt correct_output.txt solution_output.txt` and a test
 passes iff it exits 0 printing 1 (or 100). A checker that crashes or prints anything else fails

@@ -12,11 +12,10 @@
 # fine. So several requests arriving together (a burst after idle, or one long prompt split across
 # 2048-token chunks) get gibberish: on a fresh prefilter-config server, 96/256 burst requests
 # started with <think>, and at --chunked-prefill-size 256 only 8/64 single requests did. With
-# MLA_UNFUSED_ROPE=1 every probe came back 100% correct (2026-11-12, jobs 409249/409283/409301,
-# scripts in $LUX_ROOT/shared/diag/prefill_*). The triton extend kernel itself matches a torch
-# reference for Lq=544 (kernel_test.py), so the fault is in the fused aiter path.
+# MLA_UNFUSED_ROPE=1 every probe came back 100% correct. The triton extend kernel itself matches a
+# torch reference for Lq=544, so the fault is in the fused aiter path.
 #
-# Root cause, fixed in the sglang515 overlay by Primus-Instella-Internal 001b7acd (mi355x_rl):
+# Root cause, since fixed in the sglang515 overlay:
 # forward_mla took the fused kernel's 4th output (empty) as k, and the overlay's triton extend
 # guard zeroed attention when k was empty. With that overlay this workaround is not needed.
 #
