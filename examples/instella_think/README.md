@@ -660,7 +660,7 @@ row matched an eval id or the date cutoff).
 | `--carry` | carry-over rows in the training schema; `custom_id`s with an `__os<k>` suffix are oversample copies and dropped |
 | `--status` | optional; `custom_id`, `status` (`mixed_active` / `retired` / `never_mixed_all_zero`), `last_outcome`. Without it the stamps are null and AceCoder rows are not tiered |
 | `--leetcode-pool`, `--codewars-pool`, `--leetcode-refs` | function pools (see `fn_build.py`) and `{uid, ref}` references |
-| `--eval-items`, `--eval-hashes` | eval corpus: statements per eval item, hashed hidden tests (see `decontam.py`) |
+| `--eval-items`, `--eval-hashes` | eval corpus: statements per eval item, hashed hidden tests (see `decontam.py`; `convert_eval_pkl.py` writes the JSONL from a pickled corpus with a data-only unpickler) |
 | `--legacy-dedup` | the recorded `new_vs_carry_dups.csv`, only for an exact replay |
 
 **Commands.** `SANDBOX_URLS` are `code_exec_server.py` base URLs; the token comes from `CODE_EXEC_TOKEN` or
@@ -669,24 +669,29 @@ row matched an eval id or the date cutoff).
 ```bash
 cd examples/instella_think/data_v8
 SANDBOX_URLS=http://<host1>:18990,http://<host2>:18990 WORK=/data/v8work OUT=/data/v8 bash build_v8.sh \
-  --union union.csv.gz --clusters clusters.parquet --carry carry.jsonl --status status.parquet \
+  --union union.csv.gz --clusters clusters.parquet --carry carry_over.jsonl --status problem_status.parquet \
   --eval-items eval_items.parquet --eval-hashes eval_hashes.jsonl \
   --leetcode-pool leetcode_call.jsonl.gz --leetcode-refs leetcode_refs.jsonl.gz --codewars-pool codewars_fn.jsonl.gz
-# exact replay of the released file from the verified intermediates in WORK/build (no sandbox):
-WORK=/data/v8work OUT=/data/v8 bash build_v8.sh --from assemble --legacy-dedup new_vs_carry_dups.csv \
-  --carry carry.jsonl --status status.parquet --eval-items eval_items.parquet --eval-hashes eval_hashes.jsonl
+# exact replay of the released file, no sandbox: D = the downloaded side inputs (D/build/ holds the intermediates)
+WORK=$D OUT=/data/v8 bash build_v8.sh --from assemble --legacy-dedup $D/new_vs_carry_dups.csv \
+  --carry $D/carry_over.jsonl --status $D/problem_status.parquet \
+  --eval-items $D/eval_items.parquet --eval-hashes $D/eval_hashes.jsonl
+cut -f1,4 $D/MANIFEST.tsv   # sha256 of every distributed file, train.jsonl included
 python3 test_data_v8.py   # deterministic pieces, no sandbox
 ```
 
-**Reproducibility.** The released `train.jsonl` is reproduced exactly from the verified intermediates
-(`verified_*.jsonl`, `fn_rows.jsonl`) with the replay above: `train_pre_decontam.jsonl` (24,724 rows),
+**Reproducibility.** The side inputs are distributed alongside the dataset, listed with sizes and sha256 in
+`MANIFEST.tsv`: the verified intermediates `build/verified_*.jsonl` and `build/fn_rows.jsonl`, `carry_over.jsonl`
+(the carry-over rows), `problem_status.parquet` (`custom_id`, `status`, `last_outcome`), `eval_items.parquet`,
+`eval_hashes.jsonl` and `new_vs_carry_dups.csv` (the recorded dedup). The released `train.jsonl` is reproduced
+exactly from them with the replay above: `train_pre_decontam.jsonl` (24,724 rows),
 `train.jsonl`, `decontam_drop.txt`, `new_vs_carry_dups.csv` and `final_stats.json` are byte-identical;
 `decontam_hits.csv` has the same rows, with a row's hits in a fixed order instead of the original's set order.
 The replay needs `--legacy-dedup` because the original dedup sampled n-grams with Python's salted `hash()`, and it
 keeps the row of the shard file that sorts last for the two `custom_id`s verified twice, as the original did;
 new builds use blake2b and feed the shuffle in `custom_id` order (`--hash`, `--order`). On the same
-intermediates that default (with `--duplicates last`) keeps 24,578 rows: the blake2b dedup drops 5 rows the recorded one kept and keeps 11
-it dropped; the other 24,567 rows are byte-identical, in a different order. A from-scratch rebuild
+intermediates that default (with `--duplicates last`) keeps 24,578 rows: the blake2b dedup drops 5 rows the
+recorded one kept and keeps 11 it dropped; the other 24,567 rows are byte-identical, in a different order. A from-scratch rebuild
 gives an equivalent but not identical set: verification depends on sandbox timing at the 5 s / 20 s limits, and
 the released intermediates were decided by successive versions of the rules (about 8,100 of the stdio rows
 by an earlier, stricter version that required a reference and wrote no `v8_flags`).

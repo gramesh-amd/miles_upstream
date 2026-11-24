@@ -2,12 +2,12 @@
 # Build the v8 code RL mix end to end, or replay its last three steps from verified intermediates.
 #
 #   SANDBOX_URLS=http://h1:18990,http://h2:18990 WORK=/data/v8work OUT=/data/v8 bash build_v8.sh \
-#       --union union.csv.gz --clusters clusters.parquet --carry carry.jsonl [--status status.parquet] \
+#       --union union.csv.gz --clusters clusters.parquet --carry carry_over.jsonl [--status problem_status.parquet] \
 #       --eval-items eval_items.parquet --eval-hashes eval_hashes.jsonl \
 #       --leetcode-pool leetcode_call.jsonl.gz --leetcode-refs leetcode_refs.jsonl.gz --codewars-pool codewars_fn.jsonl.gz
 #
 #   WORK=... OUT=... bash build_v8.sh --from assemble --legacy-dedup new_vs_carry_dups.csv \
-#       --carry carry.jsonl --status status.parquet --eval-items ... --eval-hashes ...   # exact replay of WORK/build
+#       --carry carry_over.jsonl --status problem_status.parquet --eval-items ... --eval-hashes ...   # exact replay of WORK/build
 #
 # Steps (--from STEP resumes; every step is resumable on its own): fetch refs cands verify fn assemble decontam finalize.
 # SANDBOX_URLS: code_exec_server.py base URLs without the token; the token comes from CODE_EXEC_TOKEN or the file
