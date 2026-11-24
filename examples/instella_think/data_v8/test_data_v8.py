@@ -3,9 +3,11 @@
     python3 examples/instella_think/data_v8/test_data_v8.py
 """
 import ast
+import collections
 import json
 import logging
 import os
+import pickle
 import re
 import subprocess
 import sys
@@ -16,6 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import assemble  # noqa: E402
 import common  # noqa: E402
+import convert_eval_pkl  # noqa: E402
 import stdio_verify as sv  # noqa: E402
 
 
@@ -38,6 +41,24 @@ class StableHash(unittest.TestCase):
         self.assertEqual(len(outs), 1)
         self.assertEqual(int(outs.pop()), common.h64("x y z"))
         self.assertTrue(0 <= common.h64("x y z") < 1 << 64)
+
+
+class ConvertEvalPkl(unittest.TestCase):
+    def test_round_trip_and_refuses_globals(self):
+        ev = [{"eval_set": "lcb", "eval_id": "1873_A", "platform": "codeforces", "title": "A", "text": "dropped",
+               "io": [(common.h64("1\x002"), 13)], "calls": [("f", common.h64("[1]\x002"), 12)]}]
+        with tempfile.TemporaryDirectory() as d:
+            with open(f"{d}/eval.pkl", "wb") as f:
+                pickle.dump(ev, f)
+            self.assertEqual(convert_eval_pkl.convert(f"{d}/eval.pkl", f"{d}/out.jsonl"), 1)
+            row, = common.read_jsonl(f"{d}/out.jsonl")
+            self.assertNotIn("text", row)
+            self.assertEqual(row["io"], [[common.h64("1\x002"), 13]])
+            self.assertEqual(row["calls"], [["f", common.h64("[1]\x002"), 12]])
+            with open(f"{d}/bad.pkl", "wb") as f:
+                pickle.dump([{"io": collections.OrderedDict()}], f)
+            with self.assertRaises(pickle.UnpicklingError):
+                convert_eval_pkl.convert(f"{d}/bad.pkl", f"{d}/bad.jsonl")
 
 
 class Redact(unittest.TestCase):
