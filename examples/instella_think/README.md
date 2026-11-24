@@ -465,12 +465,17 @@ CODE_BENCH_API_URL=$($I/cluster/code_exec.sh url bench) python3 $I/eval_code_ckp
 
 Outputs go to `OUT` (default `$LOG_DIR/code-evals/<HF dir name>`):
 - `gen.jsonl.gz`: every generation, written before grading.
-- `graded.jsonl.gz`: one record per sample, with `correct`, `reason` (`no_code`, `api_error` or
-  `gen_error`), `ntok` and `truncated`.
+- `graded.jsonl.gz`: one record per sample, with `correct`, `reason` (`no_code`, `api_error`,
+  `gen_error` or `grade_error`), `ntok` and `truncated`. A generation the server aborted or returned
+  without a finish reason is a `gen_error`, not a graded answer.
 - `summary.json`: per set, pass@1/2/4, solved_all/none, truncation and no-`</think>` rates,
   length stats, `acc_when_finished`, `by_difficulty`, `by_route` and `per_problem`. It also has
   `lcb_v5v6`, the pass@1 over both sets' problems (so weighted by problem count), and the
-  `gen_errors` / `api_errors` totals.
+  `gen_errors` / `api_errors` / `grade_errors` totals. A problem with fewer than k samples (a
+  regrade of a partial gen file) is left out of pass@k and counted in `pass@k_short`.
+
+Prompts go to the server as token ids: the chat template is applied and the text encoded with
+`add_special_tokens=False`, as in the training rollout.
 
 A sample the sandbox still can't grade after 3 retries counts as wrong. Report `api_errors`
 next to the scores, because they should be 0. A few LiveCodeBench verdicts depend on the

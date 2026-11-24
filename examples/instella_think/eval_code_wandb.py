@@ -47,7 +47,7 @@ def main() -> None:
             cols = list(v["per_problem"][0])
             tables[f"offline_eval_problems/{name}"] = wandb.Table(
                 columns=cols, data=[[p[c] for c in cols] for p in v["per_problem"]])
-    for key in ("lcb_v5v6", "gen_errors", "api_errors"):
+    for key in ("lcb_v5v6", "gen_errors", "api_errors", "grade_errors"):
         if s.get(key) is not None:
             row[f"offline_eval/{key}"] = s[key]
 

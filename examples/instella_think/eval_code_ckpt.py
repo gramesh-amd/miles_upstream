@@ -5,13 +5,17 @@
         --model <HF dir> --url http://127.0.0.1:30000 --bench-dir $CODE_BENCH_DIR --out <dir>
 
 Prompts are rendered with the model's own chat template (add_generation_prompt), as miles'
---apply-chat-template does in training, and graded through code_reward's benchmark path
-(_bench_answer -> _bench_code -> bench_pass), the one the in-training benchmark evals take.
---api openai sends the same rendered text to /v1/completions (vLLM, or sglang's OpenAI API).
+--apply-chat-template does in training, and sent as token ids encoded with
+add_special_tokens=False, as the training rollout does. Answers are graded through code_reward's
+benchmark path (_bench_answer -> _bench_code -> bench_pass), the one the in-training benchmark
+evals take. --api openai sends the same token ids as the prompt to /v1/completions (vLLM, or
+sglang's OpenAI API).
 
 Writes to --out:
     gen.jsonl.gz     every generation, written before grading
-    graded.jsonl.gz  one record per sample: correct, reason (no_code / api_error / gen_error), lengths
+    graded.jsonl.gz  one record per sample: correct, reason (no_code / api_error / gen_error /
+                     grade_error), lengths; gen_error includes generations that did not finish
+                     (aborted, or no finish reason)
     summary.json     per set: pass@{1,2,n}, truncation, length stats, by_difficulty / by_route,
                      per_problem; lcb_v5v6 (pass@1 over the union of both sets' problems)
 
@@ -63,18 +67,22 @@ def preflight_sandbox(cr, url: str, rows: dict) -> None:
 
 
 def make_generate(a, samp: dict):
-    """job -> {response, ntok, truncated}; raises on a failed request."""
+    """job -> {response, ntok, truncated}; raises on a failed request or an unfinished generation."""
     if a.api == "sglang":
         requests.get(f"{a.url}/health", timeout=30).raise_for_status()
 
         def generate(job):
             r = requests.post(f"{a.url}/generate", json={
-                "text": job["text"], "sampling_params": {**samp, "max_new_tokens": job["budget"]}}, timeout=14400)
+                "input_ids": job["input_ids"], "sampling_params": {**samp, "max_new_tokens": job["budget"]}},
+                timeout=14400)
             r.raise_for_status()
             j = r.json()
-            meta = j.get("meta_info", {})
+            meta = j.get("meta_info") or {}
+            finish = (meta.get("finish_reason") or {}).get("type")
+            if finish not in ("stop", "length"):
+                raise RuntimeError(f"generation did not finish (finish_reason={finish})")
             return {"response": j.get("text", ""), "ntok": meta.get("completion_tokens"),
-                    "truncated": meta.get("finish_reason", {}).get("type") == "length"}
+                    "truncated": finish == "length"}
         return generate
 
     models = requests.get(f"{a.url}/v1/models", timeout=30)
@@ -83,12 +91,15 @@ def make_generate(a, samp: dict):
 
     def generate(job):
         r = requests.post(f"{a.url}/v1/completions", json={
-            "model": name, "prompt": job["text"], "max_tokens": job["budget"], **samp}, timeout=14400)
+            "model": name, "prompt": job["input_ids"], "max_tokens": job["budget"], **samp}, timeout=14400)
         r.raise_for_status()
         j = r.json()
         choice = j["choices"][0]
+        finish = choice.get("finish_reason")
+        if finish not in ("stop", "length"):
+            raise RuntimeError(f"generation did not finish (finish_reason={finish})")
         return {"response": choice.get("text", ""), "ntok": (j.get("usage") or {}).get("completion_tokens"),
-                "truncated": choice.get("finish_reason") == "length"}
+                "truncated": finish == "length"}
     return generate
 
 
@@ -121,6 +132,12 @@ def sample_record(cr, ds: str, pi: int, k: int, row: dict) -> dict:
             "platform": m.get("platform"), "route": cr._parse_tests(row["label"]).get("route")}
 
 
+def prompt_ids(tok, messages) -> list:
+    """The prompt token ids exactly as the training rollout builds them."""
+    text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return tok(text, add_special_tokens=False)["input_ids"]
+
+
 def run_generation(a, cr, rows: dict, out: Path, samp: dict) -> list:
     from transformers import AutoTokenizer
 
@@ -128,11 +145,10 @@ def run_generation(a, cr, rows: dict, out: Path, samp: dict) -> list:
     generate = make_generate(a, samp)
     jobs = []
     for (ds, pi), row in rows.items():
-        text = tok.apply_chat_template(row["prompt"], tokenize=False, add_generation_prompt=True)
-        ntok = len(tok(text, add_special_tokens=False)["input_ids"])
-        budget = min(a.max_new, a.ctx - ntok - 64)
+        input_ids = prompt_ids(tok, row["prompt"])
+        budget = min(a.max_new, a.ctx - len(input_ids) - 64)
         for k in range(a.n_samples):
-            jobs.append({"ds": ds, "pi": pi, "k": k, "text": text, "budget": budget})
+            jobs.append({"ds": ds, "pi": pi, "k": k, "input_ids": input_ids, "budget": budget})
     random.Random(0).shuffle(jobs)
     print(f"{len(jobs)} generations over {','.join(a.datasets)}", flush=True)
 
@@ -144,7 +160,11 @@ def run_generation(a, cr, rows: dict, out: Path, samp: dict) -> list:
     graded = []
 
     def finish(rec, label):
-        grade(cr, rec, label)
+        try:
+            grade(cr, rec, label)
+        except Exception as exc:  # noqa: BLE001
+            rec.pop("response", None)
+            rec.update(correct=False, reason="grade_error", error=str(exc)[:200])
         with lock:
             records.append(rec)
 
@@ -190,13 +210,19 @@ def run_regrade(a, cr, rows: dict) -> list:
     def one(rec):
         if "response" not in rec:
             return dict(rec, correct=False, reason="gen_error")
-        return grade(cr, rec, rows[(rec["ds"], rec["pi"])]["label"])
+        try:
+            return grade(cr, rec, rows[(rec["ds"], rec["pi"])]["label"])
+        except Exception as exc:  # noqa: BLE001
+            rec.pop("response", None)
+            return dict(rec, correct=False, reason="grade_error", error=str(exc)[:200])
 
     with ThreadPoolExecutor(a.grade_workers) as pool:
         return list(pool.map(one, gens))
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:
+    if n < k:
+        raise ValueError(f"pass@{k} needs at least {k} samples, got {n}")
     if n - c < k:
         return 1.0
     return 1.0 - math.prod((n - c - i) / (n - i) for i in range(k))
@@ -219,13 +245,18 @@ def _block(rs: list, n: int) -> dict:
     for r in rs:
         per[r["pi"]].append(r)
     out = {"n_problems": len(per), "n_samples": len(rs)}
+    # Problems with fewer than k samples (e.g. a regrade of a partial gen file) are left out of
+    # pass@k and counted in pass@k_short instead of being scored as solved.
     for k in sorted({1, 2, n} & set(range(1, n + 1))):
-        out[f"pass@{k}"] = _mean([pass_at_k(len(v), sum(x["correct"] for x in v), k) for v in per.values()])
+        full = [v for v in per.values() if len(v) >= k]
+        out[f"pass@{k}"] = _mean([pass_at_k(len(v), sum(x["correct"] for x in v), k) for v in full])
+        if len(full) < len(per):
+            out[f"pass@{k}_short"] = len(per) - len(full)
     counts = [sum(x["correct"] for x in v) for v in per.values()]
     out["solved_all"] = _mean([c == len(v) for c, v in zip(counts, per.values(), strict=True)])
     out["solved_none"] = _mean([c == 0 for c in counts])
     out["truncated"] = _mean([bool(r.get("truncated")) for r in rs])
-    for key in ("no_code", "api_error", "gen_error"):
+    for key in ("no_code", "api_error", "gen_error", "grade_error"):
         out[f"{key}_rate"] = _mean([r.get("reason") == key for r in rs])
     out["no_think_close_rate"] = _mean([not r.get("think_closed", False) for r in rs if "think_closed" in r])
     out["multi_think_close_rate"] = _mean([r.get("multi_think_close", False) for r in rs if "think_closed" in r])
@@ -237,7 +268,7 @@ def _block(rs: list, n: int) -> dict:
     out["len_correct_mean"] = round(sum(ok) / len(ok)) if ok else None
     out["len_wrong_finished_mean"] = round(sum(bad) / len(bad)) if bad else None
     fin = [r for r in rs if not r.get("truncated") and "response" not in r and r.get("reason") != "gen_error"]
-    out["acc_when_finished"] = _mean([r["correct"] for r in fin])
+    out["acc_when_finished"] = _mean([r["correct"] for r in fin if r.get("reason") != "grade_error"])
     return out
 
 
@@ -263,6 +294,7 @@ def summarize(records: list, n: int) -> dict:
         res[ds] = b
     res["gen_errors"] = sum(r.get("reason") == "gen_error" for r in records)
     res["api_errors"] = sum(r.get("reason") == "api_error" for r in records)
+    res["grade_errors"] = sum(r.get("reason") == "grade_error" for r in records)
     if "lcb_v5" in by_ds and "lcb_v6" in by_ds:
         per = defaultdict(list)
         for r in by_ds["lcb_v5"] + by_ds["lcb_v6"]:
@@ -334,7 +366,8 @@ def main() -> None:
     summary.update(summarize(records, summary["n_samples"]))
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps({k: v.get("pass@1") for k, v in summary.items() if isinstance(v, dict) and "pass@1" in v}
-                     | {k: summary[k] for k in ("lcb_v5v6", "gen_errors", "api_errors") if k in summary}),
+                     | {k: summary[k] for k in ("lcb_v5v6", "gen_errors", "api_errors", "grade_errors")
+                        if k in summary}),
           flush=True)
 
 
