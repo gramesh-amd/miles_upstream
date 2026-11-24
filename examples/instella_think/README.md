@@ -25,6 +25,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`); `OVERLONG_FILTER_DROP_UNCLOSED=1` also drops samples that stopped without closing `</think>`. |
 | `router_log_hook.py` | Optional trainer-side router telemetry (`ROUTER_LOG=1`): router weight and expert-bias drift from step 0, as JSONL. |
 | `adaptive_difficulty_filter.py` | Optional online difficulty filter (`ADAPTIVE_FILTER=1`): drops groups the current policy has already mastered. See "Other launch knobs". |
+| `retire_solved.py` | Optional retirement of solved prompts (`RETIRE_SOLVED=1`): prompts solved on every sample are skipped at draw time, a share comes back. See "Other launch knobs". |
 | `per_domain_logger.py` | Per-domain W&B metrics (`rollout/domain/<key>/<domain>/*` for route, src, src_route), on by default (`PER_DOMAIN_METRICS=0` disables). |
 | `rollout_log_chain.py` | Runs several rollout log hooks (`per_domain_logger` plus `CUSTOM_ROLLOUT_LOG_PATH`, e.g. code_reward's hack monitor); `run_async.sh` uses it when more than one is on, since miles keeps only one `--custom-rollout-log-function-path`. |
 | `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
@@ -286,8 +287,10 @@ All are `VAR=VALUE` overrides to `cluster/launch.sh`; defaults leave the recipe 
 | `ROLLOUT_TEMPERATURE` | 1 | Training sampling temperature. On math, the DPO base fell from pass@1 0.771 at 0.8 to 0.454 at 1.1. |
 | `OVER_SAMPLING_BATCH_SIZE` | 64 | Must be at least `ROLLOUT_BATCH_SIZE`; miles refuses to start otherwise. |
 | `MAX_TOKENS_PER_GPU` | 8192 | Trainer dynamic-batching budget per microbatch. |
+| `RECOMPUTE` | full | Activation recompute: `full`, `selective` or `none`. With `full`, `RECOMPUTE_METHOD` (uniform) and `RECOMPUTE_NUM_LAYERS` (1); `block` with N recomputes only the first N layers. |
 | `ADVANTAGE_ESTIMATOR` | grpo | `gspo` only differs when there is more than one optimizer step per rollout. |
 | `ADAPTIVE_FILTER` | 0 | Online difficulty filter, see below. |
+| `RETIRE_SOLVED` | 0 | Skip prompts solved on every sample of their last visit, see below. `RETIRE_RETURN_FRAC` (0.1), `RETIRE_SOLVED_MIN_REWARD` (0.999), `RETIRE_INNER_DYNAMIC_FILTER` (the dynamic filter otherwise in use). |
 | `OBSERVE_ENTROPY` | 1 | Logs the policy entropy (`train/entropy_loss`). With `--entropy-coef 0`, miles otherwise logs it as 0. |
 | `PER_DOMAIN_METRICS` | 1 | Per-domain metrics under `rollout/domain/<key>/<domain>/`, see "Watch it". |
 | `PER_DOMAIN_KEYS` | `route,src,src_route` | Groupings: `metadata.route`, `metadata.src`, their pair, or `source` (`dataset_source`). |
@@ -319,6 +322,23 @@ checkpoint; on math, 22% of groups had drifted back above its threshold by step 
 - Cost: more groups are dropped, so each step pulls more prompts and takes longer. Watch
   `rollout/dynamic_filter/frac_kept`; if it collapses, the data has become too easy for the
   policy.
+
+**Retiring solved prompts (`RETIRE_SOLVED=1`).** An 8/8 group is dropped by the dynamic filter
+only after its 8 rollouts were generated and graded. `retire_solved.py` remembers prompts whose
+last group scored every sample at least `RETIRE_SOLVED_MIN_REWARD` and skips them when they are
+drawn, except a `RETIRE_RETURN_FRAC` share so they are not forgotten; a returned prompt that fails
+any sample is active again.
+- Keep/drop is still decided by `RETIRE_INNER_DYNAMIC_FILTER`, which defaults to the filter the run
+  would use anyway (`overlong_dynamic_filter` under `OVERLONG_FILTER=1`, else the adaptive or the
+  stock one), so turning it on drops no other filter. `run_async.sh` refuses a
+  `--dynamic-sampling-filter-path` or `--data-source-path` in `EXTRA_ARGS` with it.
+- The retired set and the return-draw RNG are saved with each checkpoint as
+  `rollout/retired_solved_<N>.pt` and restored on resume. Groups recycled as stale or aborted skip
+  the check, and if nearly everything is retired a draw serves retired prompts rather than scan
+  the dataset more than once.
+
+`cluster/lux/specs/code_binary_36k.env` is the binary-reward code recipe with it on (Dr. GRPO,
+`OVERLONG_FILTER=0`, 36k context, 2 trainer + 4 rollout nodes); see `cluster/lux/README.md`.
 
 `SINGLE_NODE=1` splits the node into 4 trainer GPUs (EP4) and 4 rollout GPUs (one sglang
 engine). For 3 nodes: bring up all three, run `env_setup.sh` on each, `ray_head.sh` on the
@@ -479,6 +499,11 @@ In W&B (`rollout/step` axis for `rollout/*`), besides miles' own `rollout/*`, `e
   `ADAPTIVE_FILTER=1`), plus `frac_kept`. These are comparable across steps; the raw counts
   in `rollout/async/*` are not. Under the binary reward every all-pass or all-fail group is
   `zero_std`, so expect a larger dropped share than under `partial`.
+- `rollout/async/carried_over_groups`: completed groups beyond this step's batch, which lead the next
+  step's batch (staleness is checked when they are used). They and the groups recycled into the
+  data-source buffer are held in memory only and are not restored on resume.
+- `rollout/retire/*` (`RETIRE_SOLVED=1`): `n_retired` prompts currently retired, and since the last step
+  `skipped` draws, `returned` retired prompts served, `newly_retired` and `reactivated`.
 - `train/entropy_loss`: the policy entropy on training tokens. A steady fall is the
   sharpening that preceded collapse in the math runs.
 

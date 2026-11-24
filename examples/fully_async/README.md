@@ -23,7 +23,8 @@ Continuous async rollout worker started
 ## How It Works (Very Short)
 * First call: create `AsyncRolloutWorker` (thread + asyncio loop).
 * Loop keeps up to `--rollout-batch-size` tasks in flight using `generate_and_rm_group`.
-* Completed groups are pushed into a queue; caller drains until it has enough samples.
+* Completed groups are pushed into a queue; caller drains until it has enough samples. Groups drained
+  beyond the batch are kept, in completion order, for the next call (`rollout/async/carried_over_groups`).
 * Worker is stopped automatically at process exit.
 
 ## Limitations
