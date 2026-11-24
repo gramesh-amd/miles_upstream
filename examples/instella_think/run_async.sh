@@ -303,8 +303,10 @@ fi
 # --- trainer parallelism (Instella known-good from Instella-MoE/rl if_rl) -----
 # Activation recompute: RECOMPUTE=full (default; every layer re-run in backward), selective (only
 # the attention core) or none. Lighter recompute trades memory for ~1/3 less training compute.
+# With full, RECOMPUTE_METHOD=block and RECOMPUTE_NUM_LAYERS=N recompute only the first N layers.
 case "${RECOMPUTE:-full}" in
-   full) RECOMPUTE_ARGS=(--recompute-granularity full --recompute-method uniform --recompute-num-layers 1) ;;
+   full) RECOMPUTE_ARGS=(--recompute-granularity full --recompute-method "${RECOMPUTE_METHOD:-uniform}"
+                         --recompute-num-layers "${RECOMPUTE_NUM_LAYERS:-1}") ;;
    selective) RECOMPUTE_ARGS=(--recompute-granularity selective) ;;
    none) RECOMPUTE_ARGS=() ;;
    *) echo "FATAL: RECOMPUTE must be full, selective or none" >&2; exit 1 ;;
