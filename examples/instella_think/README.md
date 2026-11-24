@@ -17,6 +17,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
 | `test_grader.sh` | Runs every grader test (hardening, adversarial, hack monitor in both reward modes, reward self-test) against a private local server. |
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
+| `data_v8/` | Builds the v8 code RL mix (new Codeforces / HardTests / CodeContests+ / TACO / LeetCode / Codewars rows verified on the sandbox, plus the carry-over rows), or replays it exactly from its verified intermediates. See "Code RL data (v8 mix)". |
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol, plus LCB v5/v6, HumanEval/MBPP Pro, CRUXEval and Codeforces. |
 | `validate_code_benchmarks.py` | Grades reference / always-wrong answers and old eval dumps against the bench sandbox. |
 | `eval_code_ckpt.py` / `eval_code_ckpt.sh` | Offline benchmark eval of a saved checkpoint: export, serve, generate and grade, with `summary.json` per run. `eval_code_wandb.py` logs it to W&B; `test_eval_code_ckpt.py` tests the scoring. See "Offline checkpoint evals". |
@@ -600,6 +601,95 @@ Things learned on that run:
   RolloutManager) are retried automatically and are harmless unless the retry count climbs.
 - The sandbox has the standard library plus PyYAML only; no sampled solution imported
   numpy or other third-party packages, so none are installed.
+
+## Code RL data (v8 mix)
+
+`data_v8/` builds `train.jsonl`: 24,572 rows (29 GB), 10,555 carried over from the previous code mix and 14,017
+new problems, each checked on the training grader (`code_reward.py` request path, `code_exec_server.py`).
+Rows follow the code schema above (`prompt`, JSON-string `label`, `metadata.rm_type = "code"`); stdio rows with
+several valid answers carry `metadata.checker`. Metadata also records `v8_origin` (`code1_carryover` / `v8_new`),
+`src`, `route`, `verified`, `fixes`, `v8_flags` and, for carry-over rows, the problem's status in the previous
+run (`code1_status`, `code1_last_outcome`).
+
+**Sources** (revisions pinned in `fetch.py` / `build_refs.py`; licenses from the dataset cards):
+
+| dataset | revision | license | used for |
+|---|---|---|---|
+| `open-r1/codeforces` (`verifiable/`, `verifiable_tests/`) | `fbe3f6e903ee` | CC-BY-4.0 | statements, official + generated tests, checkers |
+| `open-r1/codeforces-submissions` | `07e7bf31f284` | CC-BY-4.0 | accepted Python submissions (references), wrong-answer probes |
+| `sigcp/hardtests_problems` | `06393e565b83` | MIT | statements, Python oracle solutions |
+| `sigcp/hardtests_tests` | `8c6c4fa10732` | not stated on the card | tests, `output_judging_function` checkers |
+| `ByteDance-Seed/Code-Contests-Plus` (`ccplus_1x/`) | `96c850540fad` | CC-BY-4.0 | statements, tests, correct / incorrect submissions |
+| `agentica-org/DeepCoder-Preview-Dataset` (`taco/`, `primeintellect/`) | `177913a7bd43` | MIT | statements, tests, solutions |
+| `likaixin/TACO-verified` | `9e68575e0193` | MIT | statements, tests, solutions |
+| `codeparrot/apps` | `21e74ddf8de1` | MIT | reference solutions of the Codewars rows (kata URL match) |
+| `newfacade/LeetCodeDataset` | via the function pool | Apache-2.0 | LeetCode function rows and references |
+| `PrimeIntellect/verifiable-coding-problems` | via the function pool | not stated on the card | Codewars function rows |
+| `allenai/Dolci-Think-RL-7B` `code_rlvr` (AceCoder, Klear, Nemotron, SYNTHETIC-2) | carry-over file | ODC-BY | carry-over rows |
+
+**Composition** (`final_stats.json`):
+
+| origin | src | rows |
+|---|---|---|
+| carry-over | acecoder / klear / nemotron / synthetic2 | 5,684 / 2,482 / 1,499 / 890 |
+| new stdio | hardtests / openr1 / ccplus / taco / deepcoder_pi / deepcoder_taco | 5,502 / 4,742 / 678 / 107 / 99 / 13 |
+| new function | leetcode / codewars | 1,883 / 993 |
+
+**Filtering.** The union lists one problem per cross-dataset duplicate cluster (14,090: HardTests 6,409, open-r1
+6,271, CodeContests+ 890, TACO-verified 238, DeepCoder 282); other cluster members only contribute references.
+`stdio_verify.py` (docstring) then drops, per candidate: statements that are interactive, image-dependent,
+non-English, file-I/O, function-style or ask for another language; fewer than 3 tests; several valid answers
+without a checker; a checker that rejects its own label; references that pass < 80% of the tests even at 20 s;
+a dominant answer (> 75% of the tests) that cannot be thinned below 50% with >= 8 tests left; constant programs
+that pass every test. Tests are the 8 largest inputs plus seeded-random others (at most 32); references run at
+training's 5 s limit, and tests they only pass at 20 s are removed. Of the 11,824 stdio rows kept, 2,228 have no
+passing Python reference and are kept on their upstream validation (`verified: false`, `label_validation`);
+open-r1, HardTests and CodeContests+ only. The function slice keeps 2,894 of 3,057 pool rows (163 need
+ListNode / TreeNode helpers); references pass at 2.5 s, a stub must not pass every test.
+`assemble.py` drops 549 new rows whose statement is contained in a carry-over one (8-gram containment >= 0.5),
+`decontam.py` drops 152 rows (n-gram containment of an eval statement: ng8 144 and ng13 162 hits; hidden-test
+overlaps with LCB / Codeforces / HumanEval / MBPP / CRUXEval items were all below the drop thresholds, and no
+row matched an eval id or the date cutoff).
+
+**Inputs that are not public datasets.** Pass them as files; their formats:
+
+| argument | content |
+|---|---|
+| `--union` | CSV, one row per problem: `pid` (`<source>/<id>`), `source`, `cluster`, `date_eff`, `checker` (CC+ checker class), `lcb_v3_window` |
+| `--clusters` | parquet or CSV of every cluster member: `pid`, `source`, `cluster` |
+| `--carry` | carry-over rows in the training schema; `custom_id`s with an `__os<k>` suffix are oversample copies and dropped |
+| `--status` | optional; `custom_id`, `status` (`mixed_active` / `retired` / `never_mixed_all_zero`), `last_outcome`. Without it the stamps are null and AceCoder rows are not tiered |
+| `--leetcode-pool`, `--codewars-pool`, `--leetcode-refs` | function pools (see `fn_build.py`) and `{uid, ref}` references |
+| `--eval-items`, `--eval-hashes` | eval corpus: statements per eval item, hashed hidden tests (see `decontam.py`) |
+| `--legacy-dedup` | the recorded `new_vs_carry_dups.csv`, only for an exact replay |
+
+**Commands.** `SANDBOX_URLS` are `code_exec_server.py` base URLs; the token comes from `CODE_EXEC_TOKEN` or
+`CODE_EXEC_TOKEN_FILE` and is never printed. Steps are resumable; `--from <step>` restarts at one.
+
+```bash
+cd examples/instella_think/data_v8
+SANDBOX_URLS=http://<host1>:18990,http://<host2>:18990 WORK=/data/v8work OUT=/data/v8 bash build_v8.sh \
+  --union union.csv.gz --clusters clusters.parquet --carry carry.jsonl --status status.parquet \
+  --eval-items eval_items.parquet --eval-hashes eval_hashes.jsonl \
+  --leetcode-pool leetcode_call.jsonl.gz --leetcode-refs leetcode_refs.jsonl.gz --codewars-pool codewars_fn.jsonl.gz
+# exact replay of the released file from the verified intermediates in WORK/build (no sandbox):
+WORK=/data/v8work OUT=/data/v8 bash build_v8.sh --from assemble --legacy-dedup new_vs_carry_dups.csv \
+  --carry carry.jsonl --status status.parquet --eval-items eval_items.parquet --eval-hashes eval_hashes.jsonl
+python3 test_data_v8.py   # deterministic pieces, no sandbox
+```
+
+**Reproducibility.** The released `train.jsonl` is reproduced exactly from the verified intermediates
+(`verified_*.jsonl`, `fn_rows.jsonl`) with the replay above: `train_pre_decontam.jsonl` (24,724 rows),
+`train.jsonl`, `decontam_drop.txt`, `new_vs_carry_dups.csv` and `final_stats.json` are byte-identical;
+`decontam_hits.csv` has the same rows, with a row's hits in a fixed order instead of the original's set order.
+The replay needs `--legacy-dedup` because the original dedup sampled n-grams with Python's salted `hash()`, and it
+keeps the row of the shard file that sorts last for the two `custom_id`s verified twice, as the original did;
+new builds use blake2b and feed the shuffle in `custom_id` order (`--hash`, `--order`). On the same
+intermediates that default (with `--duplicates last`) keeps 24,578 rows: the blake2b dedup drops 5 rows the recorded one kept and keeps 11
+it dropped; the other 24,567 rows are byte-identical, in a different order. A from-scratch rebuild
+gives an equivalent but not identical set: verification depends on sandbox timing at the 5 s / 20 s limits, and
+the released intermediates were decided by successive versions of the rules (about 8,100 of the stdio rows
+by an earlier, stricter version that required a reference and wrote no `v8_flags`).
 
 ## How model/weights wire up (no `--spec`, no shadow ckpt)
 
