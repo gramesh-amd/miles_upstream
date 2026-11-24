@@ -2,8 +2,9 @@
 # Runs every grader test against a private code_exec_server.py on 127.0.0.1 (own token, scratch dir
 # and free port, all removed on exit):
 #   test_code_exec_hardening.py, test_code_exec_adversarial.py, test_code_hack_monitor.py in both
-#   reward modes, the code_reward.py self-test, the Python >= 3.13 refusal, and (when that copy
-#   is reachable) that the lux verification's vendored code_exec_server.py matches this one.
+#   reward modes, the code_reward.py self-test, test_eval_code_ckpt.py (offline), the Python >= 3.13
+#   refusal, and (when that copy is reachable) that the lux verification's vendored
+#   code_exec_server.py matches this one.
 #
 #   bash examples/instella_think/test_grader.sh
 #   GRADER_PYTHON=/path/to/venv/bin/python bash ...   # interpreter for programs (numpy cases need numpy)
@@ -37,6 +38,7 @@ refuses_313() {
 }
 step "lux server copy" lux_copy
 step "refuses Python 3.13" refuses_313
+step "eval_code_ckpt summary" python3 "$HERE/test_eval_code_ckpt.py"
 
 PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
 python3 "$HERE/code_exec_server.py" --host 127.0.0.1 --port "$PORT" --workers "$WORKERS" --max-timeout 10 \
