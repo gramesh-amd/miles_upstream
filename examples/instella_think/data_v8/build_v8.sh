@@ -12,7 +12,9 @@
 # Steps (--from STEP resumes; every step is resumable on its own): fetch refs cands verify fn assemble decontam finalize.
 # SANDBOX_URLS: code_exec_server.py base URLs without the token; the token comes from CODE_EXEC_TOKEN or the file
 # CODE_EXEC_TOKEN_FILE (default ~/.code-exec-token) and is never printed. verify runs one shard per URL, then a second
-# pass that retries the rows a sandbox error dropped. WORKERS: request threads per shard (default 32).
+# pass that retries the rows a sandbox error dropped; the build stops if any row is still dropped that way, or if
+# any step or shard fails. Each sandbox's /health is checked first. WORKERS: request threads per shard (default 32).
+# --from verify and --from fn need neither --union nor --clusters.
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FROM=fetch STATUS="" DEDUP="" UNION="" CLUSTERS="" CARRY="" EVAL_ITEMS="" EVAL_HASHES="" LC_POOL="" LC_REFS="" CW_POOL=""
@@ -29,7 +31,7 @@ while [ $# -gt 0 ]; do
     --leetcode-refs) LC_REFS=$2 ;;
     --codewars-pool) CW_POOL=$2 ;;
     --legacy-dedup) DEDUP=$2 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0"; exit 0 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
   shift 2
@@ -42,11 +44,25 @@ for i in "${!STEPS[@]}"; do [ "${STEPS[$i]}" = "$FROM" ] && start=$i; done
 [ $start -ge 0 ] || { echo "--from must be one of: ${STEPS[*]}" >&2; exit 2; }
 need() { local v n; for v in "$@"; do n=${v%%:*}; [ -n "${!n}" ] || { echo "missing --${v#*:}" >&2; exit 2; }; done; }
 runs() { local i; for i in "${!STEPS[@]}"; do [ "${STEPS[$i]}" = "$1" ] && [ $i -ge $start ] && return 0; done; return 1; }
-[ $start -le 4 ] && need UNION:union CLUSTERS:clusters LC_POOL:leetcode-pool LC_REFS:leetcode-refs CW_POOL:codewars-pool
+[ $start -le 2 ] && need UNION:union CLUSTERS:clusters
+[ $start -le 4 ] && need LC_POOL:leetcode-pool LC_REFS:leetcode-refs CW_POOL:codewars-pool
 need CARRY:carry EVAL_ITEMS:eval-items EVAL_HASHES:eval-hashes
+# Paths are relative to the caller's directory; the steps run from this one.
+for v in WORK OUT UNION CLUSTERS CARRY STATUS EVAL_ITEMS EVAL_HASHES LC_POOL LC_REFS CW_POOL DEDUP; do
+  if [ -n "${!v}" ]; then printf -v "$v" '%s' "$(realpath -m -- "${!v}")"; fi
+done
 B=$WORK/build
 mkdir -p "$B" "$OUT"
 cd "$HERE"
+
+# Waits for every pid in PIDS; names the failed ones and stops the build if any failed.
+wait_all() {
+  local what=$1 p failed=0
+  for p in "${PIDS[@]}"; do
+    wait "$p" || { echo "FAILED: $what (${LABEL[$p]})" >&2; failed=1; }
+  done
+  [ $failed -eq 0 ] || exit 1
+}
 
 sandbox_urls() {
   : "${SANDBOX_URLS:?set SANDBOX_URLS (comma-separated code_exec_server.py URLs)}"
@@ -56,6 +72,12 @@ sandbox_urls() {
   local u
   IFS=, read -ra base <<< "$SANDBOX_URLS"
   for u in "${base[@]}"; do URLS+=("${u%/}/$tok"); done
+  local k
+  for k in "${!URLS[@]}"; do
+    # The URL goes through the environment, so the token is in no command line or message.
+    U=${URLS[$k]} python3 -c 'import os, urllib.request; urllib.request.urlopen(os.environ["U"] + "/health", timeout=10)' \
+      2> /dev/null || { echo "sandbox ${base[$k]%/} failed its /health check (down, or a wrong token)" >&2; exit 1; }
+  done
 }
 
 if runs fetch; then
@@ -66,30 +88,43 @@ fi
 if runs refs; then
   python3 build_refs.py --union "$UNION" --clusters "$CLUSTERS" --codewars-pool "$CW_POOL" --work "$WORK"
 fi
+declare -A LABEL
 if runs cands; then
+  PIDS=()
   for s in openr1 hardtests ccplus taco; do
     python3 stdio_cands.py $s --union "$UNION" --clusters "$CLUSTERS" --extract "$WORK/extract" \
       --taco-verified "$WORK/refs/taco_verified.jsonl.gz" --out-dir "$B" &
+    PIDS+=($!); LABEL[$!]="stdio_cands.py $s"
   done
-  wait
+  wait_all cands
 fi
 if runs verify; then
   sandbox_urls
   n=${#URLS[@]}
   for pass in 1 2; do
     for s in openr1 hardtests ccplus taco; do
+      PIDS=()
       for k in "${!URLS[@]}"; do
+        log=$B/verify_$s.s${k}of$n.pass$pass.log
         CODE_EXEC_API_URL=${URLS[$k]} python3 -W ignore stdio_verify.py "$B/cands_$s.jsonl.gz" --out-dir "$B" \
-          --workers "$WORKERS" --shard "$k/$n" > "$B/verify_$s.s${k}of$n.pass$pass.log" 2>&1 &
+          --workers "$WORKERS" --shard "$k/$n" > "$log" 2>&1 &
+        PIDS+=($!); LABEL[$!]="stdio_verify.py $s shard $k/$n pass $pass, see $log"
       done
-      wait
+      wait_all verify
     done
+  done
+  for s in openr1 hardtests ccplus taco; do
+    python3 stdio_verify.py "$B/cands_$s.jsonl.gz" --out-dir "$B" --check \
+      || { echo "FAILED: rows of $s are still dropped by sandbox errors after 2 passes; rerun --from verify" >&2; exit 1; }
   done
 fi
 if runs fn; then
   sandbox_urls
   CODE_EXEC_API_URL=${URLS[0]} python3 -W ignore fn_build.py --leetcode-pool "$LC_POOL" --leetcode-refs "$LC_REFS" \
     --codewars-pool "$CW_POOL" --codewars-refs "$WORK/refs/codewars_refs.json" --out-dir "$B" --workers "$WORKERS"
+  if n_err=$(grep -c ',sandbox_error' "$B/fn_dropped.csv"); then
+    echo "FAILED: $n_err function rows still dropped by sandbox errors; rerun --from fn" >&2; exit 1
+  fi
 fi
 if runs assemble; then
   args=(--build-dir "$B" --carry "$CARRY" --out-dir "$OUT")

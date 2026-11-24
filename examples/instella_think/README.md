@@ -679,7 +679,9 @@ row matched an eval id or the date cutoff).
 | `--legacy-dedup` | the recorded `new_vs_carry_dups.csv`, only for an exact replay |
 
 **Commands.** `SANDBOX_URLS` are `code_exec_server.py` base URLs; the token comes from `CODE_EXEC_TOKEN` or
-`CODE_EXEC_TOKEN_FILE` and is never printed. Steps are resumable; `--from <step>` restarts at one.
+`CODE_EXEC_TOKEN_FILE` and is never printed. Steps are resumable; `--from <step>` restarts at one. The build
+checks each sandbox's `/health` first and stops on any failed step or shard, and when rows are still dropped by
+a sandbox error after the retry pass (stdio: a second verify pass; function slice: a second check of those rows).
 
 ```bash
 cd examples/instella_think/data_v8

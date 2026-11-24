@@ -23,10 +23,12 @@ Per candidate:
      first) to < 50% keeping >= 8 tests, else drop
   8. probes: no constant program may pass every test; a wrong-answer submission that does gets up to 2
      unselected tests it fails and the reference passes, else the row is flagged; the reference is re-checked
-     on the final tests
+     on the final tests. A probe the sandbox fails to run counts as not passing, so the row is kept without it
 Writes OUT/verified_<name>[.s<k>of<n>].jsonl and OUT/dropped_<name>[...].csv. Resumable by pid: a re-run
 skips pids already kept or dropped, except drops caused by the sandbox (RETRYABLE), which are retried; the
-drop file is append-only, so the last line for a pid is its decision.
+drop file is append-only, so the last line for a pid is its decision. A cut-off last line (a killed run) is
+ignored when scanning and removed from this shard's own files before appending. --check verifies nothing
+and exits 1 if some pid is still dropped only for a retryable reason.
 """
 import argparse
 import collections
@@ -502,6 +504,63 @@ def decide(c):
     return rec, None
 
 
+def shard_files(out_dir, kind, name, ext):
+    """<kind>_<name>.<ext> and its shards <kind>_<name>.s<k>of<n>.<ext>, nothing else."""
+    return (glob.glob(os.path.join(out_dir, f"{kind}_{name}.{ext}"))
+            + glob.glob(os.path.join(out_dir, f"{kind}_{name}.s*of*.{ext}")))
+
+
+def complete_lines(path):
+    """The file's newline-terminated lines. A last line without one is a row whose write was cut off
+    (a killed run, or a sibling shard appending right now), so it is left out."""
+    with open(path, "rb") as f:
+        for ln in f:
+            if ln.endswith(b"\n"):
+                yield ln
+
+
+def drop_partial_tail(path):
+    """Cuts a cut-off last line before this run appends to the file, so the next row starts on its own line."""
+    if not os.path.exists(path):
+        return
+    with open(path, "rb+") as f:
+        end = f.seek(0, os.SEEK_END)
+        pos = end
+        while pos > 0:
+            step = min(pos, 1 << 20)
+            f.seek(pos - step)
+            i = f.read(step).rfind(b"\n")
+            if i >= 0:
+                pos = pos - step + i + 1
+                break
+            pos -= step
+        if pos < end:
+            f.truncate(pos)
+
+
+def drops(path):
+    """(pid, reason) of a dropped_*.csv; a cut-off last row (no reason) is left out."""
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            if r.get("pid") and r.get("reason") is not None:
+                yield r["pid"], r["reason"]
+
+
+def unresolved(out_dir, name):
+    """{pid: last reason} of pids neither verified nor dropped for a non-retryable reason."""
+    kept = set()
+    for p in shard_files(out_dir, "verified", name, "jsonl"):
+        kept |= {json.loads(ln)["metadata"]["upstream_pid"] for ln in complete_lines(p)}
+    final, retry = set(), {}
+    for p in shard_files(out_dir, "dropped", name, "csv"):
+        for pid, reason in drops(p):
+            if reason.startswith(RETRYABLE):
+                retry[pid] = reason
+            else:
+                final.add(pid)
+    return {pid: reason for pid, reason in retry.items() if pid not in kept and pid not in final}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cands", help="stdio_cands.py output (cands_<name>.jsonl.gz)")
@@ -509,22 +568,30 @@ def main():
     ap.add_argument("--workers", type=int, default=32)
     ap.add_argument("--limit", type=int, default=0, help="stop after this many candidates (0 = all)")
     ap.add_argument("--shard", default="", help="k/n: only pids with crc32(pid) %% n == k")
+    ap.add_argument("--check", action="store_true",
+                    help="verify nothing; exit 1 if any pid's drops are all retryable (sandbox_error / exception)")
     a = ap.parse_args()
     name = os.path.basename(a.cands).replace("cands_", "").replace(".jsonl.gz", "")
     sk, sn = map(int, a.shard.split("/")) if a.shard else (0, 1)
     suffix = f".s{sk}of{sn}" if a.shard else ""
     out_p = os.path.join(a.out_dir, f"verified_{name}{suffix}.jsonl")
     drop_p = os.path.join(a.out_dir, f"dropped_{name}{suffix}.csv")
-    done = set()
-    for p in glob.glob(os.path.join(a.out_dir, f"verified_{name}*.jsonl")):
-        with open(p) as f:
-            done |= {json.loads(ln)["metadata"]["upstream_pid"] for ln in f}
-    for p in glob.glob(os.path.join(a.out_dir, f"dropped_{name}*.csv")):
-        with open(p) as f:
-            done |= {r["pid"] for r in csv.DictReader(f) if not r["reason"].startswith(RETRYABLE)}
     os.makedirs(a.out_dir, exist_ok=True)
+    if a.check:
+        left = unresolved(a.out_dir, name)
+        for pid, reason in sorted(left.items())[:20]:
+            print(f"unresolved {pid}: {reason}")
+        print(f"{name}: {len(left)} rows still dropped by a sandbox error or exception", flush=True)
+        return 1 if left else 0
+    for p in (out_p, drop_p):
+        drop_partial_tail(p)
+    done = set()
+    for p in shard_files(a.out_dir, "verified", name, "jsonl"):
+        done |= {json.loads(ln)["metadata"]["upstream_pid"] for ln in complete_lines(p)}
+    for p in shard_files(a.out_dir, "dropped", name, "csv"):
+        done |= {pid for pid, reason in drops(p) if not reason.startswith(RETRYABLE)}
     fo = open(out_p, "a")
-    new_drop = not os.path.exists(drop_p)
+    new_drop = not os.path.exists(drop_p) or os.path.getsize(drop_p) == 0
     fd = open(drop_p, "a", newline="")
     w = csv.DictWriter(fd, ["pid", "source", "reason"])
     if new_drop:

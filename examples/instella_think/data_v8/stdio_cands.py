@@ -334,8 +334,10 @@ def main():
     b = Builder(a)
     for s in a.sources:
         pids = set(b.u[b.u.source.isin(UNION_SOURCES[s])].pid)
-        with gzip.open(os.path.join(a.out_dir, f"cands_{s}.jsonl.gz"), "wt") as f:
+        out = os.path.join(a.out_dir, f"cands_{s}.jsonl.gz")
+        with gzip.open(out + ".tmp", "wt") as f:
             getattr(b, s)(f, pids)
+        os.replace(out + ".tmp", out)
         print(s, {k[1]: v for k, v in b.stats.items() if k[0] in (s, "deepcoder_taco", "deepcoder_pi")}, flush=True)
 
 

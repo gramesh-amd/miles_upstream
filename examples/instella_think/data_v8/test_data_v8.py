@@ -19,6 +19,8 @@ sys.path.insert(0, HERE)
 import assemble  # noqa: E402
 import common  # noqa: E402
 import convert_eval_pkl  # noqa: E402
+import decontam  # noqa: E402
+import pandas as pd  # noqa: E402
 import stdio_verify as sv  # noqa: E402
 
 
@@ -156,6 +158,75 @@ class BugFixes(unittest.TestCase):
         self.assertEqual(sv.ref_filter("p", [1] * 7 + [0] * 3, tests, {}), (None, "reference_passes_lt_80pct"))
 
 
+class Resume(unittest.TestCase):
+    def row(self, pid):
+        return json.dumps({"metadata": {"upstream_pid": pid}}) + "\n"
+
+    def test_cut_off_last_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = f"{d}/verified_x.s0of2.jsonl"
+            with open(p, "w") as f:
+                f.write(self.row("a") + self.row("b") + '{"metadata": {"upstr')
+            self.assertEqual([json.loads(ln)["metadata"]["upstream_pid"] for ln in sv.complete_lines(p)], ["a", "b"])
+            sv.drop_partial_tail(p)
+            with open(p) as f:
+                self.assertEqual(f.read(), self.row("a") + self.row("b"))
+            sv.drop_partial_tail(p)
+            with open(p) as f:
+                self.assertEqual(f.read(), self.row("a") + self.row("b"))
+
+    def test_shard_files_and_unresolved(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name, rows in (("verified_x.s0of2.jsonl", self.row("a")), ("verified_x_t.jsonl", self.row("c")),
+                               ("verified_xy.jsonl", self.row("d"))):
+                with open(f"{d}/{name}", "w") as f:
+                    f.write(rows)
+            with open(f"{d}/dropped_x.s1of2.csv", "w") as f:
+                f.write("pid,source,reason\r\n"
+                        "a,s,sandbox_error\r\n"            # kept later
+                        "b,s,sandbox_error\r\n"            # dropped for good on the retry
+                        "b,s,reference_passes_lt_80pct\r\n"
+                        "c,s,exception:KeyError:x\r\n"     # verified only in a trial file
+                        "e,s,sandbox_er")                     # cut off
+            self.assertEqual(sorted(sv.shard_files(d, "verified", "x", "jsonl")), [f"{d}/verified_x.s0of2.jsonl"])
+            self.assertEqual(sv.unresolved(d, "x"), {"c": "exception:KeyError:x"})
+
+
+class Decontam(unittest.TestCase):
+    def test_openr1_id_is_an_id_key(self):
+        row = {"prompt": [{"role": "user", "content": "x"}], "label": "[]",
+               "metadata": {"custom_id": "klear_7", "openr1_id": "1873/A", "statement": "some statement"}}
+        E = pd.DataFrame([{"eval_set": "codeforces", "eval_id": "1873_A", "platform": "codeforces",
+                           "item": "codeforces|1873_A", "text": ""}])
+        hits = decontam.id_hits([decontam.features(row)], E, [])
+        self.assertEqual([(h["custom_id"], h["item"], h["det"]) for h in hits],
+                         [("klear_7", "codeforces|1873_A", "id")])
+        row["metadata"].pop("openr1_id")
+        self.assertEqual(decontam.id_hits([decontam.features(row)], E, []), [])
+
+
+class Finalize(unittest.TestCase):
+    def test_failed_check_leaves_out_untouched(self):
+        good = {"prompt": [{"role": "user", "content": "x"}], "label": "[1, 2, 3]",
+                "metadata": {"custom_id": "v8_a", "v8_origin": "v8_new"}}
+        bad = {**good, "label": "[1]", "metadata": {"custom_id": "v8_b", "v8_origin": "v8_new"}}
+        with tempfile.TemporaryDirectory() as d:
+            with open(f"{d}/drop.txt", "w") as f:
+                f.write("")
+            with open(f"{d}/train.jsonl", "w") as f:
+                f.write("previous\n")
+            for rows, rc in (([good, bad], 1), ([good], 0)):
+                with open(f"{d}/pre.jsonl", "w") as f:
+                    f.writelines(json.dumps(r) + "\n" for r in rows)
+                p = subprocess.run([sys.executable, "-O", f"{HERE}/finalize.py", "--pre", f"{d}/pre.jsonl",
+                                    "--drop", f"{d}/drop.txt", "--out", f"{d}/train.jsonl"],
+                                   capture_output=True, text=True)
+                self.assertEqual(p.returncode, rc, p.stderr)
+                self.assertFalse(os.path.exists(f"{d}/train.jsonl.tmp"))
+                with open(f"{d}/train.jsonl") as f:
+                    self.assertEqual(f.read(), "previous\n" if rc else json.dumps(good, ensure_ascii=False) + "\n")
+
+
 class Assemble(unittest.TestCase):
     def write(self, path, rows):
         with open(path, "w") as f:
@@ -207,6 +278,16 @@ class Assemble(unittest.TestCase):
             rows = list(common.read_jsonl(f"{d}/out/train_pre_decontam.jsonl"))
             self.assertEqual([r["metadata"]["statement"] for r in rows if r["metadata"]["custom_id"] == "v8_x_1"],
                              [b["metadata"]["statement"]])
+
+    def test_trial_files_are_skipped(self):
+        with tempfile.TemporaryDirectory() as d:
+            new = [self.row(f"v8_x_{i}", "v8_x", f"new problem {i} " * 3) for i in range(2)]
+            self.build(d, [self.row("klear_0", "klear", "carry " * 5)],
+                       {"a.s0of1": new, "a_t": [self.row("v8_t_0", "v8_x", "trial problem " * 3)]}, [])
+            p = self.run_assemble(d)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            ids = {r["metadata"]["custom_id"] for r in common.read_jsonl(f"{d}/out/train_pre_decontam.jsonl")}
+            self.assertEqual(ids, {"klear_0", "v8_x_0", "v8_x_1"})
 
     def test_legacy_hash_needs_a_pinned_list(self):
         with tempfile.TemporaryDirectory() as d:

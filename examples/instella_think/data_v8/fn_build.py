@@ -15,7 +15,9 @@ eval scaffolding. Rows that need ListNode / TreeNode helpers are dropped.
 
 A reference (LeetCode: the audited row's `ref`; Codewars: build_refs.py's APPS solutions, <= 6 tried) runs
 with LCB's imports prepended at REF_T. If it fails some tests the problem is kept with only the passed ones
-when >= 80% (and >= 5) pass. Stubs must not pass every test. Writes OUT/fn_rows.jsonl and OUT/fn_dropped.csv.
+when >= 80% (and >= 5) pass. Stubs must not pass every test. Rows whose references all hit a sandbox error
+are checked once more after the first pass; a row still failing that way is dropped as sandbox_error, so
+build_v8.sh fails the build if fn_dropped.csv has any. Writes OUT/fn_rows.jsonl and OUT/fn_dropped.csv.
 """
 import argparse
 import collections
@@ -147,8 +149,15 @@ def main():
     dropped = []
     rows = candidates(a, dropped)
     print("candidates", dict(collections.Counter(r["metadata"]["src"] for r in rows)), flush=True)
+    results = common.pmap(check, rows, a.workers)
+    # A sandbox error is not a verdict: those rows get one more pass, like stdio_verify's second pass.
+    retry = [i for i, (status, _) in enumerate(results) if status == "sandbox_error"]
+    if retry:
+        print(f"retrying {len(retry)} sandbox errors", flush=True)
+        for i, res in zip(retry, common.pmap(check, [rows[i] for i in retry], a.workers), strict=True):
+            results[i] = res
     keep = []
-    for r, (status, stub) in zip(rows, common.pmap(check, rows, a.workers), strict=True):
+    for r, (status, stub) in zip(rows, results, strict=True):
         if status != "ok":
             dropped.append((r["metadata"]["upstream_uid"], r["metadata"]["src"], status))
             continue

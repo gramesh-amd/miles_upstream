@@ -158,7 +158,8 @@ def main():
     S["acecoder_available"], S["acecoder_tier1"], S["acecoder_kept"] = len(ace), len(tier1), len(ace_keep)
     carry = other + ace_keep
 
-    paths = sorted(glob.glob(os.path.join(a.build_dir, "verified_*.jsonl")))
+    # verified_<name>_t.jsonl come from trial subsets (cands_<name>_t.jsonl.gz), not from the build
+    paths = sorted(p for p in glob.glob(os.path.join(a.build_dir, "verified_*.jsonl")) if not p.endswith("_t.jsonl"))
     new = merge_new([(p, rows.scan(p)) for p in paths], a.duplicates)
     S["new_stdio"] = len(new)
     fn = [{"cid": r["metadata"]["custom_id"], "ref": ref, "src": r["metadata"].get("src"), "stmt": statement_of(r)}

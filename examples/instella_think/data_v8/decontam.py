@@ -105,7 +105,8 @@ def features(r):
     elif label and m.get("fn_name") and str(m.get("custom_id", "")).startswith("v8_"):
         calls = [(fn, h64(a + "\x00" + x)) for fn, a, x in fn_calls(label, m["fn_name"]) if len(a) + len(x) >= 12]
     return {"cid": m["custom_id"], "g": (grams(ws, 8), grams(ws, 13)), "url": m.get("url") or "",
-            "upstream_pid": m.get("upstream_pid") or "", "io": io, "is_io": bool(label and isinstance(label[0], dict)),
+            "upstream_pid": m.get("upstream_pid") or "", "openr1_id": m.get("openr1_id") or "",
+            "io": io, "is_io": bool(label and isinstance(label[0], dict)),
             "calls": calls, "date": m.get("date") or m.get("date_eff") or m.get("cf_date")}
 
 
@@ -163,6 +164,9 @@ def id_hits(rows, E, ev):
     hits = []
     for r in rows:
         keys = set()
+        # carry-over rows from open-r1 Codeforces keep their problem id only here (no url, no upstream_pid)
+        if r["openr1_id"]:
+            keys.add("cf:" + r["openr1_id"])
         for s in (r["url"], r["upstream_pid"]):
             for a, b in CF_URL.findall(s):
                 keys.add(f"cf:{a}/{b.upper()}")
