@@ -20,6 +20,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol, plus LCB v5/v6, HumanEval/MBPP Pro, CRUXEval and Codeforces. |
 | `validate_code_benchmarks.py` | Grades reference / always-wrong answers and old eval dumps against the bench sandbox. |
+| `eval_code_ckpt.py` / `eval_code_ckpt.sh` | Offline benchmark eval of a saved checkpoint: export, serve, generate and grade, with `summary.json` per run. `eval_code_wandb.py` logs it to W&B; `test_eval_code_ckpt.py` tests the scoring. See "Offline checkpoint evals". |
 | `difficulty_filter.py` | OLMo 3 offline difficulty filter: 8 rollouts per prompt from the starting checkpoint, graded by the run's own reward (`--task code`: `code_reward.train_all_pass`, which counts a full-reward sample, checker rows and strict asserts included), drops prompts solved more than 62.5% of the time. `--task code` or `--task math`. Resumable. |
 | `prefilter.sh` | Runs the filter on a node: `serve` (sglang with the rollout engine's settings), `filter`, `status`, `stop`. See "Optional: difficulty-prefilter the training set". |
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`); `OVERLONG_FILTER_DROP_UNCLOSED=1` also drops samples that stopped without closing `</think>`. |
@@ -423,6 +424,66 @@ Both LCB and Codeforces test files are parsed whole and cached by the sandbox
 `validate_code_benchmarks.py` grades reference answers (Pro canonical solutions, CRUXEval gold,
 accepted Python Codeforces submissions), always-wrong answers, and an old eval dump against
 the sandbox.
+
+### Offline checkpoint evals
+
+`eval_code_ckpt.py` scores a saved checkpoint outside training, against any sglang server
+(`--api openai` for vLLM or another `/v1/completions` server). By default it runs HumanEval+,
+MBPP+ and LiveCodeBench v3, v5 and v6 (1,608 problems), 4 samples each at temperature 0.6,
+top_p 0.95, up to 32768 new tokens in a 36864-token context. Prompts use the model's chat
+template, and grading is the in-training benchmark path (`code_reward._bench_answer`,
+`_bench_code`, `bench_pass`) on the bench sandbox. Before generating anything, it checks that
+the sandbox's `max_tests` covers the largest problem in the chosen sets (103 tests in LCB v3).
+
+`eval_code_ckpt.sh` does the rest on a node that is not training. It converts the torch_dist
+checkpoint with `tools/convert_torch_dist_to_hf.py --model-name deepseekv3 --vocab-size <base
+vocab_size>`, then serves it with the rollout's numerics: triton attention, no shared-expert
+fusion, fp32 lm_head, FarSkip reference layer and aiter. The default layout is one replica per
+GPU (`TP=1 DP=8`).
+
+```bash
+$I/cluster/code_exec.sh start bench                                       # login node
+$I/cluster/on_node.sh $J $NODE eval_code_ckpt.sh CKPT=<run dir>/iter_0000400 export
+$I/cluster/on_node.sh $J $NODE eval_code_ckpt.sh HF=<run dir>/iter_0000400_hf serve
+$I/cluster/on_node.sh $J $NODE eval_code_ckpt.sh status                   # wait for health OK
+$I/cluster/on_node.sh $J $NODE eval_code_ckpt.sh HF=<run dir>/iter_0000400_hf eval
+$I/cluster/on_node.sh $J $NODE eval_code_ckpt.sh HF=<run dir>/iter_0000400_hf status   # "done: .../summary.json"
+$I/cluster/on_node.sh $J $NODE eval_code_ckpt.sh stop
+```
+
+Elsewhere, against a server you started yourself:
+
+```bash
+CODE_BENCH_API_URL=$($I/cluster/code_exec.sh url bench) python3 $I/eval_code_ckpt.py \
+  --model <HF dir> --url http://127.0.0.1:30000 --bench-dir $CODE_BENCH_DIR --out <dir>
+```
+
+Outputs go to `OUT` (default `$LOG_DIR/code-evals/<HF dir name>`):
+- `gen.jsonl.gz`: every generation, written before grading.
+- `graded.jsonl.gz`: one record per sample, with `correct`, `reason` (`no_code`, `api_error` or
+  `gen_error`), `ntok` and `truncated`.
+- `summary.json`: per set, pass@1/2/4, solved_all/none, truncation and no-`</think>` rates,
+  length stats, `acc_when_finished`, `by_difficulty`, `by_route` and `per_problem`. It also has
+  `lcb_v5v6`, the pass@1 over both sets' problems (so weighted by problem count), and the
+  `gen_errors` / `api_errors` totals.
+
+A sample the sandbox still can't grade after 3 retries counts as wrong. Report `api_errors`
+next to the scores, because they should be 0. `--regrade-from <dir>/gen.jsonl.gz --out <new
+dir>` rescores saved generations without the model, e.g. after a grader change; compare its
+`graded.jsonl.gz` with the old one per `(ds, pi, k)`. `eval_code_wandb.py --summary
+<dir>/summary.json --step <training step> --project <project> --run-name <run>-offline_eval`
+adds the scores to a W&B series keyed by `train/step`.
+
+Reference, the RL starting point (pass@1, n=4, T=0.6, 32k):
+
+| model | HumanEval+ | MBPP+ | LCB v5 | LCB v6 | LCB v5+v6 |
+|---|---|---|---|---|---|
+| Instella-MoE-16B-A3B-DPO | 0.8948 | 0.6323 | 0.5341 | 0.4829 | 0.5143 |
+
+The training reward deliberately grades differently from this eval. It requires a clean
+`<think>...</think>`, caps tests at `CODE_MAX_TESTS`, gives each test 5 s (`CODE_EXEC_TIMEOUT`),
+applies strict asserts, and pays at `CODE_REWARD_PASS_THRESHOLD`. The eval follows oe-eval
+instead: it applies none of those, and uses every test with the benchmark's own timeouts.
 
 ### Grader and reward
 
