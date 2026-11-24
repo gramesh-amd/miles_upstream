@@ -25,6 +25,11 @@ Continuous async rollout worker started
 * Loop keeps up to `--rollout-batch-size` tasks in flight using `generate_and_rm_group`.
 * Completed groups are pushed into a queue; caller drains until it has enough samples. Groups drained
   beyond the batch are kept, in completion order, for the next call (`rollout/async/carried_over_groups`).
+  Staleness (`--max-weight-staleness`) is checked when a group is consumed, not when it completes.
+* Backpressure: while the completed but unconsumed groups (queued plus carried over) number at least
+  `--async-data-buffer-capacity-factor` (default 6.0) x `--rollout-batch-size`, the worker submits no new
+  groups. Groups already in flight still finish, so the backlog can exceed the cap by at most the in-flight
+  count (`--async-max-concurrent-samples / --n-samples-per-prompt`, or `--rollout-batch-size` if unset).
 * Worker is stopped automatically at process exit.
 
 ## Limitations

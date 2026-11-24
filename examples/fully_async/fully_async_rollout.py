@@ -125,14 +125,17 @@ class AsyncRolloutWorker:
         self.running = True
         self.output_queue = queue.Queue(maxsize=1000)  # Continuous output queue
         # Groups drained from output_queue but not consumed by the rollout step that drained them,
-        # in completion order; the next step takes them first. Only the rollout step touches it.
+        # in completion order; the next step takes them first. Only the rollout step mutates it.
         self.pending_groups: deque[tuple[int, list[Sample]]] = deque()
+        factor = getattr(args, "async_data_buffer_capacity_factor", 6.0)
+        self.buffer_capacity = max(1, int(factor * args.rollout_batch_size))
+        self.poll_interval_s = 1.0
         self.worker_thread = None
         self.state = GenerateState(args)
 
     async def continuous_worker_loop(self):
         """Continuous work loop - constantly get data from data_buffer and process"""
-        print("Continuous async rollout worker started")
+        print(f"Continuous async rollout worker started (buffer capacity {self.buffer_capacity} groups)")
 
         active_tasks = set()
         if self.args.async_max_concurrent_samples is not None:
@@ -153,8 +156,14 @@ class AsyncRolloutWorker:
                             print(f"Task failed with exception: {e}")
                     active_tasks -= done_tasks
 
-                # If active task count hasn't reached limit, try to get new data and start tasks
-                while len(active_tasks) < max_concurrent_tasks and self.running:
+                # If active task count hasn't reached limit, try to get new data and start tasks.
+                # Backpressure: while the completed-but-unconsumed backlog is at capacity, wait for
+                # the trainer instead of generating groups that would only grow stale.
+                while (
+                    len(active_tasks) < max_concurrent_tasks
+                    and self.running
+                    and self.buffered_groups() < self.buffer_capacity
+                ):
                     samples = self.data_buffer.get_samples(1)
 
                     for group in samples:
@@ -184,11 +193,11 @@ class AsyncRolloutWorker:
                         break
 
                 # Brief sleep to avoid busy waiting
-                await asyncio.sleep(1)
+                await asyncio.sleep(self.poll_interval_s)
 
             except Exception as e:
                 print(f"Error in continuous worker loop: {e}")
-                await asyncio.sleep(1)
+                await asyncio.sleep(self.poll_interval_s)
 
         if active_tasks:
             print(f"Waiting for {len(active_tasks)} continuous tasks to complete...")
@@ -228,6 +237,10 @@ class AsyncRolloutWorker:
     def get_queue_size(self) -> int:
         """Get current output queue size"""
         return self.output_queue.qsize()
+
+    def buffered_groups(self) -> int:
+        """Completed groups not yet consumed: queued plus carried over from earlier steps."""
+        return self.output_queue.qsize() + len(self.pending_groups)
 
 
 async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource) -> list[list[Sample]]:

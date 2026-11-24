@@ -211,6 +211,7 @@ ROLLOUT_ARGS=(
    --global-batch-size "${GLOBAL_BATCH_SIZE:-256}"
    --balance-data
    --async-max-concurrent-samples "${ASYNC_MAX_CONCURRENT:-512}"
+   --async-data-buffer-capacity-factor "${ASYNC_BUFFER_CAPACITY_FACTOR:-6}"
    --max-weight-staleness "${MAX_WEIGHT_STALENESS:-4}"
    --num-rollout "${NUM_ROLLOUT:-3000}"
 )

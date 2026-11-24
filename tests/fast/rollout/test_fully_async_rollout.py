@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import queue
+import time
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -139,3 +140,78 @@ def test_aborted_leftover_is_recycled_once_and_not_trained(rollout):
     assert metrics["rollout/async/aborted_groups"] == 1
     assert [g[0].index for g in buffer.added] == [2]
     assert not worker.pending_groups
+
+
+class FakeDataSource(FakeBuffer):
+    """Serves recycled groups first, then fresh prompts with increasing indices."""
+
+    def __init__(self):
+        super().__init__()
+        self.next_index = 0
+
+    def get_samples(self, num_samples):
+        out = []
+        for _ in range(num_samples):
+            if self.added:
+                out.append(self.added.pop(0))
+            else:
+                out.append(make_group(self.next_index))
+                self.next_index += 1
+        return out
+
+
+def test_backlog_stays_bounded_when_production_outruns_consumption(monkeypatch):
+    module = load_rollout_module()
+    engine_version = {"v": 0}
+    attempts = []
+
+    async def generate(args, group, sampling_params, evaluation):
+        attempts.append(id(group))
+        for s in group:
+            s.weight_versions = [str(engine_version["v"])]
+        return group
+
+    async def current_version(_args):
+        return engine_version["v"]
+
+    monkeypatch.setattr(module, "generate_and_rm_group", generate)
+    monkeypatch.setattr(module, "GenerateState", lambda args: SimpleNamespace(sampling_params={}))
+    monkeypatch.setattr(module._cached_version, "get", current_version)
+
+    # 6 groups in flight per poll against a consumer that takes 2 per step.
+    args = make_args(
+        max_weight_staleness=4,
+        async_max_concurrent_samples=6 * N,
+        n_samples_per_prompt=N,
+        sglang_server_concurrency=64,
+        rollout_num_gpus=1,
+        rollout_num_gpus_per_engine=1,
+        async_data_buffer_capacity_factor=2.0,
+    )
+    source = FakeDataSource()
+    worker = module.AsyncRolloutWorker(args, source)
+    worker.poll_interval_s = 0.002
+    monkeypatch.setattr(module, "get_global_worker", lambda args, data_buffer: worker)
+    worker.start()
+
+    max_concurrent = args.async_max_concurrent_samples // N
+    trained, max_backlog, staleness = [], 0, []
+    try:
+        for rollout_id in range(40):
+            time.sleep(0.02)
+            max_backlog = max(max_backlog, worker.buffered_groups())
+            data, metrics = step(module, args, source, rollout_id)
+            staleness += [engine_version["v"] - group[0].oldest_weight_version for group in data]
+            trained += data
+            engine_version["v"] += 1
+    finally:
+        worker.stop()
+
+    assert worker.buffer_capacity == 4
+    assert max_backlog <= worker.buffer_capacity + max_concurrent
+    assert max(staleness) <= args.max_weight_staleness
+    assert len({group[0].index for group in trained}) == len(trained)
+    # Every generated group is trained, recycled to the source, or still buffered; none is lost.
+    leftover = [g for _, g in worker.pending_groups] + [g for _, g in worker.get_completed_groups()]
+    assert len(attempts) == len(trained) + len(source.added) + len(leftover)
+    assert {id(g) for g in trained}.isdisjoint(id(g) for g in leftover)

@@ -291,6 +291,7 @@ All are `VAR=VALUE` overrides to `cluster/launch.sh`; defaults leave the recipe 
 |---|---|---|
 | `ROLLOUT_TEMPERATURE` | 1 | Training sampling temperature. On math, the DPO base fell from pass@1 0.771 at 0.8 to 0.454 at 1.1. |
 | `OVER_SAMPLING_BATCH_SIZE` | 64 | Must be at least `ROLLOUT_BATCH_SIZE`; miles refuses to start otherwise. |
+| `ASYNC_BUFFER_CAPACITY_FACTOR` | 6 | Backpressure: the async worker submits no new groups while this many times `ROLLOUT_BATCH_SIZE` completed groups are waiting to be consumed. |
 | `MAX_TOKENS_PER_GPU` | 8192 | Trainer dynamic-batching budget per microbatch. |
 | `RECOMPUTE` | full | Activation recompute: `full`, `selective` or `none`. With `full`, `RECOMPUTE_METHOD` (uniform) and `RECOMPUTE_NUM_LAYERS` (1); `block` with N recomputes only the first N layers. |
 | `ADVANTAGE_ESTIMATOR` | grpo | `gspo` only differs when there is more than one optimizer step per rollout. |
@@ -569,7 +570,10 @@ In W&B (`rollout/step` axis for `rollout/*`), besides miles' own `rollout/*`, `e
   `zero_std`, so expect a larger dropped share than under `partial`.
 - `rollout/async/carried_over_groups`: completed groups beyond this step's batch, which lead the next
   step's batch (staleness is checked when they are used). They and the groups recycled into the
-  data-source buffer are held in memory only and are not restored on resume.
+  data-source buffer are held in memory only and are not restored on resume. The worker stops
+  submitting new groups while the completed, unconsumed backlog is at least
+  `ASYNC_BUFFER_CAPACITY_FACTOR` (default 6) x `ROLLOUT_BATCH_SIZE` groups
+  (`--async-data-buffer-capacity-factor`); in-flight groups still finish.
 - `rollout/retire/*` (`RETIRE_SOLVED=1`): `n_retired` prompts currently retired, and since the last step
   `skipped` draws, `returned` retired prompts served, `newly_retired` and `reactivated`.
 - `train/entropy_loss`: the policy entropy on training tokens. A steady fall is the
