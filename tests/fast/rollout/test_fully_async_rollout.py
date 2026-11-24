@@ -215,3 +215,21 @@ def test_backlog_stays_bounded_when_production_outruns_consumption(monkeypatch):
     leftover = [g for _, g in worker.pending_groups] + [g for _, g in worker.get_completed_groups()]
     assert len(attempts) == len(trained) + len(source.added) + len(leftover)
     assert {id(g) for g in trained}.isdisjoint(id(g) for g in leftover)
+
+
+def test_frac_mastered_counts_prefixed_reasons(rollout, monkeypatch):
+    from miles.rollout.filter_hub.base_types import DynamicFilterOutput
+
+    module, worker = rollout
+    reasons = {0: "overlong_mastered_7of8", 1: "mastered_8of8", 2: "zero_std_0.0"}
+
+    def dynamic_filter(args, group, **kwargs):
+        reason = reasons.get(group[0].index)
+        return DynamicFilterOutput(keep=reason is None, reason=reason)
+
+    monkeypatch.setattr(module, "load_function", lambda path: dynamic_filter)
+    args, buffer = make_args(dynamic_sampling_filter_path="f"), FakeBuffer()
+    worker.complete(*(make_group(i) for i in range(5)))
+    data, metrics = step(module, args, buffer)
+    assert indices(data) == [3, 4]
+    assert metrics["rollout/dynamic_filter/frac_mastered"] == 2 / 5

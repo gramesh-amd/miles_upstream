@@ -433,7 +433,10 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
         metrics["rollout/dynamic_filter/frac_kept"] = accepted_groups / filtered
         for reason, count in dynamic_filter_drop_reasons.items():
             metrics[f"rollout/dynamic_filter/frac_{reason}"] = count / filtered
-        mastered = sum(c for r, c in dynamic_filter_drop_reasons.items() if r.startswith("mastered"))
+        # Wrapping filters prefix the inner reason (overlong_mastered_7of8 under OVERLONG_FILTER=1).
+        mastered = sum(
+            c for r, c in dynamic_filter_drop_reasons.items() if r.removeprefix("overlong_").startswith("mastered")
+        )
         if mastered:
             metrics["rollout/dynamic_filter/frac_mastered"] = mastered / filtered
     if staleness_values:
