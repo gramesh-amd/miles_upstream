@@ -50,6 +50,10 @@ from pathlib import Path
 # "eval 39: {'eval/ifeval': 0.41, ...}" -- the id is the rollout_id == checkpoint iteration.
 EVAL_LINE = re.compile(r"eval (\d+): (\{.*\})\s*$")
 ITER_DIR = re.compile(r"^iter_(\d+)$")
+# The dict is a python repr of whatever the metrics aggregator held, and numpy scalars repr as
+# `np.float64(0.81)` under numpy >= 2. That is a call node, so literal_eval raises on the WHOLE line
+# and every score on it is silently dropped, leaving the best checkpoints to recency pruning.
+NUMPY_SCALAR = re.compile(r"np\.(?:float|int|uint|bool_?)[0-9_]*\(([^()]*)\)")
 DEFAULT_METRICS = ("eval/ifeval", "eval/ifbench")
 
 
@@ -67,7 +71,7 @@ def parse_scores(log_paths: list[Path], metrics: tuple[str, ...]) -> dict[int, f
                 continue
             try:
                 # The log holds a python repr (single quotes), not JSON.
-                d = ast.literal_eval(m.group(2))
+                d = ast.literal_eval(NUMPY_SCALAR.sub(r"\1", m.group(2)))
             except Exception:
                 continue
             if not isinstance(d, dict):
