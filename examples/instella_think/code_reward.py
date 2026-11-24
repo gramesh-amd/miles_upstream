@@ -111,15 +111,25 @@ _BENCH_API_URL = os.environ.get("CODE_BENCH_API_URL", "").strip().rstrip("/") or
 
 
 def redact_url(text) -> str:
-    """`text` with the sandbox URLs' secret path (http://host:port/<token>) replaced by <token>.
+    """`text` with the sandbox URLs' secrets replaced by <token>: the path (http://host:port/<token>,
+    unless the URL has a query), each path segment of 8+ characters on its own, and every query
+    value (?token=...).
     requests' exception messages quote the request path, so every log line that can carry a
     sandbox URL or exception goes through this."""
     s = str(text)
+    secrets = set()
     for url in (_API_URL, _BENCH_API_URL, os.environ.get("CODE_EXEC_API_URL", ""),
                 os.environ.get("CODE_BENCH_API_URL", "")):
-        secret = urllib.parse.urlsplit(url.strip()).path.strip("/") if "://" in url else ""
-        if secret:
-            s = s.replace(secret, "<token>")
+        if "://" not in url:
+            continue
+        parts = urllib.parse.urlsplit(url.strip())
+        path = parts.path.strip("/")
+        if not parts.query:
+            secrets.add(path)
+        secrets.update(seg for seg in path.split("/") if len(seg) >= 8)
+        secrets.update(v for _, v in urllib.parse.parse_qsl(parts.query))
+    for secret in sorted(filter(None, secrets), key=len, reverse=True):
+        s = s.replace(secret, "<token>")
     return s
 
 

@@ -412,6 +412,32 @@ def test_mirror_parity():
     return fails, total
 
 
+def test_redact_url():
+    """Sandbox tokens never survive redact_url, whatever form the URL takes."""
+    saved = code_reward._API_URL, code_reward._BENCH_API_URL
+    env = {k: os.environ.pop(k) for k in ("CODE_EXEC_API_URL", "CODE_BENCH_API_URL") if k in os.environ}
+    cases = [
+        ("http://h:1/tok0123456789/", "GET http://h:1/tok0123456789/health 503", "GET http://h:1/<token>/health 503"),
+        ("http://h:1/seg0123456a/seg0123456b", "bad seg0123456b and seg0123456a/seg0123456b",
+         "bad <token> and <token>"),
+        ("http://h:1/run?token=q0123456789", "url http://h:1/run?token=q0123456789 refused q0123456789",
+         "url http://h:1/run?token=<token> refused <token>"),
+    ]
+    fails = total = 0
+    try:
+        for url, text, want in cases:
+            code_reward._API_URL = code_reward._BENCH_API_URL = url
+            total += 1
+            got = code_reward.redact_url(text)
+            fails += got != want
+            print(f"{'ok  ' if got == want else 'FAIL'} redact_url: {got!r}"
+                  + (f" want {want!r}" if got != want else ""))
+    finally:
+        code_reward._API_URL, code_reward._BENCH_API_URL = saved
+        os.environ.update(env)
+    return fails, total
+
+
 def main():
     fails = total = 0
     for name, code, want in SCAN:
@@ -426,6 +452,8 @@ def main():
     f, t = test_thread_pool()
     fails, total = fails + f, total + t
     f, t = test_mirror_parity()
+    fails, total = fails + f, total + t
+    f, t = test_redact_url()
     fails, total = fails + f, total + t
     if not URL:
         print(f"{total - fails}/{total} passed (no server; set CODE_EXEC_TEST_URL for the server checks)")

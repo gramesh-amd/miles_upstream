@@ -112,10 +112,18 @@ export CODE_MAX_TESTS="${CODE_MAX_TESTS:-32}"
 # The server pads tests past its --max-tests with failures, so a cap below CODE_MAX_TESTS makes
 # rows with more tests unsolvable without any error (e.g. a server at 64 with CODE_MAX_TESTS=128).
 # SKIP_SANDBOX_CHECK=1 for dry runs without a live sandbox.
+# Messages name only scheme://host:port; the token is the URL's path.
 for _url in "${CODE_EXEC_API_URL}" "${CODE_BENCH_API_URL}"; do
-   _cap="$(curl -s -m 10 "${_url}/health" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("max_tests", 0))' 2>/dev/null)"
-   [ "${SKIP_SANDBOX_CHECK:-0}" = "1" ] || [ "${_cap:-0}" -ge "${CODE_MAX_TESTS}" ] || {
-      echo "FATAL: sandbox ${_url%/*}/... max_tests=${_cap:-unreachable} < CODE_MAX_TESTS=${CODE_MAX_TESTS}" >&2; exit 1; }
+   _url="${_url%/}"
+   _site="${_url#*://}"; _site="${_url%%://*}://${_site%%[/?#]*}"
+   [ "${SKIP_SANDBOX_CHECK:-0}" = "1" ] && continue
+   _cap="$(curl -s -m 10 "${_url}/health" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("max_tests", "none"))' 2>/dev/null)"
+   case "${_cap}" in
+      "") echo "FATAL: sandbox ${_site}/<token> unreachable (no /health answer)" >&2; exit 1 ;;
+      none) echo "FATAL: sandbox ${_site}/<token> is too old (no max_tests in /health); restart it from this tree" >&2; exit 1 ;;
+   esac
+   [ "${_cap}" -ge "${CODE_MAX_TESTS}" ] || {
+      echo "FATAL: sandbox ${_site}/<token> max_tests=${_cap} < CODE_MAX_TESTS=${CODE_MAX_TESTS}" >&2; exit 1; }
 done
 # binary: 1 iff pass rate >= CODE_REWARD_PASS_THRESHOLD (1.0 = every test; 0.99 only differs
 # from it when CODE_MAX_TESTS >= 100). partial: the pass rate. Legacy CODE_PARTIAL_CREDIT=1/0
