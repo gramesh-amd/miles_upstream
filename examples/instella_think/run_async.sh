@@ -556,6 +556,23 @@ fi
 if [ "${OVERLONG_FILTER_DROP_UNCLOSED:-0}" = "1" ] && [ "${OVERLONG_FILTER:-0}" != "1" ]; then
    echo "ERROR: OVERLONG_FILTER_DROP_UNCLOSED=1 has no effect without OVERLONG_FILTER=1." >&2; exit 1
 fi
+# RETIRE_SOLVED=1: a prompt whose last group scored every sample >= RETIRE_SOLVED_MIN_REWARD is
+# skipped when drawn, except a RETIRE_RETURN_FRAC share of draws (retire_solved.py). Its filter
+# records each group's outcome and leaves keep/drop to RETIRE_INNER_DYNAMIC_FILTER, by default the
+# dynamic filter resolved above (overlong, adaptive or stock), so no other filter is dropped.
+if [ "${RETIRE_SOLVED:-0}" = "1" ]; then
+   case " ${EXTRA_ARGS:-} " in *" --dynamic-sampling-filter-path "*|*" --data-source-path "*)
+      echo "ERROR: RETIRE_SOLVED=1 needs its own filter and data source; set RETIRE_INNER_DYNAMIC_FILTER instead of passing them in EXTRA_ARGS." >&2
+      exit 1 ;;
+   esac
+   for i in "${!ROLLOUT_ARGS[@]}"; do
+      if [ "${ROLLOUT_ARGS[$i]}" = "--dynamic-sampling-filter-path" ]; then
+         RETIRE_INNER_DYNAMIC_FILTER="${RETIRE_INNER_DYNAMIC_FILTER:-${ROLLOUT_ARGS[$((i + 1))]}}"
+         ROLLOUT_ARGS[$((i + 1))]=retire_solved.retire_solved_filter
+      fi
+   done
+   ROLLOUT_ARGS+=(--data-source-path retire_solved.RetireSolvedDataSource)
+fi
 
 # ROUTER_OFF=1: no router training signal at all -- aux loss 0, no load balancing, frozen
 # expert bias. Appended to MODEL_ARGS so they win over model_args.sh's pretraining values
@@ -656,6 +673,7 @@ if [ "${OBSERVE_ENTROPY:-1}" = "1" ]; then
    GRPO_ARGS+=(--observe-training-entropy)
 fi
 # Rollout log hooks, all returning False so miles' own rollout metrics still run:
+#   retire_solved.py          rollout/retire/* under RETIRE_SOLVED=1
 #   per_domain_logger.py      rollout/domain/<key>/<domain>/* for PER_DOMAIN_KEYS (default route, src,
 #                             src_route): solve/pass rate, lengths, truncation, all/none-solved
 #                             groups over every graded sample; PER_DOMAIN_METRICS=0 disables
@@ -664,6 +682,7 @@ fi
 # miles keeps only the last --custom-rollout-log-function-path, so two or more go through
 # rollout_log_chain.py, which reads the list from ROLLOUT_LOG_HOOKS (runtime env below).
 _hooks=()
+if [ "${RETIRE_SOLVED:-0}" = "1" ]; then _hooks+=(retire_solved.log_rollout_data); fi
 if [ "${PER_DOMAIN_METRICS:-1}" = "1" ]; then _hooks+=(per_domain_logger.log_per_domain_metrics); fi
 if [ -n "${CUSTOM_ROLLOUT_LOG_PATH:-}" ]; then _hooks+=("${CUSTOM_ROLLOUT_LOG_PATH}"); fi
 ROLLOUT_LOG_HOOKS="$(IFS=,; echo "${_hooks[*]}")"
@@ -1086,6 +1105,10 @@ RUNTIME_ENV_JSON="{
     \"OVERLONG_INNER_DYNAMIC_FILTER\": \"${OVERLONG_INNER_DYNAMIC_FILTER}\",
     \"OVERLONG_FILTER\": \"${OVERLONG_FILTER:-0}\",
     \"DRGRPO\": \"${DRGRPO:-0}\",
+    \"RETIRE_SOLVED\": \"${RETIRE_SOLVED:-0}\",
+    \"RETIRE_RETURN_FRAC\": \"${RETIRE_RETURN_FRAC:-0.1}\",
+    \"RETIRE_SOLVED_MIN_REWARD\": \"${RETIRE_SOLVED_MIN_REWARD:-0.999}\",
+    \"RETIRE_INNER_DYNAMIC_FILTER\": \"${RETIRE_INNER_DYNAMIC_FILTER:-}\",
     \"ROUTER_LOG_PATH\": \"${ROUTER_LOG_PATH:-${LOG_DIR}/router_log_${SAVE_TAG}.jsonl}\",
     \"ROUTER_LOG_EVERY\": \"${ROUTER_LOG_EVERY:-5}\",
 ${WANDB_BASE_URL_ENV}    \"ADAPTIVE_FILTER_MAX_PASS\": \"${ADAPTIVE_FILTER_MAX_PASS:-0.75}\",
@@ -1139,7 +1162,7 @@ from miles.utils.misc import load_function
 
 args = parse_args()
 for k, v in sorted(vars(args).items()):
-    is_fn = k.endswith("_path") and k.startswith(("custom_", "rollout_function", "eval_function", "dynamic_"))
+    is_fn = k.endswith("_path") and k.startswith(("custom_", "rollout_function", "eval_function", "dynamic_", "data_source"))
     if is_fn and k != "custom_config_path" and v:
         load_function(v)
         print(f"  import ok  {k} = {v}")

@@ -171,6 +171,9 @@ export OVERLONG_FILTER="${OVERLONG_FILTER:-0}"
 # want; scale the divisor so train/grad_norm at step 0 matches the previous recipe.
 export DRGRPO="${DRGRPO:-0}"
 export DRGRPO_DIVISOR="${DRGRPO_DIVISOR:-}"
+# RETIRE_SOLVED=1: skip prompts solved on every sample of their last visit, returning
+# RETIRE_RETURN_FRAC of them (retire_solved.py; run_async.sh wires it).
+export RETIRE_SOLVED="${RETIRE_SOLVED:-0}"
 export ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-32768}"
 export EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-32768}"
 # Prompt+response budget; raise it above 32768 for longer caps (e.g. CONTEXT_LEN=63488 with
@@ -196,6 +199,7 @@ else _n+=("pass${CODE_REWARD_PASS_THRESHOLD}"); fi
 [ "${CONTEXT_LEN}" = "32768" ] || _n+=("ctx${CONTEXT_LEN}")
 [ "${ROLLOUT_TEMPERATURE:-1}" = "1" ] || _n+=("temp${ROLLOUT_TEMPERATURE}")
 [ "${ADAPTIVE_FILTER:-0}" = "1" ]   && _n+=("adaptive${ADAPTIVE_FILTER_MAX_PASS:-0.75}")
+[ "${RETIRE_SOLVED}" = "1" ]        && _n+=("retire${RETIRE_RETURN_FRAC:-0.1}")
 _g="$(IFS=-; printf '%s' "${_n[*]}")"
 # W&B rejects groups over 128 characters, and run_async.sh appends "-1node-smoke"/"-<N>node". A
 # DRGRPO or OVERLONG_FILTER name gets past that, so keep the readable start and end with a hash.
@@ -290,7 +294,7 @@ for V in SAVE_TAG CUSTOM_RM_PATH CODE_EXEC_TIMEOUT CODE_MAX_TESTS CODE_REWARD_MO
          CODE_STRICT_GRADING CUSTOM_ROLLOUT_LOG_PATH \
          SAVE_INTERVAL EVAL_INTERVAL ROLLOUT_MAX_RESPONSE_LEN DISABLE_STD_NORM USE_ROUTING_REPLAY \
          CONTEXT_LEN PER_TOKEN_LOSS DRGRPO DRGRPO_DIVISOR OVERLONG_FILTER SOLVED_REWARD \
-         ADAPTIVE_FILTER ADAPTIVE_FILTER_MAX_PASS ROLLOUT_TEMPERATURE EXTRA_ARGS; do
+         ADAPTIVE_FILTER ADAPTIVE_FILTER_MAX_PASS RETIRE_SOLVED RETIRE_RETURN_FRAC ROLLOUT_TEMPERATURE EXTRA_ARGS; do
    echo "  ${V}=${!V:-}"
 done
 echo "  eval: ${CODE_BENCH_SETS} (n=${CODE_BENCH_N}) config ${EVAL_CONFIG}"

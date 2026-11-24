@@ -4,7 +4,7 @@ import os
 # RUNTIME_ENV_JSON), so they are invisible in args. Names that can carry credentials are skipped.
 _ENV_VAR_NAMES = ("SLURM_JOB_ID",)
 _ENV_VAR_PREFIXES = ("CODE_", "IF_", "DRGRPO", "OVERLONG_", "ADAPTIVE_FILTER", "SOLVED_REWARD", "PER_DOMAIN_",
-                     "MLA_UNFUSED_ROPE", "SGLANG_USE_AITER")
+                     "RETIRE_", "MLA_UNFUSED_ROPE", "SGLANG_USE_AITER")
 _ENV_VAR_SECRET_MARKERS = ("URL", "TOKEN", "KEY", "SECRET", "PASSWORD")
 
 
