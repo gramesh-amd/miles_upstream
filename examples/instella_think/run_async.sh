@@ -556,11 +556,21 @@ fi
 # skipped when drawn, except a RETIRE_RETURN_FRAC share of draws (retire_solved.py). Its filter
 # records each group's outcome and leaves keep/drop to RETIRE_INNER_DYNAMIC_FILTER, by default the
 # dynamic filter resolved above (overlong, adaptive or stock), so no other filter is dropped.
+# With OVERLONG_FILTER=1 an explicit RETIRE_INNER_DYNAMIC_FILTER runs on the overlong survivors
+# (as OVERLONG_INNER_DYNAMIC_FILTER) instead of replacing the overlong wrapper.
 if [ "${RETIRE_SOLVED:-0}" = "1" ]; then
-   case " ${EXTRA_ARGS:-} " in *" --dynamic-sampling-filter-path "*|*" --data-source-path "*)
+   case " ${EXTRA_ARGS:-} " in *" --dynamic-sampling-filter-path "*|*" --dynamic-sampling-filter-path="*|\
+                               *" --data-source-path "*|*" --data-source-path="*)
       echo "ERROR: RETIRE_SOLVED=1 needs its own filter and data source; set RETIRE_INNER_DYNAMIC_FILTER instead of passing them in EXTRA_ARGS." >&2
       exit 1 ;;
    esac
+   if [ "${OVERLONG_FILTER:-0}" = "1" ] && [ -n "${RETIRE_INNER_DYNAMIC_FILTER:-}" ] \
+         && [ "${RETIRE_INNER_DYNAMIC_FILTER}" != overlong_filter.overlong_dynamic_filter ]; then
+      echo "WARNING: OVERLONG_FILTER=1: RETIRE_INNER_DYNAMIC_FILTER=${RETIRE_INNER_DYNAMIC_FILTER} is applied to the" \
+           "overlong survivors (retire_solved -> overlong_dynamic_filter -> ${RETIRE_INNER_DYNAMIC_FILTER})." >&2
+      OVERLONG_INNER_DYNAMIC_FILTER="${RETIRE_INNER_DYNAMIC_FILTER}"
+      RETIRE_INNER_DYNAMIC_FILTER=overlong_filter.overlong_dynamic_filter
+   fi
    for i in "${!ROLLOUT_ARGS[@]}"; do
       if [ "${ROLLOUT_ARGS[$i]}" = "--dynamic-sampling-filter-path" ]; then
          RETIRE_INNER_DYNAMIC_FILTER="${RETIRE_INNER_DYNAMIC_FILTER:-${ROLLOUT_ARGS[$((i + 1))]}}"

@@ -20,7 +20,7 @@ run_async.sh wires all three under RETIRE_SOLVED=1.
 The worker thread draws prompts while the rollout loop runs the filter, hence _LOCK. The retired set
 and the RNG of the return draws are saved next to miles' dataset state at every checkpoint
 (rollout/retired_solved_<rollout_id>.pt) and restored on resume. Prompts are keyed by
-metadata["custom_id"] (falling back to the prompt text).
+metadata["custom_id"] (falling back to the prompt text), which must therefore be unique.
 """
 
 import collections
@@ -95,12 +95,14 @@ class RetireSolvedDataSource(RolloutDataSourceWithBuffer):
     def __init__(self, args):
         super().__init__(args)
         self._rng = random.Random(getattr(args, "rollout_seed", 0) or 0)
+        self._skip_streak = 0
 
     def get_samples(self, num_samples: int):
         out = self._get_samples_from_buffer(num_samples)
         need = num_samples - len(out)
-        # At most one pass over the dataset is skipped per call: once nearly everything is retired,
-        # retired prompts are served instead of scanning forever.
+        # At most one pass over the dataset is skipped between two active prompts: once nearly
+        # everything is retired, retired prompts are served instead of scanning forever. The streak
+        # spans calls because the async worker draws one group per call.
         budget = len(self.dataset) if self.dataset is not None else 0
         skipped = returned = 0
         while need > 0:
@@ -108,13 +110,16 @@ class RetireSolvedDataSource(RolloutDataSourceWithBuffer):
                 key = _key(group[0])
                 with _LOCK:
                     retired = key in _RETIRED
-                    skip = retired and skipped < budget and self._rng.random() >= RETURN_FRAC
+                    skip = retired and self._skip_streak < budget and self._rng.random() >= RETURN_FRAC
                 if skip:
                     skipped += 1
+                    self._skip_streak += 1
                     continue
                 out.append(group)
                 need -= 1
                 returned += retired
+                if not retired:
+                    self._skip_streak = 0
         if skipped or returned:
             with _LOCK:
                 _COUNTS["skipped"] += skipped

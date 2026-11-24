@@ -144,6 +144,17 @@ def test_all_retired_terminates(tmp_path):
     assert rs._COUNTS["returned"] == 50
 
 
+def test_all_retired_single_draws_scan_at_most_one_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(rs, "RETURN_FRAC", 0.0)
+    args, src = make_source(tmp_path, n_prompts=200)
+    rs._RETIRED.update(s.metadata["custom_id"] for s in src.dataset.samples)
+    out = [src.get_samples(1) for _ in range(5)]
+    assert all(len(g) == 1 for g in out)
+    # One pass is skipped once; later single draws are served, not another pass each.
+    assert rs._COUNTS["skipped"] == 200 and rs._COUNTS["returned"] == 5
+    assert src.epoch_id == 1 and src.sample_group_index == 205
+
+
 def test_save_load_roundtrip_with_rng(tmp_path):
     args, src = make_source(tmp_path)
     visit_all(args, src)

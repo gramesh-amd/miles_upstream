@@ -337,11 +337,17 @@ any sample is active again.
 - Keep/drop is still decided by `RETIRE_INNER_DYNAMIC_FILTER`, which defaults to the filter the run
   would use anyway (`overlong_dynamic_filter` under `OVERLONG_FILTER=1`, else the adaptive or the
   stock one), so turning it on drops no other filter. `run_async.sh` refuses a
-  `--dynamic-sampling-filter-path` or `--data-source-path` in `EXTRA_ARGS` with it.
+  `--dynamic-sampling-filter-path` or `--data-source-path` in `EXTRA_ARGS` with it (either the
+  `--flag value` or the `--flag=value` form). With `OVERLONG_FILTER=1`, an explicit
+  `RETIRE_INNER_DYNAMIC_FILTER` is composed rather than replacing the overlong wrapper: it runs on
+  the overlong survivors (`retire_solved` -> `overlong_dynamic_filter` -> your filter), and the
+  launch prints a warning saying so.
+- Prompts are keyed by `metadata.custom_id` (the prompt text's hash without one), so `custom_id`
+  must be unique across the dataset; prompts sharing one also share their retired state.
 - The retired set and the return-draw RNG are saved with each checkpoint as
   `rollout/retired_solved_<N>.pt` and restored on resume. Groups recycled as stale or aborted skip
-  the check, and if nearly everything is retired a draw serves retired prompts rather than scan
-  the dataset more than once.
+  the check. If nearly everything is retired, at most one pass over the dataset is skipped
+  between two active prompts, across draws; after that, retired prompts are served.
 
 `cluster/lux/specs/code_binary_36k.env` is the binary-reward code recipe with it on (Dr. GRPO,
 `OVERLONG_FILTER=0`, 36k context, 2 trainer + 4 rollout nodes); see `cluster/lux/README.md`.
