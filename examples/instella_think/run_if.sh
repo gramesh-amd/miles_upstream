@@ -14,7 +14,7 @@
 #   fp32 LM head on BOTH sides, dp-attention on, sglang mem-fraction 0.60
 #   dynamic sampling filter check_reward_nonzero_std, over-sampling-batch-size 64
 #
-# These match that run's logged config. Two entries in that config are misleading worth
+# These match that run's logged config. Two entries in that config are misleading and worth
 # knowing about before you "match" them:
 #   * grpo_iterations=2 is NOT a miles setting. It comes from the Primus Megatron fork's
 #     own unused GRPO implementation (training/arguments.py, default 2) and miles

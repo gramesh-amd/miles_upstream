@@ -563,7 +563,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Fully async mode: the worker stops submitting new groups while the completed groups "
                     "not yet consumed by a rollout step (including those carried over from earlier steps) "
                     "number at least this factor times --rollout-batch-size. Groups already generating "
-                    "still finish, so the backlog can exceed the cap by at most the in-flight groups."
+                    "still finish, so the backlog can exceed the cap by roughly the in-flight groups."
                 ),
             )
             parser.add_argument(

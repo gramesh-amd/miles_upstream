@@ -122,6 +122,7 @@ if runs fn; then
   sandbox_urls
   CODE_EXEC_API_URL=${URLS[0]} python3 -W ignore fn_build.py --leetcode-pool "$LC_POOL" --leetcode-refs "$LC_REFS" \
     --codewars-pool "$CW_POOL" --codewars-refs "$WORK/refs/codewars_refs.json" --out-dir "$B" --workers "$WORKERS"
+  [ -f "$B/fn_dropped.csv" ] || { echo "FAILED: fn_build.py wrote no $B/fn_dropped.csv" >&2; exit 1; }
   if n_err=$(grep -c ',sandbox_error' "$B/fn_dropped.csv"); then
     echo "FAILED: $n_err function rows still dropped by sandbox errors; rerun --from fn" >&2; exit 1
   fi

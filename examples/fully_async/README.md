@@ -28,8 +28,9 @@ Continuous async rollout worker started
   Staleness (`--max-weight-staleness`) is checked when a group is consumed, not when it completes.
 * Backpressure: while the completed but unconsumed groups (queued plus carried over) number at least
   `--async-data-buffer-capacity-factor` (default 6.0) x `--rollout-batch-size`, the worker submits no new
-  groups. Groups already in flight still finish, so the backlog can exceed the cap by at most the in-flight
+  groups. Groups already in flight still finish, so the backlog can exceed the cap by roughly the in-flight
   count (`--async-max-concurrent-samples / --n-samples-per-prompt`, or `--rollout-batch-size` if unset).
+  It is a soft bound: groups being handed to a rollout step are briefly counted on neither side.
 * Worker is stopped automatically at process exit.
 
 ## Limitations

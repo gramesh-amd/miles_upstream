@@ -35,6 +35,7 @@ import collections
 import csv
 import glob
 import gzip
+import io
 import json
 import os
 import random
@@ -540,10 +541,10 @@ def drop_partial_tail(path):
 
 def drops(path):
     """(pid, reason) of a dropped_*.csv; a cut-off last row (no reason) is left out."""
-    with open(path, newline="") as f:
-        for r in csv.DictReader(f):
-            if r.get("pid") and r.get("reason") is not None:
-                yield r["pid"], r["reason"]
+    text = b"".join(complete_lines(path)).decode()
+    for r in csv.DictReader(io.StringIO(text, newline="")):
+        if r.get("pid") and r.get("reason") is not None:
+            yield r["pid"], r["reason"]
 
 
 def unresolved(out_dir, name):

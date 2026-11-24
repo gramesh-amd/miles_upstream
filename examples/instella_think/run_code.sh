@@ -245,12 +245,14 @@ fi
 # A dead sandbox does not crash anything: every sample silently scores 0, which reads as
 # a model that cannot code. So it must answer, and score known cases, before launch.
 if [ "${SKIP_REWARD_PREFLIGHT:-0}" != "1" ]; then
-   echo "=== reward preflight (sandbox at ${CODE_EXEC_API_URL%/*}/<token>) ==="
+   _exec_url="${CODE_EXEC_API_URL%/}"
+   _bench_url="${CODE_BENCH_API_URL%/}"
+   echo "=== reward preflight (sandbox at ${_exec_url%/*}/<token>) ==="
    if ! python3 "${SCRIPT_DIR}/code_reward.py"; then
       echo "FATAL: code_reward.py self-test failed. Is the sandbox up? cluster/code_exec.sh status" >&2
       exit 1
    fi
-   echo "=== benchmark preflight (sandbox at ${CODE_BENCH_API_URL%/*}/<token>) ==="
+   echo "=== benchmark preflight (sandbox at ${_bench_url%/*}/<token>) ==="
    # One canonical HumanEval+ solution must pass: proves numpy, the 20 s cap and the route.
    if ! python3 - "${SCRIPT_DIR}" "${CODE_BENCH_DIR}" <<'EOF'
 import json, sys

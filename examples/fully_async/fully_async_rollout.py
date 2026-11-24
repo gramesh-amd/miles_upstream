@@ -1,6 +1,7 @@
 import asyncio
 import atexit
 import logging
+import math
 import queue
 import threading
 import time
@@ -128,6 +129,8 @@ class AsyncRolloutWorker:
         # in completion order; the next step takes them first. Only the rollout step mutates it.
         self.pending_groups: deque[tuple[int, list[Sample]]] = deque()
         factor = getattr(args, "async_data_buffer_capacity_factor", 6.0)
+        if not (math.isfinite(factor) and factor > 0):
+            raise ValueError(f"--async-data-buffer-capacity-factor must be a positive number, got {factor}")
         self.buffer_capacity = max(1, int(factor * args.rollout_batch_size))
         self.poll_interval_s = 1.0
         self.worker_thread = None
