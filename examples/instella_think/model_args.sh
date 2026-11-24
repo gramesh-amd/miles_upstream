@@ -84,7 +84,7 @@ MODEL_ARGS=(
     # non-task signals that move the router every step, perturbing the DPO checkpoint's expert
     # assignment and drifting training routing away from what the rollout engine used. With them
     # on, an earlier math run and an earlier code run both collapsed (length down, evals down);
-    # math R1, identical except for these flags, trained 400 steps without decline.
+    # a math run identical except for these flags trained 400 steps without decline.
     --moe-router-load-balancing-type none
     --moe-aux-loss-coeff 0
     --moe-router-bias-update-rate 0

@@ -14,10 +14,10 @@
 #   fp32 LM head on BOTH sides, dp-attention on, sglang mem-fraction 0.60
 #   dynamic sampling filter check_reward_nonzero_std, over-sampling-batch-size 64
 #
-# These match that run's logged config. Two entries in that config are red herrings worth
+# These match that run's logged config. Two entries in that config are misleading worth
 # knowing about before you "match" them:
 #   * grpo_iterations=2 is NOT a miles setting. It comes from the Primus Megatron fork's
-#     own unused GRPO implementation (training/arguments.py:1892, default 2) and miles
+#     own unused GRPO implementation (training/arguments.py, default 2) and miles
 #     never reads it. There is no --grpo-iterations in miles at all.
 #   * disable_grpo_std_normalization is absent from that config but present in the current
 #     miles parser, i.e. the flag was added after that run. The reference run therefore
@@ -239,7 +239,7 @@ export WANDB_GROUP="${WANDB_GROUP:-${_joined}}"
 
 # --- preflight: disk, because this cadence can fill a SHARED volume -----------------
 # One checkpoint is ~207 GB and this miles implements NO retention (the only mention of
-# save_retain_interval is `args.save_retain_interval = None`, arguments.py:2997 -- nothing
+# save_retain_interval is `args.save_retain_interval = None` in miles/utils/arguments.py -- nothing
 # reads it). At SAVE_INTERVAL=20 over NUM_ROLLOUT=3000 that is 150 checkpoints, ~31 TB, on
 # a volume shared with the team. Rollout dumps add ~150-200 MB/step (~0.5 TB over 3000).
 CKPT_GB=207

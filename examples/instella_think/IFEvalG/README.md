@@ -7,7 +7,7 @@ No modifications were made.
 
 ## Usage
 
-Used by `reward_model.py` to verify IFEval/IFBench constraint satisfaction:
+Used by `if_reward.py` to verify IFEval/IFBench constraint satisfaction:
 
 ```python
 from .IFEvalG import instructions_registry

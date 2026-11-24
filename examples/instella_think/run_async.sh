@@ -1,7 +1,7 @@
 #!/bin/bash
 # Instella-MoE-16B-A3B, fully-async RL on DAPO-Math-17k with AIME eval, max staleness 4.
-# Model/parallelism/sglang specifics are the Instella FarSkip known-good values ported
-# from Instella-MoE/rl. run_code.sh and run_if.sh are task wrappers over this file.
+# Model/parallelism/sglang specifics are the known-good Instella FarSkip values from the
+# earlier Instella-MoE RL setup. run_code.sh and run_if.sh are task wrappers over this file.
 #
 # TWO TOPOLOGIES (fully-async => always disaggregated; colocate is unsupported in train_async):
 #   * SINGLE_NODE=1  smoke test on ONE 8-GPU node: 4 trainer (EP4) + 4 rollout (1 engine EP4/DP4).
@@ -141,7 +141,7 @@ CKPT_ARGS=(
    # --ref-load is NOT a "use a reference model" switch and must stay even though we run with
    # no KL anchor (see GRPO_ARGS): it is where the INITIAL weights come from. On a fresh run
    # --load points at a SAVE_DIR that does not exist yet, so miles falls back to
-   # `args.load = args.ref_load` (utils/arguments.py:2607) and finetune-loads from here.
+   # `args.load = args.ref_load` (miles/utils/arguments.py) and finetune-loads from here.
    --ref-load "${REF_LOAD}"
    --load "${SAVE_DIR}"
    --save "${SAVE_DIR}"
@@ -217,7 +217,7 @@ ROLLOUT_ARGS=(
 )
 
 # Eval sets. EVAL_PROMPT_DATA overrides with space-separated "name path name path" pairs
-# (the CLI form miles wants, arguments.py:995-1003); safe to word-split because none of
+# (the CLI form miles wants for --eval-prompt-data); safe to word-split because none of
 # these paths contain spaces. run_if.sh points this at the IFEval/IFBench sets.
 if [ -n "${EVAL_CONFIG:-}" ]; then
    # A miles eval YAML (eval.datasets with per-set n/temperature/length); run_code.sh
@@ -248,7 +248,7 @@ EVAL_ARGS=(
    # mistaken for a capability loss.
    --eval-temperature "${EVAL_TEMPERATURE:-0.6}"
    --eval-top-p 0.95
-   # Instella's own recipe (HF model card + Instella-MoE/rl eval_config_mopd.yaml) uses
+   # Instella's own recipe (HF model card and its RL eval config) uses
    # temp 0.6 / top_p 0.95 with NO top_k. top_k=20 was a Qwen3 carry-over; -1 disables it.
    --eval-top-k -1
    # Matches Instella's eval_config_{if_thinkrl,mopd}.yaml (max_response_len 32768).
@@ -301,7 +301,7 @@ else
    ROLLOUT_ENGINE_GPUS=8
 fi
 
-# --- trainer parallelism (Instella known-good from Instella-MoE/rl if_rl) -----
+# --- trainer parallelism (Instella known-good values from its earlier IF RL setup) -----
 # Activation recompute: RECOMPUTE=full (default; every layer re-run in backward), selective (only
 # the attention core) or none. Lighter recompute trades memory for ~1/3 less training compute.
 # With full, RECOMPUTE_METHOD=block and RECOMPUTE_NUM_LAYERS=N recompute only the first N layers.
@@ -342,7 +342,7 @@ GRPO_ARGS=(
    # gspo swaps the per-token importance ratio for a per-sequence one. It only differs from
    # grpo with more than one optimizer pass per rollout; at gbs == rbs*nspp the ratio is 1.
    --advantage-estimator "${ADVANTAGE_ESTIMATOR:-grpo}"
-   # No KL anchor (matches Instella-MoE/rl if_rl + mopd, which pass --kl-coef 0 and never
+   # No KL anchor (as in Instella's earlier IF and MOPD RL recipes, which pass --kl-coef 0 and never
    # --use-kl-loss). Both must stay off: miles allocates a reference model whenever
    # `kl_coef != 0 or use_kl_loss` (miles/ray/placement_group.py:157), which costs ~10 GB of
    # pinned HOST ram per rank (variants live on CPU, see miles/utils/tensor_backper.py) and
@@ -350,8 +350,8 @@ GRPO_ARGS=(
    # It does NOT cut peak VRAM -- only one weight set is ever GPU-resident.
    --kl-coef 0
    --entropy-coef 0.00
-   # R3 routing replay (arxiv 2510.11370), verified present in this miles at
-   # arguments.py:1298 -- sglang then returns its expert choices per token
+   # R3 routing replay (arxiv 2510.11370), present in this miles as
+   # --use-rollout-routing-replay -- sglang then returns its expert choices per token
    # (enable_return_routed_experts is auto-set) and the training forward replays them instead
    # of re-routing. This attacks the train/inference mismatch FLOOR: at step 1 the trainer and
    # the engine hold identical weights, yet train_rollout_logprob_abs_diff was already 0.122
@@ -371,46 +371,29 @@ GRPO_ARGS=(
 )
 
 # Routing replay (R3, USE_ROUTING_REPLAY=1): off by default here; run_code.sh and run_if.sh turn it on.
-#   1. Cause of an earlier crash, now repaired. The Megatron on PYTHONPATH is the Primus fork, which
-#      carries FarSkip but never had the R3 hooks, so no Replay was ever registered:
-#      replay_list stayed EMPTY and register_replay_list_moe died on replay_list[0] with
-#      "IndexError: list index out of range". It was never a FarSkip layer
-#      layout problem -- register_replay_list_moe indexes replay_data by GLOBAL layer id, and
-#      sglang does emit num_layers=27 streams (sglang_rollout.py:278 reshapes to
-#      [tokens-1, num_layers, topk] and that reshape succeeded), so layer 0 being dense is
-#      handled correctly. The newer /root/Megatron-LM has the two hooks but no FarSkip, so they
-#      are ported into the Primus fork instead of switching trees (patch_megatron_r3.sh): TopKRouter.__init__ now
-#      registers one Replay per router, and topk_routing_with_score_function routes its topk
-#      through the manager. Verified by a test that records a routing, perturbs the logits by -50 so re-derivation shares zero of 72 picks, and confirms the
-#      replayed routing still follows the recording on every token.
-#   2. It is worth ~4.3x on the logprob gap -- KEEP IT ON, but read the metric carefully.
-#      train_rollout_logprob_abs_diff is reduced by sum_of_sample_mean, and that reducer is
-#      itself switched by --calculate-per-token-loss (cp_utils.py:107 gives equal weight per
-#      SAMPLE, :115 equal weight per TOKEN), so the R3 run's number is NOT directly comparable
-#      to the previous run's 0.0433: R3 and the loss normalisation were turned on together.
-#      The clean control, a concurrent run with the same model, data and fp32 readout but R3
-#      off and the old reducer, reads 0.0538, i.e. no better than the run it replaced.
-#      That the underlying divergence really shrank, rather than just being re-weighted, is
-#      settled by three functionals of the SAME per-token divergence moving by three different
-#      powers, which is what must happen if the distribution's scale shrinks ~4.3x and cannot
-#      happen under a convex re-weighting of fixed per-token values:
+#   1. The FarSkip Megatron on PYTHONPATH has no R3 hooks of its own; without them no Replay is
+#      registered and register_replay_list_moe fails on an empty replay_list ("IndexError: list
+#      index out of range"). patch_megatron_r3.sh ports the hooks into that tree: TopKRouter.__init__
+#      registers one Replay per router, and topk_routing_with_score_function routes its topk through
+#      the manager. Layer 0 being dense is fine: replay data is indexed by GLOBAL layer id and sglang
+#      emits num_layers=27 streams. A test that records a routing, perturbs the logits by -50 (so
+#      re-derivation shares none of 72 picks) and replays it confirms every token follows the recording.
+#   2. With the fp32 LM head on, R3 cuts the train/rollout log-prob gap ~4.3x -- KEEP IT ON, but read
+#      the metric carefully. train_rollout_logprob_abs_diff is reduced by sum_of_sample_mean, which
+#      is itself switched by --calculate-per-token-loss (cp_utils.py: equal weight per SAMPLE without
+#      it, per TOKEN with it), so compare it only across runs with the same loss normalisation. That
+#      the divergence really shrank, rather than being re-weighted, shows in three functionals of the
+#      same per-token divergence moving by three different powers, which a convex re-weighting of
+#      fixed per-token values cannot do:
 #        mean |dlogprob| (tis_abs)  0.0500 -> 0.0116   4.3x    (linear in scale)
 #        KL (train_rollout_kl)      0.00627 -> 0.00041 15.3x   (quadratic, 4.3^2 = 18)
 #        tail frac (tis_clipfrac)   7.9e-4 -> 1.15e-6  ~685x   (tail probability)
-#      So ~77% of the post-fp32 gap was MoE routing. The residual 0.0116 is the non-routing
-#      remainder (kernels, precision), below Qwen3.6-35B-A3B's 0.0150.
-#      Caveat on semantics: R3 does not make the trainer more accurate in isolation, it makes
-#      the trainer reuse the rollout's expert choices, so what is now reported is a
-#      routing-CONDITIONED logprob gap. That is the right quantity for the PPO ratio, which
-#      needs the density that actually generated the tokens, but the metric no longer contains
-#      routing divergence at all and should not be read as full trainer/sampler agreement.
-#      An earlier analysis had concluded routing was a co-symptom, because cross-tabulating 2048 token positions showed a 0.110 nat gap for positions with
-#      identical routing in all 27 layers versus 0.104 for positions with a flipped layer. That
-#      measurement was taken BEFORE the fp32 LM-head fix, when bf16 readout error (0.5 nat ULP
-#      at Instella's logit scale) swamped everything and conditioning on routing could not
-#      resolve a difference. Once fp32 removed the dominant term, routing became the leading
-#      remaining one. The lesson is that conditioning on a suspect while a larger error source
-#      is still in the signal cannot exonerate the suspect.
+#      So ~77% of the post-fp32 gap was MoE routing; the residual 0.0116 is kernels and precision,
+#      below Qwen3.6-35B-A3B's 0.0150. R3 makes the trainer reuse the rollout's expert choices, so the
+#      reported gap is routing-CONDITIONED: the right density for the PPO ratio, but not a measure of
+#      full trainer/sampler agreement. Measured before the fp32 head, bf16 readout error (0.5 nat ULP
+#      at Instella's logit scale) hid the routing term entirely; conditioning on a suspect while a
+#      larger error source is still in the signal cannot exonerate the suspect.
 if [ "${USE_ROUTING_REPLAY:-0}" = "1" ]; then
    # The FarSkip Megatron has no routing-replay hooks of its own; without them miles'
    # replay_list stays empty and the first train step dies with an IndexError.
@@ -537,7 +520,7 @@ if [ "${OVERLONG_FILTER:-0}" = "1" ]; then
    GRPO_ARGS+=(--custom-reward-post-process-path overlong_filter.overlong_filter_post_process)
 fi
 # The dynamic filter must judge a group on the samples the drop keeps, or {correct, truncated}
-# groups pass it and then train with zero advantage (20-35% of trained groups in the math R1/R2,
+# groups pass it and then train with zero advantage (20-35% of trained groups measured in math,
 # code and IF runs). overlong_dynamic_filter applies DYNAMIC_FILTER_PATH to the survivors.
 OVERLONG_INNER_DYNAMIC_FILTER=""
 if [ "${OVERLONG_FILTER:-0}" = "1" ]; then
@@ -601,7 +584,7 @@ fi
 #     Cov(log p, A)  -> the per-step entropy drift (arxiv 2505.22617); positive => collapse
 #
 # Deliberately NOT --dump-details, which would additionally set save_debug_train_data and write
-# one .pt PER RANK (24 here, arguments.py:2722) containing that rank's full training tensors.
+# one .pt PER RANK (24 here, via --save-debug-train-data) containing that rank's full training tensors.
 # That is ~24x the volume for data we do not need, since rewards+lengths+rollout logprobs already
 # determine both covariances. The lean flag still gets a dashboard_columns parquet mirror for
 # free (debug_data.py:113) because save_debug_rollout_data writes it unconditionally.
@@ -923,7 +906,7 @@ if [ "${FP32_TRAINER_READOUT:-1}" = "1" ]; then
 fi
 
 MISC_ARGS=(
-   # miles defaults this to 10 (miles/utils/arguments.py:163), which is also the c10d store
+   # miles defaults this to 10 (miles/utils/arguments.py), which is also the c10d store
    # timeout for a process group's FIRST NCCL bootstrap. During the first update_weights the
    # dense weights broadcast to the engines before the expert buckets are gathered, so ranks
    # that reach the EP all_gather early sit idle waiting on rank 0 for that whole window and
@@ -1046,7 +1029,7 @@ echo "NCCL_SOCKET_IFNAME=${NET_IF}"
 # each of the 24 workers racing to download it at import (IFEvalG/instructions_util.py:25
 # calls nltk.download on a miss). Seed it once with setup_if_deps.sh.
 #
-# PYTORCH_ALLOC_CONF matches Instella-MoE/rl if_rl exactly. Do NOT reintroduce
+# PYTORCH_ALLOC_CONF matches Instella's earlier IF RL setup exactly. Do NOT reintroduce
 # max_split_size_mb: dynamic batching hands the allocator a DIFFERENTLY-sized fp32 logits
 # tensor ([tokens, 128896], multi-GB) every microbatch, and capping the split size makes each
 # distinct large size a non-reusable cached block, so the pool grows monotonically until the

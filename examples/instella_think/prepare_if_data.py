@@ -23,7 +23,7 @@ only -- if_reward.py parses it solely as a fallback and counts when it has to.
 WHY THIS SCRIPT IS PARANOID ABOUT THE SOURCE SCHEMA
 The upstream Instella IF example assumed `label` literal-evals to
 [{"instruction_id": [...], "kwargs": [...]}], while its own data generator
-(Instella-MoE/rl/examples/mopd/prepare_rl_dolci.py:79-93) wrote `label = ground_truth`
+(its Dolci preparation script) wrote `label = ground_truth`
 and put the constraint under `metadata.constraint` instead. Those two only agree if
 Dolci's `ground_truth` happens to BE the constraint spec. Rather than inherit that
 assumption, this script auto-detects the encoding, and refuses to write anything if it

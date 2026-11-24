@@ -9,7 +9,7 @@
 
 WHY THIS EXISTS
 This miles keeps every checkpoint forever: the only occurrence of save_retain_interval in
-the tree is `args.save_retain_interval = None` (miles/utils/arguments.py:2997) and nothing
+the tree is `args.save_retain_interval = None` (miles/utils/arguments.py) and nothing
 reads it. One Instella-MoE-16B checkpoint is ~207 GB, so at --save-interval 20 over 3000
 rollouts that is ~31 TB, more than a typical shared volume holds.
 

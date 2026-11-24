@@ -8,8 +8,8 @@
 #
 #   bash examples/instella_think/setup_if_deps.sh --verify
 #
-# The dependency set is deliberately smaller than Instella-MoE/rl/setup/install_python_deps.sh,
-# which also installs emoji, syllapy and pylatexenc. Those are needed by IFBench's EXTENDED
+# The dependency set is deliberately smaller than the earlier Instella IF RL setup's, which
+# also installs emoji, syllapy and pylatexenc. Those are needed by IFBench's EXTENDED
 # registry, which we do not vendor -- ./IFEvalG imports exactly langdetect, absl, immutabledict
 # and nltk (verified by grepping its imports). Installing the rest would be cargo cult.
 set -uo pipefail

@@ -14,7 +14,7 @@ every token the same weight regardless of which sample it sits in.
 
 Truncated samples' share of gradient mass rises from 29% to 41% under this reducer (same dumps).
 That is intended: dropping them instead (OVERLONG_FILTER=1) makes truncation free, and earlier code,
-math (R1/R2) and IF runs all drifted toward the cap that way. With truncated samples kept, set DIVISOR so
+math and IF runs all drifted toward the cap that way. With truncated samples kept, set DIVISOR so
 the step-0 update matches the previous recipe (about 1.9x the drop-recipe divisor on code at 32K).
 
 WHY --calculate-per-token-loss MUST STAY OFF. With it on, loss.py returns num_tokens as

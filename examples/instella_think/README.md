@@ -11,13 +11,16 @@ applied by `patch_mbridge_gate_proj.sh`.
 | File | Role |
 |------|------|
 | `paths.sh` | Per-user locations (checkpoints, data, NFS logs, Primus checkout, sandbox token), all overridable; per-user overrides go in `~/.instella-env.sh`. Sourced by every script below. |
-| `cluster/` | Login-node tooling for Spur: `bringup.sh` (containers), `on_node.sh` (run a payload in a node's container), `env_setup.sh`, `ray_head.sh` / `ray_worker.sh`, `launch.sh`, `code_exec.sh` (sandbox). |
+| `cluster/` | Login-node tooling for Spur: `bringup.sh` (containers; runs `node_setup.sh` on each node), `on_node.sh` (run a payload in a node's container, via `in_container.sh` on the node), `nodes.sh` (a job's node list), `env_setup.sh`, `ray_head.sh` / `ray_worker.sh`, `launch.sh`, `code_exec.sh` (sandbox). |
+| `cluster/lux/` | The same recipe on a Slurm cluster with Apptainer instead of Docker and Spur: batch scripts, the node agent, sandbox and eval jobs, and `specs/` (launch specs such as the binary-reward code recipe). See its README. |
 | `run_code.sh` | **Code RL arm.** Dolci-Think-RL `code_rlvr`, unit-test reward, HumanEval+/MBPP+/LiveCodeBench v3 evals. Wrapper over `run_async.sh`. |
 | `code_reward.py` | The code reward (`--custom-rm-path code_reward.batched_reward`). All-or-nothing while training (`CODE_REWARD_MODE=binary`, default; `partial` restores the old pass-rate reward) and at eval; the pass rate is logged as `rollout/code/pass_rate_mean`. Self-tests with `python3 code_reward.py` (needs the sandbox). |
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
 | `test_grader.sh` | Runs every grader test (hardening, adversarial, hack monitor in both reward modes, reward self-test) against a private local server. |
+| `test_code_exec_hardening.py` / `test_code_exec_adversarial.py` | Sandbox semantics and attack cases, run by `test_grader.sh`. |
+| `test_code_hack_monitor.py` | Reward-hack scanner, reward modes, client/server compare parity and token redaction; offline, or against a server via `test_grader.sh`. |
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
-| `data_v8/` | Builds the v8 code RL mix (new Codeforces / HardTests / CodeContests+ / TACO / LeetCode / Codewars rows verified on the sandbox, plus the carry-over rows), or replays it exactly from its verified intermediates. See "Code RL data (v8 mix)". |
+| `data_v8/` | Builds the v8 code RL mix (new Codeforces / HardTests / CodeContests+ / TACO / LeetCode / Codewars rows verified on the sandbox, plus the carry-over rows), or replays it exactly from its verified intermediates; `build_v8.sh` runs it, `test_data_v8.py` tests the deterministic parts. See "Code RL data (v8 mix)". |
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol, plus LCB v5/v6, HumanEval/MBPP Pro, CRUXEval and Codeforces. |
 | `validate_code_benchmarks.py` | Grades reference / always-wrong answers and old eval dumps against the bench sandbox. |
 | `eval_code_ckpt.py` / `eval_code_ckpt.sh` | Offline benchmark eval of a saved checkpoint: export, serve, generate and grade, with `summary.json` per run. `eval_code_wandb.py` logs it to W&B; `test_eval_code_ckpt.py` tests the scoring. See "Offline checkpoint evals". |
@@ -26,7 +29,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `overlong_filter.py` | Optional drop-and-recentre overlong filter (`OVERLONG_FILTER=1`); `OVERLONG_FILTER_DROP_UNCLOSED=1` also drops samples that stopped without closing `</think>`. |
 | `router_log_hook.py` | Optional trainer-side router telemetry (`ROUTER_LOG=1`): router weight and expert-bias drift from step 0, as JSONL. |
 | `adaptive_difficulty_filter.py` | Optional online difficulty filter (`ADAPTIVE_FILTER=1`): drops groups the current policy has already mastered. See "Other launch knobs". |
-| `retire_solved.py` | Optional retirement of solved prompts (`RETIRE_SOLVED=1`): prompts solved on every sample are skipped at draw time, a share comes back. See "Other launch knobs". |
+| `retire_solved.py` | Optional retirement of solved prompts (`RETIRE_SOLVED=1`): prompts solved on every sample are skipped at draw time, a share comes back. See "Other launch knobs". `test_retire_solved.py` tests it (`python3 -m pytest`, from the repo root). |
 | `per_domain_logger.py` | Per-domain W&B metrics (`rollout/domain/<key>/<domain>/*` for route, src, src_route), on by default (`PER_DOMAIN_METRICS=0` disables). |
 | `rollout_log_chain.py` | Runs several rollout log hooks (`per_domain_logger` plus `CUSTOM_ROLLOUT_LOG_PATH`, e.g. code_reward's hack monitor); `run_async.sh` uses it when more than one is on, since miles keeps only one `--custom-rollout-log-function-path`. |
 | `drgrpo_reducer.py` | Optional Dr. GRPO constant-denominator policy loss (`DRGRPO=1`, needs `DRGRPO_DIVISOR`). |
@@ -37,6 +40,9 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `setup_farskip.sh` | Per-node: overlay the verified sglang515 FarSkip files onto the container sglang. |
 | `patch_mbridge_gate_proj.sh` | Add the gated-attention `linear_gate_proj` mapping to the stock `DeepseekV3` mbridge (once per container). |
 | `patch_megatron_compat.sh` | Stub newer-Megatron symbols latest miles imports at load (e.g. `optimizer.muon`) but this pin lacks. |
+| `patch_megatron_mcore_data.sh` | Let checkpoint load accept a `.metadata` without `mcore_data`, which these recipes' checkpoints lack; needed to resume. `cluster/env_setup.sh` runs it. |
+| `patch_megatron_nd_same_layout.sh` | Let a resume with an unchanged parallel layout load the distributed optimizer state from those checkpoints. `cluster/env_setup.sh` runs it. |
+| `patch_sglang_mla_rope.sh` | Optional `MLA_UNFUSED_ROPE=1` path in sglang's absorbed-MLA attention that skips aiter's fused rope + KV-write kernel. `cluster/env_setup.sh` applies it; without the variable nothing changes. |
 | `validate.sh` | 5-rung ladder: FarSkip+mbridge smoke → convert → sglang load → weight-sync parity → one train step. |
 | `patch_megatron_optim_step.py` | Only for runs using `--optimizer-cpu-offload` (not these recipes). Backports upstream Megatron `f4502eb1c` so such checkpoints resume with optimizer state. |
 | `fix_ckpt_common_optimizer_state.py` | Repairs checkpoints already written *without* that patch, so they can resume with optimizer state. |
@@ -46,7 +52,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `prepare_if_data.py` | Builds the IF train/eval JSONLs. `inspect` dumps a source's real schema; `build` writes the files and refuses to write a badly-mapped one. |
 | `setup_if_deps.sh` | Per-node: install the checker deps and seed nltk `punkt` onto NFS. `--verify` checks the whole reward stack. |
 | `if_eval_log.py` | Logs IFEval's loose metric next to the strict one (`--custom-eval-rollout-log-function-path`). |
-| `prune_checkpoints.py` | **Required at `--save-interval 20`.** Keeps the newest N *and the best-scoring N*; this miles implements no retention. |
+| `prune_checkpoints.py` | **Required at `--save-interval 20`.** Keeps the newest N *and the best-scoring N*; this miles implements no retention. `test_prune_checkpoints.py` tests its eval-line parsing. |
 
 ## Code RL on a fresh allocation, step by step
 
@@ -57,8 +63,8 @@ home: the GPU nodes and the sandbox host run these files from there.
 ### 0. Once per user
 
 ```bash
-git clone -b instella-code-rl <this repo> ~/miles && cd ~/miles && I=examples/instella_think
-# FarSkip Megatron + sglang overlay come from the internal Primus repo:
+git clone -b instella-code-rl-lux-v8 <this repo> ~/miles && cd ~/miles && I=examples/instella_think
+# The FarSkip Megatron and sglang overlay (currently distributed via the Primus-Instella-Internal repository):
 git clone git@github.com:AMD-AGI/Primus-Instella-Internal.git ~/Primus-Instella-Internal
 ```
 
@@ -305,7 +311,8 @@ All are `VAR=VALUE` overrides to `cluster/launch.sh`; defaults leave the recipe 
 | `ROUTER_OFF` | 0 | No router training signal: aux loss 0, no load balancing, frozen expert bias. |
 | `ROUTER_LOG` | 0 | Router telemetry to `ROUTER_LOG_PATH` (default `$LOG_DIR/router_log_<SAVE_TAG>.jsonl`) every `ROUTER_LOG_EVERY` (5) steps. |
 | `WANDB_BASE_URL` | | Self-hosted W&B endpoint, e.g. `https://<your W&B host>`. |
-| `EXTRA_ARGS` | | Any `train_async.py` flags, appended last so they win, e.g. `EXTRA_ARGS="--lr 2e-6 --save-interval 10"`. Values can't contain spaces. |
+| `FP32_LM_HEAD_IMPL` | split | How the fp32 LM head runs (`fp32_lm_head.py`): `split` (bf16 GEMMs with fp32 accumulation and output, the logit gradient as two bf16 terms; matches `fp32` to 3-4 digits, faster), `fp32` (upcast fp32 GEMMs) or `mixed` (bf16-rounded logit gradient, faster still). `FP32_TRAINER_READOUT=0` turns the fp32 head off. |
+| `EXTRA_ARGS` | | Any `train_async.py` flags, appended last so they win, e.g. `EXTRA_ARGS="--lr 2e-6 --save-interval 10"`. It is split on whitespace, so several flags are fine but a single flag's value can't contain spaces. |
 
 **W&B credentials** reach the workers as `WANDB_API_KEY` through the Ray runtime env (from
 `WANDB_KEY`), or via the netrc. They are never passed as `--wandb-key`, because miles uploads
@@ -558,8 +565,12 @@ grep "domain metrics" $L | tail -1          # per-source solve rate, length, tru
 
 In W&B (`rollout/step` axis for `rollout/*`), besides miles' own `rollout/*`, `eval/*` and `train/*`:
 - `rollout/code/pass_rate_mean` and `rollout/code/all_pass_rate` over every graded training sample;
-  `rollout/code/trained/*` is the batch the trainer got (after the dynamic filter). Under `binary` the train
-  reward is `all_pass_rate`.
+  `rollout/code/trained/*` is the batch the trainer got (after the dynamic filter). Graded excludes samples
+  that never reached the grader (think gate, no code, `api_error`), so these rise when truncation rises.
+  Over every scored sample instead (`n_scored` of them): `solve_rate_all` (all tests passed; under `binary`
+  at the default threshold 1.0 this is the mean train reward), `pass_rate_all` (mean pass rate, the
+  `partial` reward) and `gated_rate` (the share that never reached the grader). The `CODE_REWARD` log line
+  also counts `multi_think_close`, responses with more than one `</think>` (the answer is taken after the last).
 - `rollout/code_hack/solved_any_rate`: the share of all-pass samples with any hack flag. Alarm if it trends up
   over 20+ steps, or if `all_pass_rate` jumps with no eval gain. Then look at `solved_<k>_rate` for
   `helper_tamper`, `touch_frames`, `touch_builtins`, `sys_modules` and `exit_call`, and read dumped samples
@@ -609,7 +620,7 @@ Things learned on that run:
   mid-thought. Those fail the think gate (`think_gate_fail` in the
   `CODE_REWARD` line) and score 0. The policy always opens `<think>`; the gate failures are
   truncation, not a template problem. Hence the 32k default.
-- **Disk.** The checkpoint volume is shared and fills up from other users too. `run_code.sh`
+- **Disk.** Checkpoints are large and the volume is usually shared. `run_code.sh`
   keeps the newest checkpoint plus the 2 best by the benchmark mean (`KEEP_RECENT=1`,
   `KEEP_BEST=2`), i.e. at most ~620 GB. Restart the pruner with lower values if space runs out.
 - **Occasional router `/generate` 500s** (`httpcore.ReadError` tracebacks from the
@@ -685,7 +696,7 @@ a sandbox error after the retry pass (stdio: a second verify pass; function slic
 
 ```bash
 cd examples/instella_think/data_v8
-SANDBOX_URLS=http://<host1>:18990,http://<host2>:18990 WORK=/data/v8work OUT=/data/v8 bash build_v8.sh \
+SANDBOX_URLS=http://<host1>:18950,http://<host2>:18950 WORK=/data/v8work OUT=/data/v8 bash build_v8.sh \
   --union union.csv.gz --clusters clusters.parquet --carry carry_over.jsonl --status problem_status.parquet \
   --eval-items eval_items.parquet --eval-hashes eval_hashes.jsonl \
   --leetcode-pool leetcode_call.jsonl.gz --leetcode-refs leetcode_refs.jsonl.gz --codewars-pool codewars_fn.jsonl.gz
@@ -767,11 +778,12 @@ RAY_ADDRESS=http://<HEAD_IP>:8265 MASTER_ADDR=<HEAD_IP> \
 WANDB_KEY=... bash examples/instella_think/run_async.sh
 ```
 
-### Math: the MI325X R1/R2 recipe
+### Math: Dr. GRPO with overlong filtering
 
 `run_async.sh` with no task overrides is the math run (DAPO-style prompts, `deepscaler`
-grader, AIME eval). R1 is Dr. GRPO plus overlong filtering at a 56k cap with the router
-frozen; R2 is R1 plus dropping unclosed-`</think>` samples. On this branch:
+grader, AIME eval). The recipe below is Dr. GRPO plus overlong filtering at a 56k cap with the
+router frozen, also dropping unclosed-`</think>` samples (leave out
+`OVERLONG_FILTER_DROP_UNCLOSED=1` to keep them). On this branch:
 
 ```bash
 PROMPT_DATA=$DATA_ROOT/mix_v5_math.jsonl EVAL_CONFIG=<math eval yaml> SAVE_TAG=<fresh tag> \
@@ -783,16 +795,18 @@ NUM_ROLLOUT=220 EVAL_INTERVAL=25 SAVE_INTERVAL=20 \
 EXTRA_ARGS="--log-passrate" bash examples/instella_think/run_async.sh
 ```
 
-- `DRGRPO_DIVISOR=21680` is the step-0 mean response length of the DPO-64k checkpoint at
-  this cap. Measure it again for another checkpoint or cap (see "Dr. GRPO loss").
+- `DRGRPO_DIVISOR=21680` is the step-0 mean response length of the DPO starting checkpoint
+  used for this recipe, at this cap. Measure it again for another checkpoint or cap (see
+  "Dr. GRPO loss").
 - `mix_v5_math.jsonl` and the `*-olmes.jsonl` eval sets aren't built by this repo; bring
-  your own. R1/R2's eval YAML covered AIME 2024/2025, HMMT Feb 2025 and
+  your own. The reference eval YAML covered AIME 2024/2025, HMMT Feb 2025 and
   BeyondAIME at n=16, temperature 0.6, top_p 0.95, 65536 tokens.
-- The async "retry" (`--async-unused-samples-handler retry` on MI325X's newer miles) is built
-  in here: `examples/fully_async` always returns aborted and over-stale groups to the buffer.
-  Don't pass that flag, or `--async-data-buffer-capacity-factor`; this miles has neither.
-- R1 ran 40 rollout GPUs and R2 24; the 3-node layout here has 16. Add rollout nodes and
-  `EXTRA_ARGS="--rollout-num-gpus <n>"` to match.
+- The async "retry" (`--async-unused-samples-handler retry` in newer upstream miles) is built
+  in here: `examples/fully_async` always returns aborted and over-stale groups to the buffer,
+  so don't pass that flag; this miles doesn't have it. `--async-data-buffer-capacity-factor`
+  (`ASYNC_BUFFER_CAPACITY_FACTOR`, default 6) bounds the completed-group backlog the same way.
+- The reference runs used 24 to 40 rollout GPUs; the 3-node layout here has 16. Add rollout
+  nodes and `EXTRA_ARGS="--rollout-num-gpus <n>"` to match.
 - Through `cluster/launch.sh`, pass the same variables as `VAR=VALUE` arguments plus
   `RUN_SCRIPT=run_async.sh` (its default is `run_code.sh`).
 - Confirm with `DRY_RUN=1` first: it prints the resolved loss, filter and router settings.
@@ -830,8 +844,7 @@ bash examples/instella_think/run_if.sh
 | ifeval | 541 | `google/IFEval` | 541 / 541 |
 | ifbench | 300 | `allenai/IFBench_test` | 300 / 300 |
 
-Two traps were found here, both of which would have produced a flat-zero reward rather than
-an error:
+Two source-format pitfalls, both of which produce a flat-zero reward rather than an error:
 
 **Dolci nests the constraint spec two deep.** `ground_truth` is a *list holding one string*,
 and that string is a python-literal list of dicts:
@@ -848,11 +861,11 @@ like total model failure. `if_reward.py` now consults IFBench's `INSTRUCTION_DIC
 lacks; IFEvalG stays primary so training never depends on that clone. This is why
 `emoji` and `syllapy` are installed.
 
-### ⚠ Checkpoints at `--save-interval 20`: pruning is mandatory
+### Checkpoints at `--save-interval 20`: pruning is mandatory
 
 One checkpoint is **~207 GB** (16 torch_dist shards, weights + optimizer), and this miles
-has **no retention** — the only mention of `save_retain_interval` is
-`args.save_retain_interval = None` (`arguments.py:2997`); nothing reads it. At save-every-20
+has **no retention** — `miles/utils/arguments.py` only sets `args.save_retain_interval = None`
+and nothing reads it. At save-every-20
 over 3000 rollouts that is 150 checkpoints ≈ **31 TB**, which
 will not fit on a typical shared volume. Filling a shared volume makes writes fail for every user of it.
 
@@ -887,28 +900,31 @@ Tune with `KEEP_RECENT` / `KEEP_BEST` / `PRUNE_METRIC`; `PRUNE_CHECKPOINTS=0` di
 containers when the job ends, so there is no watchdog and no manual cleanup. Patches applied
 inside the container (`env_setup.sh`) are lost with it, so re-run that step on every new job.
 
-### What was changed in `run_async.sh` (defaults preserve the math run byte-for-byte)
+### Env hooks in `run_async.sh` (unset, they keep the math run's settings)
 
-Four narrow env hooks, nothing else: `RM_TYPE`/`CUSTOM_RM_PATH` (reward routing),
-`EVAL_PROMPT_DATA` (name/path pairs), `N_SAMPLES_PER_EVAL_PROMPT`, `WANDB_GROUP`, plus
-`IF_*`/`NLTK_DATA` passthrough in the Ray `runtime_env`. Unset, every one of them
-reproduces the previous hardcoded value.
+The task wrappers drive `run_async.sh` through env variables only: `RM_TYPE`/`CUSTOM_RM_PATH`
+(reward routing), `EVAL_PROMPT_DATA` / `EVAL_CONFIG` (eval sets), `N_SAMPLES_PER_EVAL_PROMPT`,
+`WANDB_GROUP`, the `IF_*`/`CODE_*`/`NLTK_DATA` passthrough in the Ray `runtime_env`, and the
+optional features documented above (`OVERLONG_FILTER*`, `DRGRPO*`, `ADAPTIVE_FILTER`,
+`RETIRE_*`, `ROUTER_*`, `RECOMPUTE*`, `FP32_LM_HEAD_IMPL`, `OBSERVE_ENTROPY`,
+`ASYNC_BUFFER_CAPACITY_FACTOR`, ...). Unset, each keeps the math run's hyperparameters;
+`DRY_RUN=1` prints the resolved command line.
 
 The `IF_*` passthrough is not cosmetic: the reward executes in the Ray rollout workers,
 whose environment is that `runtime_env` dict, so exporting `IF_REQUIRE_THINK=0` in the
 launching shell alone would be silently ignored.
 
-### Differences from the earlier `Instella-MoE/rl` IF example
+### Differences from an earlier Instella IF example on an older miles
 
-Checked rather than copied, since that repo pins `radixark/miles@2b5b7fc` plus a 761-line
+Checked rather than copied, since that example pins `radixark/miles@2b5b7fc` plus a 761-line
 core patch that does not apply here.
 
-- **`REWARD_SCALE=10.0` is not portable.** It only works with their
-  `miles_core_changes.patch`, which redefines "perfect reward" as `_REWARD_PERFECT=10` in
+- **`REWARD_SCALE=10.0` is not portable.** It only works with that core patch, which
+  redefines "perfect reward" as `_REWARD_PERFECT=10` in
   `miles/utils/metric_utils.py` and `log_utils.py`. Without those hunks a 10× reward makes
   miles' own pass-rate and eval-accuracy metrics read `7.28` for 72.8%, and multiplies every
   advantage by 10 against an unchanged `--eps-clip`. `if_reward.py` uses 1.0.
-- **Its prompt-injection branch is dead code.** `reward_model.py:716-718` does
+- **Its prompt-injection branch is dead code.** Its reward does
   `if "prompt" in checker.get_instruction_args(): build_description(prompt=...)`, but no
   checker has an arg named `prompt` — all five that need one use `prompt_to_repeat`. So
   `combination:repeat_prompt`, `copy:*` and `new:copy_span_idx` raised `ValueError` inside
@@ -920,14 +936,14 @@ core patch that does not apply here.
 - **Its dependency list is bigger than needed.** `emoji`, `syllapy` and `pylatexenc` are
   for IFBench's *extended* registry, which we do not vendor. `IFEvalG/` imports only
   `langdetect`, `absl`, `immutabledict`, `nltk`.
-- **`grpo_iterations=2` in the reference config is a red herring** — it belongs to the
-  Primus Megatron fork's own unused GRPO code (`training/arguments.py:1892`), not to miles,
+- **`grpo_iterations=2` in the reference config is not a miles setting** — it belongs to the
+  Primus Megatron fork's own unused GRPO code (`training/arguments.py`), not to miles,
   which has no such flag. Nothing to match.
-- **`--rollout-task-type` is inert** in this miles: parsed at `arguments.py:2057` and read
-  nowhere. Reward selection is `--custom-rm-path` / `--rm-type` / per-sample metadata only.
+- **`--rollout-task-type` is inert** in this miles: `miles/utils/arguments.py` parses it and
+  nothing reads it. Reward selection is `--custom-rm-path` / `--rm-type` / per-sample metadata only.
 - **Its strict-vs-partial eval split could not have worked here.** It keys on
   `kwargs["evaluation"]`, but miles threads `evaluation` down to `generate_and_rm()` and
-  then calls the reward without it (`sglang_rollout.py:354`, `:363`, `:396`), so that kwarg
+  then calls the reward without it (`generate_and_rm` in `sglang_rollout.py`), so that kwarg
   is *always* `False` for a custom RM — including on the eval path. `if_reward.py` therefore
   drives the split from `metadata.split`, which `prepare_if_data.py` stamps into the eval
   JSONLs and miles passes through untouched. The kwarg is still honoured if miles ever
@@ -953,9 +969,8 @@ failure from wiring failure: `think_gate_fail` (policy not emitting `<think>`; t
 ## FarSkip contract (must match on both sides)
 - **Training**: `--use-simple-farskip-layer` (reference connectivity; in `model_args.sh`).
 - **Rollout**: `FARSKIP_REFERENCE_DECODER_LAYER=1` (in the Ray `runtime_env` of `run_async.sh`).
-Keeping both on the *reference* FarSkip path is what makes train/infer numerics agree
-(this is the train/infer-mismatch investigation this port targets). Switch both to the
-overlapped path together once reference parity is confirmed.
+Keeping both on the *reference* FarSkip path is what makes train/infer numerics agree.
+Switch both to the overlapped path together, and only once reference parity is confirmed.
 
 ## Core miles edits (no plugin seam exists for these)
 The RL weight-sync converter (`miles/backends/megatron_utils/megatron_to_hf/`) is a
@@ -965,10 +980,23 @@ minimal core edit:
 - `megatron_to_hf/deepseekv3.py`: add the gated-attention `self_attention.linear_gate_proj.weight`
   → `self_attn.gate_proj.weight` mapping (harmless to plain DeepSeek-V3, which lacks that weight).
 
+The other core changes this branch carries, each off or unchanged by default unless noted:
+- `megatron_utils/fp32_lm_head.py` (new), `model.py`: `--fp32-lm-head` / `--fp32-lm-head-impl`, the
+  LM head in fp32 in both the log-prob and the training pass (`FP32_LM_HEAD_IMPL`).
+- `rollout/sglang_rollout.py`, `utils/http_utils.py`: one generate semaphore and one HTTP client per
+  event loop (the fully-async worker and eval run on different loops), and the opt-in
+  `MILES_ROLLOUT_RAMP_S` ramp of the generate semaphore.
+- `utils/arguments.py`: those flags and `--async-data-buffer-capacity-factor` (fully-async
+  backpressure, default 6).
+- `megatron_utils/actor.py`, `utils/profile_utils.py`, `utils/timer.py`: opt-in trainer profiling
+  (`PROFILE=1`, `PROFILE_INLINE_STEP`).
+- `utils/tracking_utils/`: the reward and loss env variables recorded in the W&B / MLflow config
+  (names with URL, TOKEN, KEY, SECRET or PASSWORD excluded), and a per-launch segment number.
+
 No atomic-update-group change is needed: Instella has `q_lora_rank=None`, so
 `get_atomic_update_groups` returns empty (full `q_proj`, no fused q-lora group).
 
-## Notes on the miles core-fixes analysis (from the old Instella-MoE/rl pin)
+## Notes on the miles core-fixes analysis (from the older miles pin's core patch)
 Most old `miles_core_changes` hunks are unnecessary on latest miles:
 - `HIP_VISIBLE_DEVICES` fallback already present (`miles/.../sglang_engine.py`).
 - sglang arg-name shims not needed — latest miles uses `--sglang-dp-size` / `--sglang-ep-size`
@@ -1011,7 +1039,7 @@ gibberish ("2+2=5", `arc_challenge` 0.195, below the
 random-chance floor) at normal-looking throughput — there is no crash to warn you.
 
 The empty-KV out-of-bounds fault that previously forced `ENABLE_DP_ATTENTION=0` is fixed by
-the `k.shape[0]==0` guard in sglang's `triton_backend` (commit `b54ceda`), verified by two
+the `k.shape[0]==0` guard in the sglang overlay's `triton_backend`, verified by two
 clean `lm_eval` runs at EP8/DP8 and by the healthy 1-node smoke. So `aiter=1` +
 dp-attention is now both correct and stable, and `ENABLE_DP_ATTENTION=1` is the default
 (it also keeps sglang's chunked-prefill clamp at 4096).
@@ -1046,29 +1074,29 @@ the `.distcp` shards at 100% coverage, and the authoritative scalar step is in t
 **Fix (both parts):**
 
 ```bash
-# 1. Future saves — once per container, since Megatron-LM lives in the image, not on NFS:
-MEGATRON_PATH=/root/Megatron-LM python3 examples/instella_think/patch_megatron_optim_step.py
+# 1. Future saves — patches the Megatron at MEGATRON_PATH, the tree training imports
+#    (paths.sh: the FarSkip Megatron under PRIMUS_ROOT); re-run after rebuilding that tree:
+source examples/instella_think/paths.sh && python3 examples/instella_think/patch_megatron_optim_step.py
 
 # 2. Checkpoints already written without the patch (drops the residue; .distcp untouched):
 python3 examples/instella_think/fix_ckpt_common_optimizer_state.py <ckpt>/iter_0000039 --apply
 ```
 
-Part 1 is upstream `f4502eb1c`, "Handle `step` key correctly in checkpoint save with
-`--optimizer-cpu-offload`" (PR #2874), which is **not** an ancestor of this fork's
-`miles-main`. It should be cherry-picked properly — the combination
+Part 1 is upstream Megatron `f4502eb1c`, "Handle `step` key correctly in checkpoint save with
+`--optimizer-cpu-offload`" (PR #2874), which the Megatron pin used here predates. It should be
+cherry-picked properly — the combination
 `--optimizer-cpu-offload` + `--use-precision-aware-optimizer` has **no coverage** in
 `tests/unit_tests/dist_checkpointing/`, so nothing catches this.
 
-**Do NOT try to fix it by padding or truncating lists in `dist_checkpointing`'s `merge()`.**
-That was attempted: it merges and loads cleanly, then dies on the *first optimizer step* with
+**Padding or truncating lists in `dist_checkpointing`'s `merge()` does not fix it.** It merges
+and loads cleanly, then dies on the *first optimizer step* with
 `RuntimeError: a Tensor with 32 elements cannot be converted to Scalar` in `_fused_adam`,
-because padding entries build `step` from `torch.empty(gap)` — uninitialized garbage of the
+because padding entries build `step` from `torch.empty(gap)` — uninitialized memory of the
 wrong shape. The checkpoint's length-1 entry is *correct*; the model-side 116 is a different
 axis, so no merge-level change can reconcile them.
 
-Verified working end to end: iteration 39 resumed with optimizer state and trained on past the
-step where the pre-fix attempt crashed, with `grad_norm` continuous across the restart
-(0.1486–0.1597 vs 0.1314 before) rather than spiking as it does on an Adam reset.
+With both parts applied, a checkpoint resumes with optimizer state and `grad_norm` stays
+continuous across the restart, rather than spiking as it does on an Adam reset.
 
 ## Risks to confirm in-container (see `validate.sh`)
 1. mbridge mapping completeness — `gate_proj` / full `q_proj` (q_lora_rank=null) must map

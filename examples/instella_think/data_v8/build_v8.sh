@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the v8 code RL mix end to end, or replay its last three steps from verified intermediates.
 #
-#   SANDBOX_URLS=http://h1:18990,http://h2:18990 WORK=/data/v8work OUT=/data/v8 bash build_v8.sh \
+#   SANDBOX_URLS=http://h1:18950,http://h2:18950 WORK=/data/v8work OUT=/data/v8 bash build_v8.sh \
 #       --union union.csv.gz --clusters clusters.parquet --carry carry_over.jsonl [--status problem_status.parquet] \
 #       --eval-items eval_items.parquet --eval-hashes eval_hashes.jsonl \
 #       --leetcode-pool leetcode_call.jsonl.gz --leetcode-refs leetcode_refs.jsonl.gz --codewars-pool codewars_fn.jsonl.gz

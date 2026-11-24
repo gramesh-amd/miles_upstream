@@ -39,4 +39,4 @@ echo "Sanity a few prompts; answers should match the HF/sglang baseline you eval
 
 echo "### Rung 5: one async train step ###"
 echo "Train with small --num-rollout; confirm loss finite + weight broadcast completes."
-echo "If broadcast hangs, preload torch_memory_saver (Instella-MoE/rl/setup/torch_memory_saver.sh)."
+echo "If broadcast hangs, build and preload torch_memory_saver (BUILD_TMS=1 bash setup_farskip.sh)."

@@ -193,7 +193,7 @@ def overlong_dynamic_filter(args, samples, **kwargs):
     post-process. On raw rewards a group like {4 correct, 4 truncated} has nonzero std and is
     kept, then loses its truncated half here and trains with zero advantage while still taking a
     batch slot. Measured share of such dead groups among trained groups: code 7.7% -> 18.5%
-    (stdio 35%), math R1/R2 20-33%, IF 0.4% -> 34% as truncation rose. Judging the group on the
+    (stdio 35%), math 20-33%, IF 0.4% -> 34% as truncation rose. Judging the group on the
     samples this hook will keep lets the async rollout refill with groups that carry gradient.
 
     The survivors go through OVERLONG_INNER_DYNAMIC_FILTER (default: the stock nonzero-std check;

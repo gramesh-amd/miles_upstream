@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Backport upstream Megatron f4502eb1c so optimizer state survives a checkpoint round-trip.
 
-Run INSIDE the container (writes into MEGATRON_PATH), once per container:
+Run INSIDE the container; it writes into MEGATRON_PATH, which must be the Megatron tree training
+imports (paths.sh exports it: the FarSkip Megatron under PRIMUS_ROOT). Re-run after rebuilding that tree:
 
-    MEGATRON_PATH=/root/Megatron-LM python3 examples/instella_think/patch_megatron_optim_step.py
+    source examples/instella_think/paths.sh && python3 examples/instella_think/patch_megatron_optim_step.py
 
 Needed only by runs that use --optimizer-cpu-offload together with
 --use-precision-aware-optimizer (the Instella recipes here use neither). Without this patch, resuming from a
@@ -35,8 +36,8 @@ Tensor with 32 elements cannot be converted to Scalar" in _fused_adam, because p
 build `step` via torch.empty(gap), i.e. uninitialized garbage of the wrong shape.
 
 This fixes FUTURE saves. Checkpoints already written without it also need
-fix_ckpt_common_optimizer_state.py. Idempotent; keeps a .bak-step copy. Megatron-LM lives in
-the container image rather than on shared storage, so re-apply after any container recreate.
+fix_ckpt_common_optimizer_state.py. Idempotent; keeps a .bak-step copy. A tree inside the
+container image (the /root/Megatron-LM default) needs it again after any container recreate.
 """
 import os
 import pathlib

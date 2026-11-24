@@ -21,8 +21,8 @@ dynamic-sampling filter (check_reward_nonzero_std) then discards those groups ou
 so a strict-only reward would silently drop most of the batch.
 
 REWARD SCALE IS 1.0, NOT 10.0
-Instella-MoE/rl/examples/if_rl/reward_model.py used REWARD_SCALE=10.0, which only works
-alongside its miles_core_changes.patch: that patch redefines "perfect" as
+The earlier Instella IF RL reward used REWARD_SCALE=10.0, which only works
+alongside that setup's miles core patch: that patch redefines "perfect" as
 _REWARD_PERFECT=REWARD_SCALE inside miles/utils/metric_utils.py and log_utils.py and
 divides eval means by it. We do not carry that patch (it does not apply to this miles),
 so a 10x reward here would leave miles' own pass-rate/eval-accuracy metrics reading
