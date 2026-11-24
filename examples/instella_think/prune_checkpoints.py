@@ -53,8 +53,17 @@ ITER_DIR = re.compile(r"^iter_(\d+)$")
 # The dict is a python repr of whatever the metrics aggregator held, and numpy scalars repr as
 # `np.float64(0.81)` under numpy >= 2. That is a call node, so literal_eval raises on the WHOLE line
 # and every score on it is silently dropped, leaving the best checkpoints to recency pruning.
-NUMPY_SCALAR = re.compile(r"np\.(?:float|int|uint|bool_?)[0-9_]*\(([^()]*)\)")
+# np.True_ / np.False_ repr without a call, and nan / inf are not literals either; a non-finite
+# value becomes None so that metric is skipped and the rest of the line still counts.
+NUMPY_SCALAR = re.compile(r"np\.(?:float|int|uint|bool_?)[0-9_]*\(([^()]*)\)|np\.(True|False)_")
+NON_FINITE = re.compile(r"([:,\[(]\s*)[-+]?(?:nan|inf)(?=\s*[,}\])])")
 DEFAULT_METRICS = ("eval/ifeval", "eval/ifbench")
+
+
+def literal_repr(text: str) -> str:
+    """The logged metrics repr with numpy scalars and non-finite floats made literal_eval-safe."""
+    text = NUMPY_SCALAR.sub(lambda m: m.group(2) or m.group(1), text)
+    return NON_FINITE.sub(r"\1None", text)
 
 
 def parse_scores(log_paths: list[Path], metrics: tuple[str, ...]) -> dict[int, float]:
@@ -71,7 +80,7 @@ def parse_scores(log_paths: list[Path], metrics: tuple[str, ...]) -> dict[int, f
                 continue
             try:
                 # The log holds a python repr (single quotes), not JSON.
-                d = ast.literal_eval(NUMPY_SCALAR.sub(r"\1", m.group(2)))
+                d = ast.literal_eval(literal_repr(m.group(2)))
             except Exception:
                 continue
             if not isinstance(d, dict):
