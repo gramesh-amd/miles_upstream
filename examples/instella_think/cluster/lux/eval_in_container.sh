@@ -94,7 +94,12 @@ else
       say "converting ${SRC} to HF format in ${EVAL_HF}"
       TMP="${EVAL_HF}.tmp.${SLURM_JOB_ID}"
       rm -rf "${TMP}"; mkdir -p "$(dirname "${EVAL_HF}")"
+      # Rows past config.json's vocab_size are dropped explicitly: the converter's own trim uses
+      # the checkpoint's --vocab-size, which model_args.sh sets to PADDED_VOCAB_SIZE.
+      VOCAB="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["vocab_size"])' "${BASE_HF}/config.json")" \
+         || fail "no vocab_size in ${BASE_HF}/config.json"
       PYTHONPATH="${PWD}:${MEGATRON_PATH}" python3 tools/convert_torch_dist_to_hf.py \
+         --model-name deepseekv3 --vocab-size "${VOCAB}" \
          --input-dir "${SRC}" --output-dir "${TMP}" --origin-hf-dir "${BASE_HF}" \
          > "${JOB_DIR}/convert.log" 2>&1 || fail "checkpoint conversion failed (see ${JOB_DIR}/convert.log)"
       sync
