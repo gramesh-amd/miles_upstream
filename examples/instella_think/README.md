@@ -468,7 +468,10 @@ Outputs go to `OUT` (default `$LOG_DIR/code-evals/<HF dir name>`):
   `gen_errors` / `api_errors` totals.
 
 A sample the sandbox still can't grade after 3 retries counts as wrong. Report `api_errors`
-next to the scores, because they should be 0. `--regrade-from <dir>/gen.jsonl.gz --out <new
+next to the scores, because they should be 0. A few LiveCodeBench verdicts depend on the
+sandbox host's speed and load, because tests have a 6 s limit. Regrading one checkpoint's
+1,816 LCB v5/v6 samples on a different host flipped 14 of them, all in LCB v5, and moved
+v5 pass@1 by 0.005. So compare checkpoints graded on the same, otherwise idle sandbox. `--regrade-from <dir>/gen.jsonl.gz --out <new
 dir>` rescores saved generations without the model, e.g. after a grader change; compare its
 `graded.jsonl.gz` with the old one per `(ds, pi, k)`. `eval_code_wandb.py --summary
 <dir>/summary.json --step <training step> --project <project> --run-name <run>-offline_eval`
