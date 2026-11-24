@@ -220,7 +220,8 @@ $I/cluster/on_node.sh $J $NODE cluster/launch.sh $HEAD_IP SINGLE_NODE=1 SAVE_TAG
 `run_code.sh` by default (`RUN_SCRIPT=run_if.sh` for the IF arm). It prints the log path:
 `$NFS_ROOT/rl-logs/launch-code<N>k-<node>-<ts>.out`.
 
-`DRY_RUN=1` prints the runtime env (with `HF_TOKEN` and `WANDB_API_KEY` redacted) and every
+`DRY_RUN=1` prints the runtime env (with `HF_TOKEN`, `WANDB_API_KEY` and the sandbox URLs' token
+redacted) and every
 `train_async.py` flag. It then runs miles' own `parse_args` on them and imports every custom
 function path (reward, filter, loggers, rollout), and exits without touching Ray or the GPUs.
 That parse is the only check that sees the `--sglang-*` flags, which come from the installed

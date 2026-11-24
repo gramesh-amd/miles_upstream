@@ -97,7 +97,8 @@ def _make_grader(args):
         if code_reward.health() is None:
             sys.exit(
                 f"ERROR: code-exec service not reachable at CODE_EXEC_API_URL="
-                f"{os.environ.get('CODE_EXEC_API_URL') or '(unset)'}; start it with cluster/code_exec.sh start"
+                f"{code_reward.redact_url(os.environ.get('CODE_EXEC_API_URL', '')) or '(unset)'}; "
+                "start it with cluster/code_exec.sh start"
             )
 
         def grade(response, row):

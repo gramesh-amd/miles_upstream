@@ -63,6 +63,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from decimal import Decimal, InvalidOperation
 
 import requests
@@ -107,6 +108,20 @@ _WINDOW_MAX = int(os.environ.get("CODE_HACK_WINDOW_MAX", "100000"))
 # Benchmark rows (prepare_code_benchmarks.py) can go to their own service, so their heavy
 # tests never queue behind training rewards.
 _BENCH_API_URL = os.environ.get("CODE_BENCH_API_URL", "").strip().rstrip("/") or _API_URL
+
+
+def redact_url(text) -> str:
+    """`text` with the sandbox URLs' secret path (http://host:port/<token>) replaced by <token>.
+    requests' exception messages quote the request path, so every log line that can carry a
+    sandbox URL or exception goes through this."""
+    s = str(text)
+    for url in (_API_URL, _BENCH_API_URL, os.environ.get("CODE_EXEC_API_URL", ""),
+                os.environ.get("CODE_BENCH_API_URL", "")):
+        secret = urllib.parse.urlsplit(url.strip()).path.strip("/") if "://" in url else ""
+        if secret:
+            s = s.replace(secret, "<token>")
+    return s
+
 
 _FENCE_RE = re.compile(r"```(?:python|py|Python)?[ \t]*\n?(.*?)```", re.DOTALL)
 # oe-eval codex_humanevalplus / mbppplus ::olmo3:adapt answer_format_regex and answer_regexes.
@@ -243,15 +258,15 @@ def _post(url: str, path: str, body: dict, n_tests: int, read_timeout: float, fl
                             if isinstance(v, int):
                                 flags[k] = flags.get(k, 0) + v
                     return [1 if x in (1, True) else 0 for x in res]
-                logger.warning("code-exec %s returned a malformed body: %r", path, r.text[:200])
+                logger.warning("code-exec %s returned a malformed body: %r", path, redact_url(r.text[:200]))
                 return None
             if 400 <= r.status_code < 500:
                 logger.warning("code-exec %s HTTP %d (check CODE_EXEC_API_URL / token): %r",
-                               path, r.status_code, r.text[:200])
+                               path, r.status_code, redact_url(r.text[:200]))
                 return None
         except (requests.RequestException, ValueError) as e:
             if attempt == _HTTP_RETRIES:
-                logger.warning("code-exec %s failed after %d attempts: %s", path, attempt + 1, e)
+                logger.warning("code-exec %s failed after %d attempts: %s", path, attempt + 1, redact_url(e))
                 return None
         time.sleep(0.5 * (attempt + 1))
     return None
@@ -942,7 +957,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     h = health()
     if h is None:
-        raise SystemExit(f"code-exec service not reachable at CODE_EXEC_API_URL={_API_URL or '(unset)'}")
+        raise SystemExit(f"code-exec service not reachable at CODE_EXEC_API_URL={redact_url(_API_URL) or '(unset)'}")
     print(f"service: {h}")
 
     stdio = json.dumps([{"input": "2 3\n", "output": "5\n"}, {"input": "1 1\n", "output": "2\n"},

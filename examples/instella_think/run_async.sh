@@ -1141,6 +1141,11 @@ env = json.loads(sys.argv[1])
 for k in ("HF_TOKEN", "WANDB_API_KEY"):
     if env["env_vars"].get(k):
         env["env_vars"][k] = "<redacted>"
+# Sandbox URLs are http://host:port/<token>.
+for k in ("CODE_EXEC_API_URL", "CODE_BENCH_API_URL"):
+    u = env["env_vars"].get(k, "")
+    if "://" in u and "/" in u.split("://", 1)[1]:
+        env["env_vars"][k] = u.split("://", 1)[0] + "://" + u.split("://", 1)[1].split("/", 1)[0] + "/<token>"
 print(json.dumps(env, indent=2))' "${RUNTIME_ENV_JSON}"
 }
 
