@@ -4,7 +4,7 @@ import logging
 import queue
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import aiohttp
 
@@ -124,6 +124,9 @@ class AsyncRolloutWorker:
         self.data_buffer = data_buffer  # Directly save data_buffer reference
         self.running = True
         self.output_queue = queue.Queue(maxsize=1000)  # Continuous output queue
+        # Groups drained from output_queue but not consumed by the rollout step that drained them,
+        # in completion order; the next step takes them first. Only the rollout step touches it.
+        self.pending_groups: deque[tuple[int, list[Sample]]] = deque()
         self.worker_thread = None
         self.state = GenerateState(args)
 
@@ -240,7 +243,8 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
     target_data_size = args.rollout_batch_size
 
     data = []
-    completed_groups = {}
+    pending_groups = worker.pending_groups
+    carried_in = len(pending_groups)
     do_print = True
     stale_groups_recycled = 0
     aborted_groups_returned = 0
@@ -264,7 +268,7 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
         print(f"Dynamic sampling filter enabled: {args.dynamic_sampling_filter_path}")
 
     print(f"Starting async rollout generation for {target_data_size} groups")
-    print(f"Global worker queue size: {worker.get_queue_size()}")
+    print(f"Global worker queue size: {worker.get_queue_size()}, carried over from the last step: {carried_in}")
     if use_staleness_filter:
         print(f"Staleness filter enabled: max_weight_staleness={args.max_weight_staleness}")
 
@@ -276,13 +280,8 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
     while len(data) < target_data_size:
         # Collect completed results
         completed = worker.get_completed_groups()
-
-        made_progress = False
-        for group_id, group in completed:
-            completed_groups[group_id] = group
-            made_progress = True
-
-        if made_progress:
+        pending_groups.extend(completed)
+        if completed:
             last_progress_time = time.time()
 
         # Query current engine version once per collection batch (cached/throttled)
@@ -290,16 +289,12 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
         if use_staleness_filter:
             current_engine_version = await _cached_version.get(args)
 
-        # Process completed groups in order (try to maintain order, but not strict requirement)
+        # Process completed groups in completion order; whatever is left once the batch is full
+        # stays in pending_groups for the next step.
         processed_any = False
 
-        # Process all available completed groups
-        available_ids = list(completed_groups.keys())
-        for group_id in available_ids:
-            if len(data) >= target_data_size:
-                break
-
-            group = completed_groups.pop(group_id)
+        while pending_groups and len(data) < target_data_size:
+            group_id, group = pending_groups.popleft()
 
             # If any sample in the group was aborted, return the whole group to the data buffer
             # and do not forward it to the training engine.
@@ -412,6 +407,7 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer: DataSource)
         else 0.0,
         "rollout/async/stale_recycled_ratio": (stale_groups_recycled / considered) if considered > 0 else 0.0,
         "rollout/async/dynamic_filter_dropped_ratio": (dynamic_filter_dropped / considered) if considered > 0 else 0.0,
+        "rollout/async/carried_over_groups": len(pending_groups),
         "perf/async/queue_size_end": worker.get_queue_size(),
         "perf/async/rollout_duration_s": duration,
     }
