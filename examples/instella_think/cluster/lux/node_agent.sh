@@ -40,7 +40,7 @@ export APPTAINER_TMPDIR="${NL}/tmp"
 say "starting instance ${INST} from ${SIF}"
 apptainer instance start --cleanenv --fakeroot \
    --overlay "${NL}/overlay" --no-home \
-   --bind /lustre/orion --bind "${LUX_HOME}" --bind "${NL}" \
+   --bind "${LUX_FS}" --bind "${LUX_HOME}" --bind "${NL}" \
    --env-file "${NL}/container.env" \
    "${SIF}" "${INST}" 2>&1 || { say "FATAL: instance start failed"; exit 1; }
 echo "${HOST}" > "${MB}/ready"

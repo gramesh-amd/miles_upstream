@@ -14,6 +14,7 @@ credentials. The view is separate from anyone's personal workspace; re-running r
 import argparse
 import os
 
+import wandb
 import wandb_workspaces.reports.v2 as wr
 import wandb_workspaces.workspaces as ws
 
@@ -44,10 +45,13 @@ def main():
     ap.add_argument("run_regex", help="regex on run names, e.g. 'lux-v6' or '^holdtest'")
     ap.add_argument("--view-name", default=None)
     ap.add_argument("--metric", action="append", default=None)
-    ap.add_argument("--entity", default=os.environ.get("WANDB_ENTITY", "genaiamd"))
+    ap.add_argument("--entity", default=os.environ.get("WANDB_ENTITY") or None,
+                    help="default: $WANDB_ENTITY, else the W&B user's default entity")
     ap.add_argument("--project", default=os.environ.get("WANDB_PROJECT", "miles-MI355-code"))
     args = ap.parse_args()
     metrics = args.metric or DEFAULT_METRICS
+    if not args.entity:
+        args.entity = wandb.Api().default_entity
     workspace = ws.Workspace(
         entity=args.entity,
         project=args.project,

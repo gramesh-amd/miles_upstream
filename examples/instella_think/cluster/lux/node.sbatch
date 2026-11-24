@@ -6,7 +6,7 @@
 # Hold N GPU nodes with the miles container up on each (node_agent.sh), the Lux equivalent of
 # `sbatch ... --wrap "sleep infinity"` + cluster/bringup.sh. Submit from the miles checkout:
 #
-#   sbatch -A ven136 -N 1 -t 04:00:00 -o ~/logs/%x-%j.out \
+#   sbatch -A <account> -N 1 -t 04:00:00 -o ~/logs/%x-%j.out \
 #     --export=ALL,LUX_DIR=$PWD/examples/instella_think/cluster/lux examples/instella_think/cluster/lux/node.sbatch
 #
 # Then drive the nodes with cluster/lux/on_node.sh. Cancel with scancel when done: the nodes

@@ -18,7 +18,8 @@ INSTELLA_ENV="${INSTELLA_ENV:-${USER_HOME}/.instella-env.sh}"
 # shellcheck disable=SC1090
 [ -f "${INSTELLA_ENV}" ] && source "${INSTELLA_ENV}"
 
-# Shared NFS area for logs, rollout dumps, wandb files and small shared assets.
+# Shared NFS area for logs, rollout dumps, wandb files and small shared assets. The default
+# mount point is site-specific; set NFS_ROOT elsewhere.
 NFS_ROOT="${NFS_ROOT:-/shared_nfs/${INSTELLA_USER}}"
 # Holds checkpoints/ (HF model, torch_dist conversion, run outputs) and data/ (JSONLs).
 ASSET_ROOT="${ASSET_ROOT:-${USER_HOME}}"

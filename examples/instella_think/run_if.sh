@@ -1,8 +1,7 @@
 #!/bin/bash
 # Instruction-following arm of the Instella-MoE-16B-A3B 32k RL runs.
 #
-# Same experiment as the math run logged at
-#   https://wandb.ai/genaiamd/miles-mis/runs/rytwnj5z  (instella-moe-16b-async-s4-3node_FP32LMHEAD)
+# Same experiment as the reference 32k math run (3 nodes, fp32 LM head, max-staleness 4)
 # with the task swapped from DAPO-Math/deepscaler to verifiable instruction following.
 # Everything else is inherited from run_async.sh, whose defaults ARE that run's settings:
 #
@@ -15,14 +14,13 @@
 #   fp32 LM head on BOTH sides, dp-attention on, sglang mem-fraction 0.60
 #   dynamic sampling filter check_reward_nonzero_std, over-sampling-batch-size 64
 #
-# I verified those against the run's own logged config rather than trusting the script,
-# so this really is the same recipe. Two entries in that config are red herrings worth
+# These match that run's logged config. Two entries in that config are red herrings worth
 # knowing about before you "match" them:
 #   * grpo_iterations=2 is NOT a miles setting. It comes from the Primus Megatron fork's
 #     own unused GRPO implementation (training/arguments.py:1892, default 2) and miles
 #     never reads it. There is no --grpo-iterations in miles at all.
-#   * disable_grpo_std_normalization is absent from that config but present in today's
-#     miles parser, i.e. the flag was added after 20260820. The reference run therefore
+#   * disable_grpo_std_normalization is absent from that config but present in the current
+#     miles parser, i.e. the flag was added after that run. The reference run therefore
 #     ran WITH std normalization, which is what this script reproduces (DISABLE_STD_NORM
 #     defaults to 0 in run_async.sh).
 #
@@ -139,13 +137,12 @@ export NLTK_DATA
 export SAVE_TAG="${SAVE_TAG:-miles_if32k_nostd_r3}"
 export WANDB_PROJECT="${WANDB_PROJECT:-miles-MI355-IF}"
 # Deterministic run name: with the suffix on, this logs as "<group>_<random6>-RANK_0" and
-# has to be renamed in the UI to say anything, which is how rytwnj5z ended up hand-labelled
-# "_FP32LMHEAD" while its group string said nothing about the experiment.
+# has to be renamed in the UI to say anything.
 export WANDB_RANDOM_SUFFIX="${WANDB_RANDOM_SUFFIX:-0}"
 
 # Core hyperparameters, named here so the run name below is BUILT FROM THE VALUES ACTUALLY
 # PASSED rather than a hand-written label that can drift out of sync with them. Defaults are
-# the reference run's (rytwnj5z) values.
+# the reference run's values.
 export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
 export N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-256}"

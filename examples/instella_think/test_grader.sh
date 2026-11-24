@@ -3,12 +3,13 @@
 # and free port, all removed on exit):
 #   test_code_exec_hardening.py, test_code_exec_adversarial.py, test_code_hack_monitor.py in both
 #   reward modes, the code_reward.py self-test, test_eval_code_ckpt.py (offline), the Python >= 3.13
-#   refusal, and (when that copy is reachable) that the lux verification's vendored
-#   code_exec_server.py matches this one.
+#   refusal, and (only with LUX_SERVER_COPY set) that a vendored copy of code_exec_server.py
+#   kept elsewhere matches this one.
 #
 #   bash examples/instella_think/test_grader.sh
 #   GRADER_PYTHON=/path/to/venv/bin/python bash ...   # interpreter for programs (numpy cases need numpy)
 #   GRADER_PROCESSES=4 GRADER_WORKERS=16 bash ...       # server with --processes 4 (the Lux sandbox layout)
+#   LUX_SERVER_COPY=/path/to/copy/code_exec_server.py bash ...   # also compare that copy
 #
 # Clients need python3 with `requests`. Timing cases need --max-timeout >= 5 and an idle host.
 set -uo pipefail
@@ -16,7 +17,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 PY="${GRADER_PYTHON:-python3}"
 WORKERS="${GRADER_WORKERS:-8}"
 PROCESSES="${GRADER_PROCESSES:-1}"
-LUX_COPY="${LUX_SERVER_COPY-/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data/final_v2/lux/code_exec_server.py}"
+LUX_COPY="${LUX_SERVER_COPY:-}"
 D="$(mktemp -d)"
 SRV=""
 trap '[ -n "$SRV" ] && kill "$SRV" 2>/dev/null; wait 2>/dev/null; rm -rf "$D"' EXIT
@@ -24,9 +25,10 @@ fails=0
 step() { echo; echo "=== $1"; shift; "$@" || { echo "FAILED: $*"; fails=$((fails + 1)); }; }
 
 lux_copy() {
+   [ -n "$LUX_COPY" ] || { echo "skip: LUX_SERVER_COPY unset"; return 0; }
    [ -f "$LUX_COPY" ] || { echo "skip: no $LUX_COPY"; return 0; }
    cmp -s "$HERE/code_exec_server.py" "$LUX_COPY" && { echo "lux copy matches"; return 0; }
-   echo "lux copy differs: cp $HERE/code_exec_server.py $LUX_COPY, then update SERVER_SHA256 in verify_checkers.py" \
+   echo "lux copy differs: cp $HERE/code_exec_server.py $LUX_COPY, then update any checksum pinned next to it" \
         "(now $(sha256sum "$HERE/code_exec_server.py" | cut -c1-64))"
    return 1
 }

@@ -38,7 +38,7 @@ done
 export APPTAINER_TMPDIR="${NL}/tmp"
 say "starting container for shard ${SHARD}"
 apptainer instance start --cleanenv --fakeroot --overlay "${NL}/overlay" --no-home \
-   --bind /lustre/orion --bind "${LUX_HOME}" --bind "${NL}" --env-file "${NL}/container.env" \
+   --bind "${LUX_FS}" --bind "${LUX_HOME}" --bind "${NL}" --env-file "${NL}/container.env" \
    "${SIF}" "${INST}" || { say "FATAL: instance start failed"; exit 1; }
 apptainer exec --cleanenv --env-file "${NL}/container.env" "instance://${INST}" bash -c '
    ulimit -c 0   # see eval_in_container.sh: a killed sglang dumps ~2.4 GB per GPU process into the home

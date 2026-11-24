@@ -4,12 +4,17 @@ Lux has no Docker and no Spur, so the Crusoe tooling in `cluster/` is replaced h
 recipe itself (`run_code.sh`, `run_async.sh`) runs unchanged. Run from the login node in
 `~/miles` with `L=examples/instella_think/cluster/lux`.
 
+Site-specific settings live in `lux_env.sh`, each overridable from the environment: export
+`LUX_ACCOUNT` (your project id, the `<account>` below) or `LUX_ROOT` on the login node; `LUX_FS`
+(`/lustre/orion`) and `LUX_PROXY` default to Lux's. The batch scripts request `#SBATCH -p batch`;
+pass `-p <partition>` to `sbatch` elsewhere.
+
 | Crusoe | Lux |
 |---|---|
 | `bringup.sh` (docker pull + run) | `fetch.sbatch` builds the SIF once; `node.sbatch` + `node_agent.sh` keep an Apptainer instance up per node |
 | `on_node.sh` (srun + docker exec) | `$L/on_node.sh [-b] [-p] <JOBID> <NODE\|-> '<cmd>'` |
 | `code_exec.sh start [bench]` (ssh to a CPU host) | `sandbox.sbatch` on its own node; writes `~/.miles/code-exec-host` |
-| `/shared_nfs/...` | `$LUX_ROOT=/lustre/orion/ven136/scratch/$USER/instella` (`~/.instella-env.sh`) |
+| `/shared_nfs/...` | `$LUX_ROOT=$LUX_FS/$LUX_ACCOUNT/scratch/$USER/instella` (`~/.instella-env.sh`) |
 
 Why the agent: Spur's containers lived under dockerd, outside Slurm. Under Apptainer every
 process belongs to a Slurm step and dies with it, so `node_agent.sh` runs in one step that
@@ -30,7 +35,7 @@ The usual way to run. The arguments are the run spec, the same `VAR=VALUE` overr
 nodes (`-N 2` for the 1-node layout, `-N 4` for the 3-node recipe). From `~/miles`:
 
 ```bash
-sbatch -A ven136 -N 4 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/run.sbatch \
+sbatch -A <account> -N 4 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/run.sbatch \
   CONTEXT_LEN=32768 DRGRPO=1 DRGRPO_DIVISOR=17400 OVERLONG_FILTER=1 SAVE_TAG=code32k_drgrpo
 ```
 
@@ -39,30 +44,30 @@ override it. `specs/code_binary_36k.env` is the binary-reward code recipe (2 tra
 nodes, so `-N 7`); its header covers the Dr. GRPO divisor and continuing from a checkpoint:
 
 ```bash
-sbatch -A ven136 -N 7 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/run.sbatch \
+sbatch -A <account> -N 7 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/run.sbatch \
   examples/instella_think/cluster/lux/specs/code_binary_36k.env CODE_TRAIN=<train.jsonl> SAVE_TAG=<tag>
 ```
 
 The job sets up every container, starts the sandboxes and the Ray cluster, runs the spec and ends
-when the run does. Metrics go to W&B live (team `genaiamd` unless the spec sets `WANDB_ENTITY`;
+when the run does. Metrics go to W&B live (the W&B user's default entity unless the spec sets `WANDB_ENTITY`
+or the environment `LUX_WANDB_ENTITY`;
 `WANDB_MODE=offline` logs locally). W&B alone uses the ORNL proxy (`WANDB_HTTPS_PROXY`), so
 traffic between nodes stays direct. Per job, `$LUX_ROOT/shared/jobs/<jobid>/` holds the spec, each
 node's setup log, the sandbox log, `run.log` (the run's own log) and `run.status`. Prerequisites:
 the once-only steps below (SIF, checkpoint, data, Megatron) and `wandb login` on the login node.
 
 Cross-node collectives use RCCL's socket transport over `bond0` (the container's verbs stack
-cannot drive the Pollara NICs); see `/lustre/orion/ven136/proj-shared/models/scripts/netenv.sh`
-for the RoCE setup if weight sync becomes the bottleneck.
+cannot drive the Pollara NICs); set up RoCE for RCCL if weight sync becomes the bottleneck.
 
 ## Steps by hand (debugging)
 
 ```bash
 L=examples/instella_think/cluster/lux; X="--export=ALL,LUX_DIR=$PWD/$L"
 # Once: SIF (~10 min), DPO checkpoint, train data, benchmarks.
-sbatch -A ven136 -o ~/logs/%x-%j.out $X $L/fetch.sbatch
+sbatch -A <account> -o ~/logs/%x-%j.out $X $L/fetch.sbatch
 # Per run: GPU node(s) and the sandbox node.
-sbatch -A ven136 -N 1 -t 06:00:00 -o ~/logs/%x-%j.out $X $L/node.sbatch
-sbatch -A ven136 -t 06:00:00 -o ~/logs/%x-%j.out $X $L/sandbox.sbatch
+sbatch -A <account> -N 1 -t 06:00:00 -o ~/logs/%x-%j.out $X $L/node.sbatch
+sbatch -A <account> -t 06:00:00 -o ~/logs/%x-%j.out $X $L/sandbox.sbatch
 J=<node.sbatch job>
 # Once per user (-p: through the ORNL proxy), then once per job:
 $L/on_node.sh -p $J - 'cd $USER_HOME/miles && bash examples/instella_think/investigate_megatron.sh'

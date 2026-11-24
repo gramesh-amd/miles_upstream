@@ -8,6 +8,6 @@
 # `cluster/code_exec.sh start` + `start bench`, which ssh to a fixed CPU host. Writes this node's
 # name to $CODE_EXEC_HOST_FILE, which ~/.instella-env.sh reads. Submit from the miles checkout:
 #
-#   sbatch -A ven136 -t 04:00:00 -o ~/logs/%x-%j.out \
+#   sbatch -A <account> -t 04:00:00 -o ~/logs/%x-%j.out \
 #     --export=ALL,LUX_DIR=$PWD/examples/instella_think/cluster/lux examples/instella_think/cluster/lux/sandbox.sbatch
 exec bash "${LUX_DIR:?submit with --export=ALL,LUX_DIR=<this dir>}/run_sandbox_node.sh"

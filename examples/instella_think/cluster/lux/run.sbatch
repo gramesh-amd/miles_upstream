@@ -9,7 +9,7 @@
 # training rewards and node 1 the benchmark evals. The arguments are the run spec, the same
 # VAR=VALUE overrides cluster/launch.sh takes on Crusoe. From the miles checkout:
 #
-#   sbatch -A ven136 -N 4 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/run.sbatch \
+#   sbatch -A <account> -N 4 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/run.sbatch \
 #     CONTEXT_LEN=32768 DRGRPO=1 DRGRPO_DIVISOR=17400 OVERLONG_FILTER=1 SAVE_TAG=code32k_drgrpo
 #
 # An argument naming a file (e.g. specs/code_binary_36k.env) is a spec file: one VAR=VALUE per line,

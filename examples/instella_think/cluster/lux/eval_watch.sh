@@ -36,7 +36,7 @@ for d in "${SAVE_DIR}"/iter_*; do
    cap=SGLANG_MAX_RUNNING_REQUESTS=256
    for kv in "$@"; do case "${kv}" in SGLANG_MAX_RUNNING_REQUESTS=*) cap="${kv}" ;; esac; done
    # The training spec's sandbox sizing favours rewards; an eval job grades benchmarks.
-   job="$(cd "${LUX_DIR}/../../../.." && sbatch --parsable -A "${LUX_ACCOUNT}" -N "${EVAL_NODES}" -t "${EVAL_HOURS}:00:00" \
+   job="$(cd "${LUX_DIR}/../../../.." && sbatch --parsable -A "${LUX_ACCOUNT:?set LUX_ACCOUNT (your OLCF project id)}" -N "${EVAL_NODES}" -t "${EVAL_HOURS}:00:00" \
       -J instella-eval -o "${LUX_HOME}/logs/%x-%j.out" "${LUX_DIR}/run.sbatch" "$@" "${cap}" \
       CODE_EXEC_WORKERS=8 CODE_BENCH_WORKERS=112 EVAL_ONLY=1 EVAL_STEP="${step}" EVAL_SOURCE_DIR="${SAVE_DIR}")" \
       || { echo "sbatch failed for iter ${step}"; continue; }

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Code RL arm of the Instella-MoE-16B-A3B 32k RL runs.
 #
-# Same recipe as run_if.sh (itself the rytwnj5z math recipe, see that file's header),
+# Same recipe as run_if.sh (itself the reference 32k math recipe, see that file's header),
 # with the task swapped to unit-test-verified code generation:
 #   data   : Dolci-Think-RL code_rlvr (21k prompts, stdin/stdout + assert tests)
 #   reward : code_reward.batched_reward -- all-or-nothing (CODE_REWARD_MODE=binary) while

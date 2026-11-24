@@ -3,14 +3,16 @@
 # Run on the login node.
 #
 #   cluster/bringup.sh <JOBID>
-#   IMAGE=... PORT=... cluster/bringup.sh <JOBID>
+#   IMAGE=... PORT=... NODE_SCRATCH=... SHARED_MOUNT=... cluster/bringup.sh <JOBID>
 #
 # The remote step returns once the container is up. Spur allows a single interactive step
 # per job per node, so a step left running blocks every later srun on that node with "an
 # interactive session for this job is already active on this node". The container is owned
 # by dockerd and outlives the step; Spur's epilog removes it by its spur_job_id label.
 set -uo pipefail
-export SPUR_CONTROLLER_ADDR="${SPUR_CONTROLLER_ADDR:-http://crs-m2m-cpu-spur-005.crusoe.amd.com:6817,http://crs-m2m-cpu-spur-006.crusoe.amd.com:6817,http://crs-m2m-cpu-spur-007.crusoe.amd.com:6817}"
+# Site-specific: Spur's srun/squeue find the controllers through SPUR_CONTROLLER_ADDR
+# (comma-separated http://host:port list); export it in your login shell.
+export SPUR_CONTROLLER_ADDR="${SPUR_CONTROLLER_ADDR:?set SPUR_CONTROLLER_ADDR (http://host:port,... of the Spur controllers)}"
 
 CLUSTER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 JOBID="${1:?usage: bringup.sh <JOBID>}"
@@ -19,6 +21,9 @@ PORT="${PORT:-18822}"
 USER_NAME="$(id -un)"
 HOME_DIR="${HOME}"
 NAME="${NAME:-${USER_NAME}-miles-dev}"
+# Site-specific: node-local scratch root and the shared filesystem the container mounts.
+NODE_SCRATCH="${NODE_SCRATCH:-/mnt/m2m_nobackup}"
+SHARED_MOUNT="${SHARED_MOUNT:-/shared_nfs}"
 SETUP="${CLUSTER_DIR}/node_setup.sh"
 LOGDIR="${HOME_DIR}/logs"
 STATUS_DIR="${HOME_DIR}/.miles/status-${JOBID}"
@@ -37,8 +42,8 @@ echo "image: $IMAGE"
 for node in $NODES; do
     log="${LOGDIR}/bringup-${JOBID}-${node}.log"
     # base64 keeps the nested quoting intact through srun -> bash -c -> payload.
-    payload=$(printf 'export IMAGE=%q PORT=%q USER_NAME=%q HOME_DIR=%q NAME=%q SLURM_JOB_ID=%q\nbash %q\n' \
-        "$IMAGE" "$PORT" "$USER_NAME" "$HOME_DIR" "$NAME" "$JOBID" "$SETUP" | base64 -w0)
+    payload=$(printf 'export IMAGE=%q PORT=%q USER_NAME=%q HOME_DIR=%q NAME=%q SLURM_JOB_ID=%q NODE_SCRATCH=%q SHARED_MOUNT=%q\nbash %q\n' \
+        "$IMAGE" "$PORT" "$USER_NAME" "$HOME_DIR" "$NAME" "$JOBID" "$NODE_SCRATCH" "$SHARED_MOUNT" "$SETUP" | base64 -w0)
     # srun on Spur wants a TTY, hence `script`.
     nohup script -qec \
         "srun --jobid=$JOBID --overlap -w $node bash -lc 'echo $payload | base64 -d | bash'" \

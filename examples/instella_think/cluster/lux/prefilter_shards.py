@@ -18,8 +18,18 @@ import json
 import os
 import sys
 
-DATA_ROOT = os.environ.get("DATA_ROOT") or os.path.join(
-    os.environ.get("LUX_ROOT", f"/lustre/orion/ven136/scratch/{os.environ.get('USER', '')}/instella"), "data")
+
+def _lux_root():
+    # Same default as lux_env.sh.
+    if os.environ.get("LUX_ROOT"):
+        return os.environ["LUX_ROOT"]
+    account = os.environ.get("LUX_ACCOUNT") or os.environ.get("SLURM_JOB_ACCOUNT")
+    if not account:
+        sys.exit("set DATA_ROOT, LUX_ROOT or LUX_ACCOUNT (your OLCF project id)")
+    return f"{os.environ.get('LUX_FS', '/lustre/orion')}/{account}/scratch/{os.environ.get('USER', '')}/instella"
+
+
+DATA_ROOT = os.environ.get("DATA_ROOT") or os.path.join(_lux_root(), "data")
 # PREFILTER_SHARDS: a second shard set (another training set) beside an existing one; give
 # prefilter.sbatch the same value.
 SHARDS = os.environ.get("PREFILTER_SHARDS") or os.path.join(DATA_ROOT, "prefilter", "shards")

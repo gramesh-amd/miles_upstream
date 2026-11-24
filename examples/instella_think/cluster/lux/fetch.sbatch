@@ -9,7 +9,7 @@
 # the SIF, the DPO checkpoint, the code train data and the benchmark sets. Idempotent: each step
 # is skipped when its output exists. Submit from the login node:
 #
-#   sbatch -A ven136 -o ~/logs/%x-%j.out --export=ALL,LUX_DIR=$PWD/examples/instella_think/cluster/lux \
+#   sbatch -A <account> -o ~/logs/%x-%j.out --export=ALL,LUX_DIR=$PWD/examples/instella_think/cluster/lux \
 #     examples/instella_think/cluster/lux/fetch.sbatch
 set -uo pipefail
 source "${LUX_DIR:?submit with --export=ALL,LUX_DIR=<this dir>}/lux_env.sh"
@@ -34,7 +34,7 @@ else
 fi
 
 ctr() {
-   apptainer exec --cleanenv --bind /lustre/orion --bind "${LUX_HOME}" \
+   apptainer exec --cleanenv --bind "${LUX_FS}" --bind "${LUX_HOME}" \
       --env "http_proxy=${LUX_PROXY},https_proxy=${LUX_PROXY},HTTP_PROXY=${LUX_PROXY},HTTPS_PROXY=${LUX_PROXY}" \
       --env "HF_HOME=${LUX_ROOT}/hf,USER_HOME=${LUX_HOME},INSTELLA_USER=${LUX_USER}" \
       "${SIF}" bash -c "source /opt/venv/bin/activate 2>/dev/null; $1"
@@ -68,7 +68,7 @@ fi
 # image (the sglang/mbridge/Megatron patches need it) and still see the GPUs?
 say "probe: fakeroot + overlay"
 mkdir -p "${NL}/probe-overlay"
-apptainer exec --cleanenv --fakeroot --overlay "${NL}/probe-overlay" --bind /lustre/orion "${SIF}" bash -c '
+apptainer exec --cleanenv --fakeroot --overlay "${NL}/probe-overlay" --bind "${LUX_FS}" "${SIF}" bash -c '
    source /opt/venv/bin/activate 2>/dev/null
    echo "id: $(id)"; python3 -V
    echo "ls -ld /opt/venv /sgl-workspace /root/Megatron-LM:"; ls -ld /opt/venv /sgl-workspace /root/Megatron-LM 2>&1

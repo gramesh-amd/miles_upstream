@@ -11,7 +11,7 @@
 # the miles checkout:
 #
 #   python3 examples/instella_think/cluster/lux/prefilter_shards.py split 14        # once
-#   sbatch -A ven136 -N 16 -t 9:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/prefilter.sbatch
+#   sbatch -A <account> -N 16 -t 9:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/prefilter.sbatch
 #   python3 examples/instella_think/cluster/lux/prefilter_shards.py status
 #   python3 examples/instella_think/cluster/lux/prefilter_shards.py merge           # when all are done
 #

@@ -33,7 +33,7 @@ TRITON_CACHE_DIR=${NL}/triton
 XDG_CACHE_HOME=${NL}/cache
 TMPDIR=${NL}/tmp
 WANDB_MODE=${WANDB_MODE}
-WANDB_ENTITY=${WANDB_ENTITY}
+${WANDB_ENTITY:+WANDB_ENTITY=${WANDB_ENTITY}}
 MILES_ROLLOUT_RAMP_S=${RAMP_S}
 WANDB_HTTPS_PROXY=${LUX_PROXY}
 WANDB_HTTP_PROXY=${LUX_PROXY}
@@ -50,7 +50,7 @@ EOF
 export APPTAINER_TMPDIR="${NL}/tmp"
 say "starting container (rank ${SLURM_PROCID}, ip ${NODE_IP})"
 apptainer instance start --cleanenv --fakeroot --overlay "${NL}/overlay" --no-home \
-   --bind /lustre/orion --bind "${LUX_HOME}" --bind "${NL}" --env-file "${NL}/container.env" \
+   --bind "${LUX_FS}" --bind "${LUX_HOME}" --bind "${NL}" --env-file "${NL}/container.env" \
    "${SIF}" "${INST}" || { say "FATAL: instance start failed"; touch "${JOB_DIR}/failed"; exit 1; }
 apptainer exec --cleanenv --env-file "${NL}/container.env" "instance://${INST}" \
    bash "${LUX_DIR}/eval_in_container.sh"

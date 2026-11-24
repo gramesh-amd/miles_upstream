@@ -19,7 +19,7 @@ NODE_IP="$(ip -o -4 route get 1 | grep -oP '(?<=src )\S+')"
 # Ray workers take their environment from the container, not from the shell that launches the
 # run, so spec settings they need must be applied here.
 WANDB_MODE="$(source "${JOB_DIR}/spec.env"; echo "${WANDB_MODE:-online}")"
-# miles passes no W&B entity, so without this runs land in the key owner's default team.
+# miles passes no W&B entity; with none set here either, runs land in the key owner's default entity.
 WANDB_ENTITY="$(source "${JOB_DIR}/spec.env"; echo "${WANDB_ENTITY:-${LUX_WANDB_ENTITY}}")"
 # Optional request ramp after the engines start (miles MILES_ROLLOUT_RAMP_S, seconds; 0 = off). It was
 # the workaround for degenerate generations on request bursts, fixed in the sglang515 overlay by
@@ -39,7 +39,7 @@ TRITON_CACHE_DIR=${NL}/triton
 XDG_CACHE_HOME=${NL}/cache
 TMPDIR=${NL}/tmp
 WANDB_MODE=${WANDB_MODE}
-WANDB_ENTITY=${WANDB_ENTITY}
+${WANDB_ENTITY:+WANDB_ENTITY=${WANDB_ENTITY}}
 MILES_ROLLOUT_RAMP_S=${RAMP_S}
 WANDB_HTTPS_PROXY=${LUX_PROXY}
 WANDB_HTTP_PROXY=${LUX_PROXY}
@@ -55,7 +55,7 @@ EOF
 export APPTAINER_TMPDIR="${NL}/tmp"
 say "starting container (rank ${SLURM_PROCID}, ip ${NODE_IP})"
 apptainer instance start --cleanenv --fakeroot --overlay "${NL}/overlay" --no-home \
-   --bind /lustre/orion --bind "${LUX_HOME}" --bind "${NL}" --env-file "${NL}/container.env" \
+   --bind "${LUX_FS}" --bind "${LUX_HOME}" --bind "${NL}" --env-file "${NL}/container.env" \
    "${SIF}" "${INST}" || { say "FATAL: instance start failed"; touch "${JOB_DIR}/failed"; exit 1; }
 apptainer exec --cleanenv --env-file "${NL}/container.env" "instance://${INST}" \
    bash "${LUX_DIR}/run_in_container.sh"

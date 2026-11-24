@@ -28,7 +28,8 @@ import sys
 
 import wandb
 
-ENTITY = os.environ.get("WANDB_ENTITY", "genaiamd")
+# Unset: the W&B user's default entity (resolved in main).
+ENTITY = os.environ.get("WANDB_ENTITY") or None
 PROJECT = os.environ.get("WANDB_PROJECT", "miles-MI355-code")
 LOCAL_DIR = os.environ.get("WANDB_LOCAL_DIR", "")
 KEEP = ("eval/humanevalplus", "eval/mbppplus", "eval/lcb_v3", "eval/lcb_v3/repetition_frac",
@@ -88,6 +89,8 @@ def main():
     save_dir, group, eval_group = sys.argv[1:4]
     series_id = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else f"evals-{os.path.basename(save_dir.rstrip('/'))}"
     api = wandb.Api()
+    global ENTITY
+    ENTITY = ENTITY or api.default_entity
     check_uploads(api, eval_group)
     update_series(api, save_dir, group, series_id)
 

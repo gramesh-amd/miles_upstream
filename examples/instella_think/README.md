@@ -16,7 +16,6 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `code_reward.py` | The code reward (`--custom-rm-path code_reward.batched_reward`). All-or-nothing while training (`CODE_REWARD_MODE=binary`, default; `partial` restores the old pass-rate reward) and at eval; the pass rate is logged as `rollout/code/pass_rate_mean`. Self-tests with `python3 code_reward.py` (needs the sandbox). |
 | `code_exec_server.py` | Stdlib-only code-execution sandbox for a CPU host (rlimits + audit-hook guard, no containers needed). Started by `cluster/code_exec.sh`. |
 | `test_grader.sh` | Runs every grader test (hardening, adversarial, hack monitor in both reward modes, reward self-test) against a private local server. |
-| `HANDOFF.md` | State of the v7 code-RL grader work: changes, env vars, verification, metrics, lux plan, open decisions. |
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol, plus LCB v5/v6, HumanEval/MBPP Pro, CRUXEval and Codeforces. |
 | `validate_code_benchmarks.py` | Grades reference / always-wrong answers and old eval dumps against the bench sandbox. |
@@ -40,7 +39,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `validate.sh` | 5-rung ladder: FarSkip+mbridge smoke → convert → sglang load → weight-sync parity → one train step. |
 | `patch_megatron_optim_step.py` | Only for runs using `--optimizer-cpu-offload` (not these recipes). Backports upstream Megatron `f4502eb1c` so such checkpoints resume with optimizer state. |
 | `fix_ckpt_common_optimizer_state.py` | Repairs checkpoints already written *without* that patch, so they can resume with optimizer state. |
-| `run_if.sh` | **Instruction-following arm** at 32k. Same recipe as W&B run `rytwnj5z`, task swapped from math to verifiable IF. Wrapper over `run_async.sh`. |
+| `run_if.sh` | **Instruction-following arm** at 32k. Same recipe as the reference 32k math run, task swapped from math to verifiable IF. Wrapper over `run_async.sh`. |
 | `if_reward.py` | The IF reward (`--custom-rm-path if_reward.batched_reward`). Partial credit while training, strict at eval. Self-tests with `python3 if_reward.py`. |
 | `IFEvalG/` | Vendored IFEval constraint checkers (Apache-2.0, Google Research via AllenAI). ~53 constraint types, no network at runtime. |
 | `prepare_if_data.py` | Builds the IF train/eval JSONLs. `inspect` dumps a source's real schema; `build` writes the files and refuses to write a badly-mapped one. |
@@ -65,16 +64,19 @@ git clone git@github.com:AMD-AGI/Primus-Instella-Internal.git ~/Primus-Instella-
 Create `~/.instella-env.sh` (sourced by `paths.sh`; see that file for every knob):
 
 ```bash
-NFS_ROOT=/shared_nfs/<you>          # logs, rollout dumps, wandb files
+NFS_ROOT=/path/to/shared/<you>      # logs, rollout dumps, wandb files
 CODE_EXEC_HOST=<a CPU host>         # runs the sandbox; reachable by ssh from here and HTTP from GPU nodes
-# The DPO base and its torch_dist conversion are world-readable; reuse them instead of
-# converting your own (step 4). Checkpoints you train still go to your own CKPT_ROOT.
-HF_CKPT=/shared_nfs/gramesh/checkpoints/Instella-MoE-16B-A3B-DPO
-REF_LOAD=/shared_nfs/gramesh/checkpoints/Instella-MoE-16B-A3B-DPO_torch_dist
-# The built code data is also readable; skip step 4's data builds by pointing at it:
-CODE_TRAIN=/shared_nfs/gramesh/data/code-train/dolci-code-train.jsonl
-CODE_BENCH_DIR=/shared_nfs/gramesh/data/code-bench
+# Optional: if a teammate already converted the DPO base or built the data on shared storage,
+# point at their copies instead of redoing step 4. Checkpoints you train still go to your own CKPT_ROOT.
+# HF_CKPT=/path/to/checkpoints/Instella-MoE-16B-A3B-DPO
+# REF_LOAD=/path/to/checkpoints/Instella-MoE-16B-A3B-DPO_torch_dist
+# CODE_TRAIN=/path/to/data/code-train/dolci-code-train.jsonl
+# CODE_BENCH_DIR=/path/to/data/code-bench
 ```
+
+`cluster/bringup.sh` and `cluster/on_node.sh` also need `SPUR_CONTROLLER_ADDR` (your site's Spur
+controllers, `http://host:port,...`) exported in the login shell; `NODE_SCRATCH` and `SHARED_MOUNT`
+override `bringup.sh`'s site-specific node-local scratch root and shared mount.
 
 W&B credentials go in `~/.netrc` (`wandb login` writes it); the scripts pass it to the
 workers by absolute path because the container runs as root with `HOME=/root`.
@@ -89,14 +91,14 @@ cd ~/miles && I=examples/instella_think && source $I/paths.sh
 
 ```bash
 sbatch --parsable --nodes=1 --ntasks-per-node=1 --exclusive --cpus-per-task=236 --gres=gpu:8 \
-  --time=24:00:00 --partition=amd-spur,amd-spur-v2 \
-  --account=<amd-brain-models|amd-burst> --qos=<amd-brain-models-qos|amd-burst-qos> \
+  --time=24:00:00 --partition=<partition[,partition2]> \
+  --account=<account> --qos=<qos> \
   --job-name=code-rl --wrap="sleep infinity"
 squeue -u $USER                       # wait for RUNNING, note JOBID and the node name
 ```
 
-List both partitions; one alone can queue for a day while the other has idle nodes. Burst
-jobs are preemptible (cancelled, not requeued), so long runs belong on a team QOS.
+Listing several partitions lets the job start on whichever has idle nodes first. Long runs
+belong on a QOS that does not preempt.
 
 ### 2. Containers (5-20 min, mostly image pull)
 
@@ -300,13 +302,13 @@ All are `VAR=VALUE` overrides to `cluster/launch.sh`; defaults leave the recipe 
 | `OVERLONG_FILTER_DROP_UNCLOSED` | 0 | With `OVERLONG_FILTER=1`, also drop samples that finished under the cap without closing `</think>` (a stray low-probability EOS, always scored 0). See `overlong_filter._is_unclosed`. |
 | `ROUTER_OFF` | 0 | No router training signal: aux loss 0, no load balancing, frozen expert bias. |
 | `ROUTER_LOG` | 0 | Router telemetry to `ROUTER_LOG_PATH` (default `$LOG_DIR/router_log_<SAVE_TAG>.jsonl`) every `ROUTER_LOG_EVERY` (5) steps. |
-| `WANDB_BASE_URL` | | Self-hosted W&B endpoint, e.g. `https://api.forge.coreweave.com`. |
+| `WANDB_BASE_URL` | | Self-hosted W&B endpoint, e.g. `https://<your W&B host>`. |
 | `EXTRA_ARGS` | | Any `train_async.py` flags, appended last so they win, e.g. `EXTRA_ARGS="--lr 2e-6 --save-interval 10"`. Values can't contain spaces. |
 
 **W&B credentials** reach the workers as `WANDB_API_KEY` through the Ray runtime env (from
 `WANDB_KEY`), or via the netrc. They are never passed as `--wandb-key`, because miles uploads
 every parsed argument into the run's W&B config, where anyone with project access can read
-it. Runs launched before this change have the key in their config, so rotate it.
+it.
 
 **Online difficulty filter (`ADAPTIVE_FILTER=1`).** The default dynamic filter only drops
 groups whose 8 rewards are identical, so a 7/8 group still trains at full generation cost.
@@ -552,7 +554,7 @@ In W&B (`rollout/step` axis for `rollout/*`), besides miles' own `rollout/*`, `e
 - `rollout/code_hack/early_exit_rate` and `strict_reject_rate` are failed attempts; rising early in a run is
   the policy probing the grader.
 - `rollout/domain/<key>/<domain>/*`: one set of panels per domain, for each `PER_DOMAIN_KEYS` grouping
-  (v7 data: `route` = function / stdio, `src` = acecoder / klear / nemotron / synthetic2, `src_route`).
+  (for the code training data: `route` = function / stdio, `src` = acecoder / klear / nemotron / synthetic2, `src_route`).
   Computed over every graded training sample since the last step, including the groups the dynamic
   filter drops (`trained_count` is what reached the trainer). `solve_rate` counts full-reward samples
   (`SOLVED_REWARD`); `nonzero_rate` equals it under the binary reward and counts any partial credit under
@@ -576,7 +578,7 @@ Stop a run from inside the container: `RAY_ADDRESS=http://$HEAD_IP:8265 ray job 
 `ray job stop <id>`. **Relaunching with the same `SAVE_TAG` resumes** from the newest
 `iter_*` in `$CKPT_ROOT/Instella-MoE-16B-A3B-DPO_<SAVE_TAG>`; a new tag starts from the DPO base.
 
-### What a healthy run looks like (1 node, 16k context, reference run `miles_code16k_1node`)
+### What a healthy run looks like (1 node, 16k context, the reference run above)
 
 | | |
 |---|---|
@@ -619,7 +621,7 @@ node is split **4 trainer (EP4) + 4 rollout (1 engine EP4/DP4)**. `SINGLE_NODE=1
 local Ray head, cleans stale procs, and applies the reduced topology automatically.
 
 **Which container?** Run everything below in the **miles training container** (the one
-with Ray + miles installed, e.g. `gora-async` / `rocm/sgl-dev:miles-rocm720-mi35x`) — NOT
+with Ray + miles installed, e.g. `rocm/sgl-dev:miles-rocm720-mi35x`) — NOT
 the sglang-only lm_eval container (`lmsysorg/sglang-rocm:*`), which has sglang/aiter but
 **no Ray or miles**, so `run_async.sh` will die with `ray: command not found`. Verify with
 `source /opt/venv/bin/activate && which ray`.
@@ -671,8 +673,8 @@ EXTRA_ARGS="--log-passrate" bash examples/instella_think/run_async.sh
 
 - `DRGRPO_DIVISOR=21680` is the step-0 mean response length of the DPO-64k checkpoint at
   this cap. Measure it again for another checkpoint or cap (see "Dr. GRPO loss").
-- `mix_v5_math.jsonl` and the `*-olmes.jsonl` eval sets aren't built by this repo; copy them
-  from the MI325X share. R1/R2's eval YAML covered AIME 2024/2025, HMMT Feb 2025 and
+- `mix_v5_math.jsonl` and the `*-olmes.jsonl` eval sets aren't built by this repo; bring
+  your own. R1/R2's eval YAML covered AIME 2024/2025, HMMT Feb 2025 and
   BeyondAIME at n=16, temperature 0.6, top_p 0.95, 65536 tokens.
 - The async "retry" (`--async-unused-samples-handler retry` on MI325X's newer miles) is built
   in here: `examples/fully_async` always returns aborted and over-stale groups to the buffer.
@@ -683,11 +685,11 @@ EXTRA_ARGS="--log-passrate" bash examples/instella_think/run_async.sh
   `RUN_SCRIPT=run_async.sh` (its default is `run_code.sh`).
 - Confirm with `DRY_RUN=1` first: it prints the resolved loss, filter and router settings.
 
-## Instruction-following run (32k, same hyperparams as `rytwnj5z`)
+## Instruction-following run (32k, same hyperparams as the reference math run)
 
 Task swap only. Every learning hyperparameter is inherited from `run_async.sh`, whose
 defaults are exactly the logged config of
-[`rytwnj5z`](https://wandb.ai/genaiamd/miles-mis/runs/rytwnj5z) — 32k lengths, GRPO with
+the reference 32k math run (Instella-MoE-16B-A3B-DPO, 3 nodes, fp32 LM head) — 32k lengths, GRPO with
 `kl-coef 0` / `entropy-coef 0` / `eps-clip 0.2` / `eps-clip-high 0.28` / `--use-tis`,
 `rollout-batch-size 32` × `n-samples-per-prompt 8`, `global-batch-size 256`, lr 1e-6
 constant, adam 0.9/0.98, EP8, `max-tokens-per-gpu 8192`, fp32 LM head on both sides.
@@ -739,8 +741,8 @@ lacks; IFEvalG stays primary so training never depends on that clone. This is wh
 One checkpoint is **~207 GB** (16 torch_dist shards, weights + optimizer), and this miles
 has **no retention** — the only mention of `save_retain_interval` is
 `args.save_retain_interval = None` (`arguments.py:2997`); nothing reads it. At save-every-20
-over 3000 rollouts that is 150 checkpoints ≈ **31 TB**, on a `/shared_nfs` already at 98%
-(~11 TB free) and shared with the team. Filling it makes writes fail cluster-wide.
+over 3000 rollouts that is 150 checkpoints ≈ **31 TB**, which
+will not fit on a typical shared volume. Filling a shared volume makes writes fail for every user of it.
 
 `run_if.sh` therefore refuses to launch if fewer than 8 checkpoints fit, and starts
 `prune_checkpoints.py` alongside training.
@@ -893,7 +895,7 @@ gfx950, in-engine):
 **Status: `SGLANG_USE_AITER=1` is now the default and is REQUIRED for correctness.**
 `SGLANG_USE_AITER=0` is *not* a safe mitigation: the sglang515 overlay stores MoE weights in
 aiter's shuffled layout, so the non-aiter path reads them unshuffled and **silently** emits
-gibberish (Primus-Instella-Internal#2: "2+2=5", `arc_challenge` 0.195, below the
+gibberish ("2+2=5", `arc_challenge` 0.195, below the
 random-chance floor) at normal-looking throughput — there is no crash to warn you.
 
 The empty-KV out-of-bounds fault that previously forced `ENABLE_DP_ATTENTION=0` is fixed by

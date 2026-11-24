@@ -719,8 +719,8 @@ WANDB_ARGS=(
    --wandb-dir "${WANDB_LOCAL_DIR}"
 )
 # miles appends a random id AND "-RANK_0" to the run name when the suffix is on
-# (utils/tracking_utils/wandb_utils.py:51-57), which is why rytwnj5z had to be renamed by
-# hand in the UI to say what it was. WANDB_RANDOM_SUFFIX=0 makes group == name == exactly
+# (utils/tracking_utils/wandb_utils.py:51-57), so such a run has to be renamed by hand in
+# the UI to say what it is. WANDB_RANDOM_SUFFIX=0 makes group == name == exactly
 # the string set above, so a run is identifiable in the sidebar without renaming it.
 if [ "${WANDB_RANDOM_SUFFIX:-1}" = "0" ]; then
    WANDB_ARGS+=(--disable-wandb-random-suffix)

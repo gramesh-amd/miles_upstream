@@ -11,11 +11,11 @@ WHY THIS EXISTS
 This miles keeps every checkpoint forever: the only occurrence of save_retain_interval in
 the tree is `args.save_retain_interval = None` (miles/utils/arguments.py:2997) and nothing
 reads it. One Instella-MoE-16B checkpoint is ~207 GB, so at --save-interval 20 over 3000
-rollouts that is ~31 TB on a /shared_nfs already at 98% and shared with the team.
+rollouts that is ~31 TB, more than a typical shared volume holds.
 
 WHY NOT JUST KEEP THE NEWEST N
 Recency alone throws away the peak. RL runs here do not improve monotonically -- the
-reference math run (wandb rytwnj5z) peaked around AIME 0.756 at step ~39 and had decayed to
+reference math run peaked around AIME 0.756 at step ~39 and had decayed to
 0.635 by step ~179 -- so the checkpoint you actually want to keep is usually NOT among the
 newest few. This keeps a union:
 

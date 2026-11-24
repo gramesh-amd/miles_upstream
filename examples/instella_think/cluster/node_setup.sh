@@ -1,13 +1,13 @@
 #!/bin/bash
 # Per-node bring-up of the miles training container. Runs ON each allocated compute node
-# (bringup.sh srun's it), driven by env vars: IMAGE PORT USER_NAME HOME_DIR NAME SLURM_JOB_ID.
+# (bringup.sh srun's it), driven by env vars: IMAGE PORT USER_NAME HOME_DIR NAME SLURM_JOB_ID,
+# and the site-specific NODE_SCRATCH and SHARED_MOUNT.
 #
 # It pulls the image, starts the container with GPUs, creates a uid/gid-matched user with
 # the GPU groups, launches an sshd on $PORT and records readiness. Spur's epilog removes the
 # container at job end by its spur_job_id label. The host docker socket cannot be mounted
 # (the docker-authz plugin refuses it), so there is no docker-in-docker and no watchdog.
 set -uo pipefail
-export SPUR_CONTROLLER_ADDR="${SPUR_CONTROLLER_ADDR:-http://crs-m2m-cpu-spur-005.crusoe.amd.com:6817}"
 
 CNAME="${NAME}-${SLURM_JOB_ID}-$(hostname -s)"
 STATUS_DIR="${HOME_DIR}/.miles/status-${SLURM_JOB_ID}"
@@ -15,7 +15,9 @@ mkdir -p "$STATUS_DIR"
 
 # Node-local volume that also backs the Docker root. Caches belong here, not on NFS: the
 # shared home volume runs near full and returns EDQUOT. Everything here dies with the node.
-SCRATCH="/mnt/m2m_nobackup/${USER_NAME}"
+# Site-specific defaults: the node-local scratch root and the shared filesystem to mount.
+SCRATCH="${NODE_SCRATCH:-/mnt/m2m_nobackup}/${USER_NAME}"
+SHARED_MOUNT="${SHARED_MOUNT:-/shared_nfs}"
 mkdir -p "$SCRATCH"/{hf,wandb,triton,logs} 2>/dev/null || true
 
 echo ">>> [$(hostname)] pulling ${IMAGE} ..."
@@ -31,7 +33,7 @@ docker run -d --name "$CNAME" --label "$SPUR_LABEL" \
   --security-opt seccomp=unconfined \
   --device=/dev/kfd --device=/dev/dri \
   --group-add video --group-add render \
-  -v "${HOME_DIR}:${HOME_DIR}" -v /shared_nfs:/shared_nfs \
+  -v "${HOME_DIR}:${HOME_DIR}" -v "${SHARED_MOUNT}:${SHARED_MOUNT}" \
   -v "${SCRATCH}:/scratch" \
   -e HF_HOME=/scratch/hf \
   -e WANDB_DIR=/scratch/wandb \

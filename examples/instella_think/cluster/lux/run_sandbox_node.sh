@@ -26,7 +26,7 @@ mkdir -p "${USER_HOME}/logs"
 
 srv() {  # <port> <workers> <log> [extra server args...]
    local port="$1" workers="$2" log="$3"; shift 3
-   apptainer exec --cleanenv --bind /lustre/orion --bind "${USER_HOME}" "${SIF}" \
+   apptainer exec --cleanenv --bind "${LUX_FS}" --bind "${USER_HOME}" "${SIF}" \
       /opt/venv/bin/python -u "${INSTELLA_DIR}/code_exec_server.py" --port "${port}" --workers "${workers}" \
       --token-file "${CODE_EXEC_TOKEN_FILE}" "$@" >> "${log}" 2>&1 < /dev/null &
 }
