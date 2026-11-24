@@ -12,6 +12,10 @@
 #   sbatch -A ven136 -N 4 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/run.sbatch \
 #     CONTEXT_LEN=32768 DRGRPO=1 DRGRPO_DIVISOR=17400 OVERLONG_FILTER=1 SAVE_TAG=code32k_drgrpo
 #
+# An argument naming a file (e.g. specs/code_binary_36k.env) is a spec file: one VAR=VALUE per line,
+# taken literally (no quotes; blank lines and # comments skipped), expanded in place so the
+# VAR=VALUE arguments after it override it.
+#
 # The job ends when the run does (or fails). Logs: this job's -o file, $LUX_ROOT/shared/jobs/<jobid>/
 # (per-node setup logs, the run's launch output) and the run log under $LOG_DIR. Metrics go to W&B
 # live; add WANDB_MODE=offline to the spec to log locally instead.
@@ -19,6 +23,18 @@ set -uo pipefail
 LUX_DIR="${LUX_DIR:-${SLURM_SUBMIT_DIR}/examples/instella_think/cluster/lux}"
 [ -f "${LUX_DIR}/lux_env.sh" ] || { echo "FATAL: submit from the miles checkout (or set LUX_DIR)"; exit 1; }
 source "${LUX_DIR}/lux_env.sh"
+
+ARGS=()
+for a in "$@"; do
+   if [[ ! "${a}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && [ -f "${a}" ]; then
+      while IFS= read -r line || [ -n "${line}" ]; do
+         [[ "${line}" =~ ^[[:space:]]*(#|$) ]] || ARGS+=("${line}")
+      done < "${a}"
+   else
+      ARGS+=("${a}")
+   fi
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
 SANDBOX_NODES=1
 GPU_NODE_SCRIPT=run_gpu_node.sh
@@ -47,8 +63,14 @@ for kv in "$@"; do
    [[ "${kv}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { echo "FATAL: not VAR=VALUE: ${kv}"; exit 1; }
    printf 'export %q\n' "${kv}" >> "${JOB_DIR}/spec.env"
 done
-# The rollout node count follows from the allocation (an eval job sets its own, see eval_in_container.sh).
-[ "${G}" -ge 2 ] && [ "${GPU_NODE_SCRIPT}" = run_gpu_node.sh ] && echo "export ROLLOUT_NODES=$(( G - $(source "${JOB_DIR}/spec.env"; echo "${TRAIN_NODES:-1}") ))" >> "${JOB_DIR}/spec.env"
+# The rollout node count follows from the allocation (an eval job sets its own, see eval_in_container.sh);
+# a spec that names one must match it.
+if [ "${G}" -ge 2 ] && [ "${GPU_NODE_SCRIPT}" = run_gpu_node.sh ]; then
+   read -r TRAIN_N SPEC_ROLLOUT_N < <(source "${JOB_DIR}/spec.env"; echo "${TRAIN_NODES:-1} ${ROLLOUT_NODES:-}")
+   [ -z "${SPEC_ROLLOUT_N}" ] || [ "${SPEC_ROLLOUT_N}" = "$(( G - TRAIN_N ))" ] || {
+      echo "FATAL: the spec sets ROLLOUT_NODES=${SPEC_ROLLOUT_N}, but -N ${#NODES[@]} leaves $(( G - TRAIN_N )) after ${SANDBOX_NODES} sandbox and ${TRAIN_N} trainer node(s)"; exit 1; }
+   echo "export ROLLOUT_NODES=$(( G - TRAIN_N ))" >> "${JOB_DIR}/spec.env"
+fi
 echo "job ${SLURM_JOB_ID}: sandbox ${SANDBOXES[*]}, GPU nodes ${GPU_NODES[*]} (head ${GPU_NODES[0]})"
 echo "spec: $*"
 echo "job dir: ${JOB_DIR}"

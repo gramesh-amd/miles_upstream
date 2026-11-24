@@ -34,6 +34,15 @@ sbatch -A ven136 -N 4 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cl
   CONTEXT_LEN=32768 DRGRPO=1 DRGRPO_DIVISOR=17400 OVERLONG_FILTER=1 SAVE_TAG=code32k_drgrpo
 ```
 
+An argument naming a file is a spec file, one `VAR=VALUE` per line, and the arguments after it
+override it. `specs/code_binary_36k.env` is the binary-reward code recipe (2 trainer + 4 rollout
+nodes, so `-N 7`); its header covers the Dr. GRPO divisor and continuing from a checkpoint:
+
+```bash
+sbatch -A ven136 -N 7 -t 24:00:00 -o ~/logs/%x-%j.out examples/instella_think/cluster/lux/run.sbatch \
+  examples/instella_think/cluster/lux/specs/code_binary_36k.env CODE_TRAIN=<train.jsonl> SAVE_TAG=<tag>
+```
+
 The job sets up every container, starts the sandboxes and the Ray cluster, runs the spec and ends
 when the run does. Metrics go to W&B live (team `genaiamd` unless the spec sets `WANDB_ENTITY`;
 `WANDB_MODE=offline` logs locally). W&B alone uses the ORNL proxy (`WANDB_HTTPS_PROXY`), so
