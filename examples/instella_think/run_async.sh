@@ -1178,6 +1178,33 @@ fi
 echo "=== runtime env ==="
 redacted_runtime_env
 echo "+ ray job submit --address=${RAY_ADDRESS} -- python3 ${REPO_DIR}/train_async.py ${TRAIN_ARGV[*]}"
-ray job submit --address="${RAY_ADDRESS}" \
+# Submit without waiting, then follow the logs until the job really ends. A plain blocking
+# `ray job submit` returns as soon as its log stream drops ("WebSocket closed ... close code 1000")
+# even though the job is still RUNNING; the Lux wrapper then took the run for ended and stopped Ray,
+# SIGTERMing a healthy job (v7 binary at step 879, v8's first job a few steps in). So re-attach
+# `ray job logs --follow` until `ray job status` is terminal, printing only lines not yet printed,
+# and print the client's own "Job '<id>' succeeded" line on success, which run_in_container.sh reads.
+_submit_out="$(ray job submit --no-wait --address="${RAY_ADDRESS}" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
-   -- python3 "${REPO_DIR}/train_async.py" "${TRAIN_ARGV[@]}"
+   -- python3 "${REPO_DIR}/train_async.py" "${TRAIN_ARGV[@]}" 2>&1)" || { echo "${_submit_out}"; exit 1; }
+echo "${_submit_out}"
+_sid="$(echo "${_submit_out}" | grep -o -E "raysubmit_[A-Za-z0-9]+" | head -1)"
+[ -n "${_sid}" ] || { echo "FATAL: no submission id in the ray job submit output" >&2; exit 1; }
+_seen=0; _cnt="$(mktemp)"; _unknown=0
+while :; do
+   ray job logs --address="${RAY_ADDRESS}" --follow "${_sid}" 2>&1 \
+      | awk -v skip="${_seen}" -v cf="${_cnt}" 'NR > skip { print; fflush() } END { print NR > cf }' || true
+   _n="$(cat "${_cnt}" 2>/dev/null)"; [ -n "${_n}" ] && [ "${_n}" -gt "${_seen}" ] && _seen="${_n}"
+   _st="$(ray job status --address="${RAY_ADDRESS}" "${_sid}" 2>&1 | grep -o -E "SUCCEEDED|FAILED|STOPPED|RUNNING|PENDING" | tail -1 || true)"
+   case "${_st}" in
+      SUCCEEDED) echo "Job '${_sid}' succeeded"; rm -f "${_cnt}"; exit 0 ;;
+      FAILED|STOPPED) echo "Job '${_sid}' ${_st}"; rm -f "${_cnt}"; exit 1 ;;
+   esac
+   if [ -z "${_st}" ]; then  # Ray itself unreachable: give up after ~5 minutes
+      _unknown=$((_unknown + 1)); [ "${_unknown}" -ge 20 ] && { echo "Job '${_sid}' status unknown (Ray unreachable)"; exit 1; }
+   else
+      _unknown=0
+   fi
+   echo "log stream for ${_sid} closed while the job is ${_st:-unknown}; re-attaching ($(date '+%F %T'))"
+   sleep 15
+done
