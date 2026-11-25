@@ -159,7 +159,11 @@ until grep -q -E "^.*eval 0: \{" "${log}" 2>/dev/null; do
    sleep 30; waited=$((waited + 30))
 done
 grep -o -E "eval 0: \{.*" "${log}" | head -1 > "${JOB_DIR}/eval_result.txt"
-echo "iter ${EVAL_STEP} of ${EVAL_SOURCE_DIR}: $(cat "${JOB_DIR}/eval_result.txt")" >> "${EVAL_SOURCE_DIR}/.evals.txt"
+# Scores at a non-default context length go to their own file (.evals.ctx<CONTEXT_LEN>.txt), so a
+# 64k re-eval never mixes with the 32k scores in .evals.txt (eval_series.py reads EVALS_FILE).
+EVALS_FILE=".evals.txt"
+[ "${CONTEXT_LEN:-32768}" = 32768 ] || EVALS_FILE=".evals.ctx${CONTEXT_LEN}.txt"
+echo "iter ${EVAL_STEP} of ${EVAL_SOURCE_DIR}: $(cat "${JOB_DIR}/eval_result.txt")" >> "${EVAL_SOURCE_DIR}/${EVALS_FILE}"
 echo "eval done" > "${JOB_DIR}/run.status"
 say "eval of iter ${EVAL_STEP} logged; stopping"
 # Give W&B a moment to send the scores before the run is torn down.
@@ -170,12 +174,12 @@ ray stop --force >/dev/null 2>&1 || true
 # W&B: re-upload the scores if the shutdown lost them, and add the point to the training run's
 # eval series. Best effort: the result is already in .evals.txt.
 if [ "${WANDB_MODE:-online}" != offline ]; then
-   [ -n "${EVAL_SERIES_ID:-}" ] || EVAL_SERIES_ID="evals-$(basename "${EVAL_SOURCE_DIR}")"
-   WANDB_DIR="${WANDB_LOCAL_DIR}" NETRC="${NETRC_PATH}" HTTPS_PROXY="${LUX_PROXY}" HTTP_PROXY="${LUX_PROXY}" WANDB_LOCAL_DIR="${WANDB_LOCAL_DIR}" \
+   [ -n "${EVAL_SERIES_ID:-}" ] || EVAL_SERIES_ID="evals-$(basename "${EVAL_SOURCE_DIR}")$([ "${EVALS_FILE}" = .evals.txt ] || echo "-ctx${CONTEXT_LEN}")"
+   EVALS_FILE="${EVALS_FILE}" WANDB_DIR="${WANDB_LOCAL_DIR}" NETRC="${NETRC_PATH}" HTTPS_PROXY="${LUX_PROXY}" HTTP_PROXY="${LUX_PROXY}" WANDB_LOCAL_DIR="${WANDB_LOCAL_DIR}" \
       WANDB_PROJECT="${WANDB_PROJECT:-miles-MI355-code}" REF_LOAD="${REF_LOAD:-${CKPT_ROOT}/Instella-MoE-16B-A3B-DPO_torch_dist}" \
       timeout 900 python3 "${I}/cluster/lux/eval_series.py" "${EVAL_SOURCE_DIR}" "${TRAIN_GROUP}" \
       "${TRAIN_GROUP}-eval-iter${EVAL_STEP}" "${EVAL_SERIES_ID}" > "${JOB_DIR}/wandb.log" 2>&1 \
       && say "W&B: $(grep -E '^[a-z0-9-]+: ' "${JOB_DIR}/wandb.log" | tr '\n' ' ')" \
-      || say "W&B bookkeeping failed (see ${JOB_DIR}/wandb.log; scores are in ${EVAL_SOURCE_DIR}/.evals.txt)"
+      || say "W&B bookkeeping failed (see ${JOB_DIR}/wandb.log; scores are in ${EVAL_SOURCE_DIR}/${EVALS_FILE})"
 fi
 exit 0
