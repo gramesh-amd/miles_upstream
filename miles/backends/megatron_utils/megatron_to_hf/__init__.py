@@ -56,6 +56,15 @@ def _convert_to_hf_core(args, model_name, name, param):
         or "deepseekv3" in model_name
         or "glmmoedsa" in model_name
         or "glm_moe_dsa" in model_name
+        # Instella-MoE reports model_type deepseek_v3 to HF, but the RL weight-sync
+        # path dispatches on the CONFIG CLASS name, which arrives here lowercased as
+        # "instellamoeconfig" and matches none of the above -- so weight sync died
+        # with "Unsupported model: instellamoeconfig" on the first update_weights,
+        # after the engines had come up. This is the core edit README.md calls for
+        # under "Core miles edits (no plugin seam exists for these)"; its sibling
+        # (the self_attention.linear_gate_proj mapping in deepseekv3.py) is already
+        # applied. There is no registration hook, so the route has to live here.
+        or "instella" in model_name
     ):
         converted_named_tensors = convert_deepseekv3_to_hf(args, name, param)
     elif "glm4moe" in model_name:

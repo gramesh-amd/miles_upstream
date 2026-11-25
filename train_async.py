@@ -76,12 +76,25 @@ async def train(args, *, disposer: Disposer):
     # (start_rollout_id != 0), so the loaded checkpoint is evaluated at the
     # first step before any RL update. Default (unset) preserves the original
     # behavior of only evaling at rollout_id == 0 on fresh runs.
+    # NOTE: rollout_id == 0 is ALREADY handled above by
+    # eval_dispatcher.dispatch(0, ...). This block exists only for the RESUME
+    # case (MILES_EVAL_ON_START=1 with start_rollout_id != 0).
+    #
+    # It previously read `await rollout_manager.eval.remote(...)` and also fired
+    # at start_rollout_id == 0. `rollout_manager` is the SYNCHRONOUS train.py
+    # API and does not exist in this scope, so enabling baseline eval crashed
+    # the job with NameError *after* the real eval above had already finished --
+    # which is why --skip-eval-before-train looked mandatory. Use the same async
+    # API as the block above, and leave rollout_id 0 to that block so the
+    # baseline is not evaluated twice.
     if (
         args.eval_interval is not None
         and not args.skip_eval_before_train
-        and (args.start_rollout_id == 0 or os.environ.get("MILES_EVAL_ON_START") == "1")
+        and args.start_rollout_id != 0
+        and os.environ.get("MILES_EVAL_ON_START") == "1"
     ):
-        await rollout_manager.eval.remote(args.start_rollout_id)
+        await inference_controller.prepare_eval()
+        await eval_dispatcher.dispatch(args.start_rollout_id, hf_dir=args.hf_checkpoint)
 
     # async train loop.
     rollout_data_next_future = await eager_create_task(prepare_and_generate(args.start_rollout_id))

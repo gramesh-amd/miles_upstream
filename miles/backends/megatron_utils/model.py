@@ -46,6 +46,7 @@ from ..training_utils.log_utils import aggregate_forward_results, aggregate_trai
 from ..training_utils.loss import loss_function
 from ..training_utils.parallel import get_parallel_state
 from .checkpoint import load_checkpoint, save_checkpoint, save_checkpoint_with_lora
+from .fp32_lm_head import fp32_lm_head
 from .ci_utils import (
     check_model_hashes,
     check_peak_gpu_memory_after_load,
@@ -393,18 +394,19 @@ def forward_only(
     config.timers = None
     forward_data_store = []
     num_steps_per_rollout = len(num_microbatches)
-    for step_id in range(num_steps_per_rollout):
-        # collect_non_loss_data
-        forward_data_store += forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=data_iterator,
-            model=model,
-            num_microbatches=num_microbatches[step_id],
-            seq_length=args.seq_length,
-            micro_batch_size=args.micro_batch_size,
-            forward_only=True,
-            collect_non_loss_data=True,
-        )
+    with fp32_lm_head(args, model):
+        for step_id in range(num_steps_per_rollout):
+            # collect_non_loss_data
+            forward_data_store += forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=data_iterator,
+                model=model,
+                num_microbatches=num_microbatches[step_id],
+                seq_length=args.seq_length,
+                micro_batch_size=args.micro_batch_size,
+                forward_only=True,
+                collect_non_loss_data=True,
+            )
 
     # Move model back to the train mode.
     for model_module in model:
@@ -538,9 +540,13 @@ def run_forward_backward_pass(
             num_rollouts=num_rollouts,
         )
 
-    # Forward pass.
+    # Forward pass. The LM head must be promoted here as well as in the log-prob pass
+    # (forward_only): the PPO ratio compares log-probs from those two passes, so promoting
+    # only one makes the readout error systematic instead of shared and spuriously clips
+    # ~17% of tokens. Upstream refactored this call out of train_one_step into here, so
+    # this is the same pass the reference wraps in train_one_step.
     forward_backward_func = get_forward_backward_func()
-    with torch.no_grad() if forward_only else nullcontext():
+    with fp32_lm_head(args, model), torch.no_grad() if forward_only else nullcontext():
         return forward_backward_func(
             forward_step_func=forward_step,
             data_iterator=data_iterator,

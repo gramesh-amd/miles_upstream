@@ -34,6 +34,16 @@ def set_default_megatron_args(args):
     # Notice(Jiajun): new megatron has removed this argument and use dp_reshardable instead of fully_shard
     if os.getenv("DEPRECATED_MEGATRON_COMPATIBLE", "0") == "1":
         args.dist_ckpt_save_pre_mcore_014 = True
+        # The gloo-process-group flag was renamed between Megatron versions: the pin
+        # this mode targets declares --enable-gloo-process-groups, while miles reads
+        # args.use_gloo_process_groups (initialize.py:90, model.py:214/227). Without
+        # the alias every rank dies with
+        #   AttributeError: 'Namespace' object has no attribute
+        #   'use_gloo_process_groups'. Did you mean: 'enable_gloo_process_groups'?
+        if not hasattr(args, "use_gloo_process_groups") and hasattr(
+            args, "enable_gloo_process_groups"
+        ):
+            args.use_gloo_process_groups = args.enable_gloo_process_groups
     # Before 20260819, radixark/Megatron-LM pick torch gemm for router, which is fp32 x fp32 ->
     # fp32, and 20260819 convert the default to TE gemm which is bf16 x bf16 -> fp32. Result show
     # the TE one increase log prob diff so manually set back

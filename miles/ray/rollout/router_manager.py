@@ -18,7 +18,13 @@ logger = logging.getLogger(__name__)
 # Readiness budget for the spawned router/session-server children. The spawn
 # context re-imports the heavy transformers/megatron chain (~13s typical in
 # CI), and transient CI stalls have pushed startup past a 30s budget.
-_ROUTER_READY_TIMEOUT_SECONDS = 120.0
+# 120.0 upstream. Instella-MoE-16B-A3B is a 30 GB MoE and on a single node with
+# EP4 the engines behind the router are still loading at the 120 s mark -- the
+# smoke run reached "sglang is using nccl==2.30.4" at t+93 s and was killed at
+# t+120 s with "Server at <router> not ready after 120.0s", with no sglang error.
+# Raised to match the sibling constant below, which already allows 300 s for the
+# session servers; the cells timeout is 3600 s.
+_ROUTER_READY_TIMEOUT_SECONDS = 600.0
 _SESSION_SERVER_READY_TIMEOUT_SECONDS = 300.0
 
 
