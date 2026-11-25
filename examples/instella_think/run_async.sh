@@ -1190,17 +1190,42 @@ _submit_out="$(ray job submit --no-wait --address="${RAY_ADDRESS}" \
 echo "${_submit_out}"
 _sid="$(echo "${_submit_out}" | grep -o -E "raysubmit_[A-Za-z0-9]+" | head -1)"
 [ -n "${_sid}" ] || { echo "FATAL: no submission id in the ray job submit output" >&2; exit 1; }
-_seen=0; _cnt="$(mktemp)"; _unknown=0
+# Prefer the driver's log file on this (head) node: complete and immune to stream drops. On Lux,
+# `ray job logs --follow` went on to close every ~18 s without delivering lines, so it is only the
+# fallback when the file is not found.
+_drv="${RAY_TMPDIR:-${TMPDIR:-/tmp}/ray}/session_latest/logs/job-driver-${_sid}.log"
+for _ in $(seq 1 24); do [ -e "${_drv}" ] && break; sleep 5; done
+_job_state() { ray job status --address="${RAY_ADDRESS}" "${_sid}" 2>&1 | grep -o -E "SUCCEEDED|FAILED|STOPPED|RUNNING|PENDING" | tail -1 || true; }
+_unknown=0
+if [ -e "${_drv}" ]; then
+   echo "following ${_drv}"
+   tail -n +1 -F "${_drv}" 2>/dev/null &
+   _tail=$!
+   while :; do
+      sleep 30
+      _st="$(_job_state)"
+      case "${_st}" in
+         SUCCEEDED|FAILED|STOPPED) sleep 5; kill "${_tail}" 2>/dev/null
+            if [ "${_st}" = SUCCEEDED ]; then echo "Job '${_sid}' succeeded"; exit 0; fi
+            echo "Job '${_sid}' ${_st}"; exit 1 ;;
+         "") _unknown=$((_unknown + 1))
+            [ "${_unknown}" -ge 10 ] && { kill "${_tail}" 2>/dev/null; echo "Job '${_sid}' status unknown (Ray unreachable)"; exit 1; } ;;
+         *) _unknown=0 ;;
+      esac
+   done
+fi
+echo "driver log ${_drv} not found; following ray job logs instead"
+_seen=0; _cnt="$(mktemp)"
 while :; do
    ray job logs --address="${RAY_ADDRESS}" --follow "${_sid}" 2>&1 \
       | awk -v skip="${_seen}" -v cf="${_cnt}" 'NR > skip { print; fflush() } END { print NR > cf }' || true
    _n="$(cat "${_cnt}" 2>/dev/null)"; [ -n "${_n}" ] && [ "${_n}" -gt "${_seen}" ] && _seen="${_n}"
-   _st="$(ray job status --address="${RAY_ADDRESS}" "${_sid}" 2>&1 | grep -o -E "SUCCEEDED|FAILED|STOPPED|RUNNING|PENDING" | tail -1 || true)"
+   _st="$(_job_state)"
    case "${_st}" in
       SUCCEEDED) echo "Job '${_sid}' succeeded"; rm -f "${_cnt}"; exit 0 ;;
       FAILED|STOPPED) echo "Job '${_sid}' ${_st}"; rm -f "${_cnt}"; exit 1 ;;
    esac
-   if [ -z "${_st}" ]; then  # Ray itself unreachable: give up after ~5 minutes
+   if [ -z "${_st}" ]; then
       _unknown=$((_unknown + 1)); [ "${_unknown}" -ge 20 ] && { echo "Job '${_sid}' status unknown (Ray unreachable)"; exit 1; }
    else
       _unknown=0
