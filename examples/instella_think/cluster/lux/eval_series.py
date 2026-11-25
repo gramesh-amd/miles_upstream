@@ -15,7 +15,9 @@
    holds one point, logged at eval step 0. Points already in the series are not logged again, and
    the run is never deleted (W&B refuses to reuse a deleted run id).
 
-Reads SAVE_DIR/.evals.txt ("iter <N> of <dir>: eval 0: {...}" lines, written by the eval jobs).
+Reads SAVE_DIR/$EVALS_FILE (default .evals.txt; .evals.ctx<N>.txt for evals at a non-default context
+length) — "iter <N> of <dir>: eval 0: {...}" lines written by the eval jobs. The base model's point
+comes from the same file name under REF_LOAD, so a series never mixes context lengths.
 Needs W&B credentials (NETRC or WANDB_API_KEY) and network access to W&B.
 """
 
@@ -61,9 +63,10 @@ def check_uploads(api, eval_group):
 
 
 def update_series(api, save_dir, group, series_id):
-    rows = read_evals(os.path.join(save_dir, ".evals.txt"))
+    evals_file = os.environ.get("EVALS_FILE") or ".evals.txt"
+    rows = read_evals(os.path.join(save_dir, evals_file))
     ref_load = os.environ.get("REF_LOAD", "")
-    base = read_evals(os.path.join(ref_load, ".evals.txt")).get(0) if ref_load else None
+    base = read_evals(os.path.join(ref_load, evals_file)).get(0) if ref_load else None
     if base and 0 not in rows:
         rows[0] = base
     try:
