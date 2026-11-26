@@ -1,0 +1,66 @@
+# Every cell of the reported benchmark, longest budgets first so a cutoff keeps the ends of each curve.
+# Per-card recommended arm
+ours_r1c_399 128k
+ours_r1c_399 90k
+ours_r1c_399 64k
+ours_r1c_399 32k
+qwen3_30b_a3b_thinking 128k
+qwen3_30b_a3b_thinking 90k
+qwen3_30b_a3b_thinking 64k
+qwen3_30b_a3b_thinking 32k
+qwen3_5_4b 128k
+qwen3_5_4b 90k
+qwen3_5_4b 64k
+qwen3_5_4b 32k
+gemma4_e4b 128k
+gemma4_e4b 90k
+gemma4_e4b 64k
+gemma4_e4b 32k
+gpt_oss_20b 128k
+gpt_oss_20b 90k
+gpt_oss_20b 64k
+gpt_oss_20b 32k
+smollm3_3b 128k
+smollm3_3b 90k
+smollm3_3b 64k
+smollm3_3b 32k
+
+# OLMES standard arm (ours and SmolLM3 already use OLMES sampling)
+qwen3_30b_a3b_thinking_olmes 128k
+qwen3_30b_a3b_thinking_olmes 90k
+qwen3_30b_a3b_thinking_olmes 64k
+qwen3_30b_a3b_thinking_olmes 32k
+qwen3_5_4b_olmes 128k
+qwen3_5_4b_olmes 90k
+qwen3_5_4b_olmes 64k
+qwen3_5_4b_olmes 32k
+gemma4_e4b_olmes 128k
+gemma4_e4b_olmes 90k
+gemma4_e4b_olmes 64k
+gemma4_e4b_olmes 32k
+gpt_oss_20b_olmes 128k
+gpt_oss_20b_olmes 90k
+gpt_oss_20b_olmes 64k
+gpt_oss_20b_olmes 32k
+
+# Instella post-training lineage
+instella_dpo 128k
+instella_dpo 90k
+instella_dpo 64k
+instella_dpo 32k
+instella_think 128k
+instella_think 90k
+instella_think 64k
+instella_think 32k
+instella_sft 128k
+instella_sft 90k
+instella_sft 64k
+instella_sft 32k
+
+# Sampling sweep for our model (exploratory, not a cross-model comparison)
+ours_r1c_399_topk 64k
+ours_r1c_399_pen 64k
+ours_r1c_399_t08 128k
+ours_r1c_399_t08 90k
+ours_r1c_399_t08 64k
+ours_r1c_399_t08 32k
