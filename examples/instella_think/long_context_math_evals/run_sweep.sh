@@ -9,7 +9,7 @@
 # $BENCH_OUT_DIR/.dead_models so they do not burn a slot on every remaining budget.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT="${BENCH_OUT_DIR:-out/long_context_math}"
+OUT="${BENCH_OUT_DIR:-out/long_context_math_evals}"
 mkdir -p "$OUT/logs"
 export BENCH_OUT_DIR="$(cd "$OUT" && pwd)"
 OUT="$BENCH_OUT_DIR"

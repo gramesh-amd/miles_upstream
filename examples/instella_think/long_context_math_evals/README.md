@@ -1,4 +1,4 @@
-# Long-context math benchmark
+# Long-context math evals
 
 Competition math across four generation budgets (32k / 64k / 90k / 128k tokens), several models,
 two sampling arms and two scoring rules. `models.py` is the executable record of every serving and
@@ -54,7 +54,7 @@ resolve to the same paths on the host and on every serving node. Serving goes ov
 
 ```bash
 export BENCH_MODELS_DIR=/shared/models          # model directories named as in models.py
-export BENCH_OUT_DIR=/shared/out/long_context_math
+export BENCH_OUT_DIR=/shared/out/long_context_math_evals
 export BENCH_CONTAINER=my_sglang_container       # optional
 
 # 1. Render prompts, wherever transformers and the tokenizer are available.
