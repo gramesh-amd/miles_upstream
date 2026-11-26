@@ -24,7 +24,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 MODELS_DIR = Path(os.environ.get("BENCH_MODELS_DIR", "models")).resolve()
-OUT_DIR = Path(os.environ.get("BENCH_OUT_DIR", "out/long_context_math")).resolve()
+OUT_DIR = Path(os.environ.get("BENCH_OUT_DIR", "out/long_context_math_evals")).resolve()
 DATA_DIR = Path(os.environ.get("BENCH_DATA_DIR", PKG_DIR / "data")).resolve()
 
 # OLMES `aime:2024::olmo3:adapt` / `aime:2025::olmo3:adapt`: zero-shot, temperature 0.6, top_p 0.95,
