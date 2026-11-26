@@ -1,9 +1,11 @@
 """Sanity check of final_v3_candidate through the grader: random rows (all restored/checker rows sampled first) with
 their verifying reference must pass every graded test; stubs (empty program, most common output) must not.
-Checker rows go through /test_program_checker; function rows through the strict assert route."""
-import collections, gzip, json, random, sys
-sys.path.insert(0, "/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data/final_v1/scripts")
-sys.path.insert(0, "/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data/final_v2/scripts")
+Checker rows go through /test_program_checker; function rows through the strict assert route.
+    bash run_grader_job.sh sanity 18991 32 python3 sanity_v3.py <final_v3 dir>"""
+import collections, gzip, json, os, random, sys
+_STAGES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cleaning_stages")
+sys.path.insert(0, os.path.join(_STAGES, "final_v1"))
+sys.path.insert(0, os.path.join(_STAGES, "final_v2"))
 import gclient as gc
 import gclient2 as gc2
 

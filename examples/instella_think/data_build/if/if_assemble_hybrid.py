@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
-"""Assemble the IF2 training set for the hybrid reward
+"""IF prefilter, last step: assemble the training set (if_train_hybrid20k.jsonl) for the hybrid reward
 r = (1-w)*fraction_satisfied + w*all_satisfied  (if_reward.py, IF_STRICT_WEIGHT=w).
+
+    python3 if_assemble_hybrid.py --out data/if/if_train_hybrid20k.jsonl   # paths relative to $INSTELLA_RL_ROOT
+
+The IF3 candidates were pre-screened for conflicting constraints (if_build_mix2.py), so --conflicts
+defaults to ''.
+
+Drop pass rate > 0.625 only (OLMo 3's rule; Polaris likewise removes only 8/8). Keep 0/8: these
+constraints are hard for our DPO, and zero-variance groups are skipped online anyway.
+
+Filter first, then re-stratify by (domain, constraint count): filtering removes easy 1-constraint
+prompts far more often than 5-constraint ones, so balancing before filtering would not hold.
 
 Selection, per prompt, from the 8 prefilter rollouts in partial_scores_mat.jsonl:
   1. signal: the 8 hybrid rewards are not all equal (otherwise GRPO advantage is 0);
@@ -11,15 +22,17 @@ Selection, per prompt, from the 8 prefilter rollouts in partial_scores_mat.jsonl
      it contains a constraint type that passes < --dead-type-rate of rollouts
      pool-wide. Prompts that passed strictly at least once are kept regardless --
      they are demonstrably satisfiable (Precision-over-Diversity's learnability rule).
-Then re-stratify by (domain, nc) exactly as if_assemble.py does.
+Then re-stratify to the domain and constraint-count targets below; cells that run short are
+topped up from other cells, deepest constraint counts first.
 """
-import argparse, collections, json
+import argparse, collections, json, os
 from pathlib import Path
 
-from if_assemble import DOMAIN_TARGET, NC_TARGET, ROOT
-
-MAT = ROOT / "out/if_prefilter/partial_scores_mat.jsonl"
-CONFLICTS = ROOT / "out/if_prefilter/conflict_keys.json"
+ROOT = Path(os.environ.get("INSTELLA_RL_ROOT", "/it-share-prj2-1/data/goramesh-instella-rl"))
+MAT = ROOT / "out/if_prefilter2_scores/partial_scores_mat.jsonl"
+DOMAIN_TARGET = {"chat": 0.20, "flan": 0.18, "math": 0.14, "code": 0.14,
+                 "other": 0.14, "safety": 0.10, "multiling": 0.10}
+NC_TARGET = {1: 0.10, 2: 0.20, 3: 0.25, 4: 0.25, 5: 0.20}
 
 
 def main():
@@ -28,10 +41,10 @@ def main():
     ap.add_argument("--max-pass", type=float, default=0.625)
     ap.add_argument("--dead-type-rate", type=float, default=0.02)
     ap.add_argument("--target", type=int, default=20000)
-    ap.add_argument("--out", default="data/if/if_train_hybrid.jsonl")
+    ap.add_argument("--out", default="data/if/if_train_hybrid20k.jsonl")
     ap.add_argument("--mat", default=str(MAT))
-    ap.add_argument("--candidates", default="data/if/if_candidates.jsonl")
-    ap.add_argument("--conflicts", default=str(CONFLICTS), help="'' when candidates are pre-screened")
+    ap.add_argument("--candidates", default="data/if/if_candidates2.jsonl")
+    ap.add_argument("--conflicts", default="", help="JSON list of conflicting prompt keys; '' when pre-screened")
     a = ap.parse_args()
     w = a.strict_weight
 

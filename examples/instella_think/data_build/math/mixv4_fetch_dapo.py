@@ -38,7 +38,7 @@ import pyarrow.parquet as pq
 
 REPO = "open-r1/DAPO-Math-17k-Processed"
 CONFIG = os.environ.get("DAPO_CONFIG", "en")
-ROOT = "/it-share-prj2-1/data/goramesh-instella-rl"
+ROOT = os.environ.get("INSTELLA_RL_ROOT", "/it-share-prj2-1/data/goramesh-instella-rl")
 OUT = f"{ROOT}/out/analysis_1012/dapo"
 JACCARD = float(__import__("os").environ.get("JACCARD", "0.45"))
 os.makedirs(OUT, exist_ok=True)

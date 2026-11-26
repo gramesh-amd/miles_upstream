@@ -15,9 +15,10 @@ it, so without it the eval numbers would be partial-credit and would not compare
 against anything published.
 """
 import json
+import os
 import pathlib
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(os.environ.get("INSTELLA_RL_ROOT", "/it-share-prj2-1/data/goramesh-instella-rl"))
 OUT = ROOT / "data/if"
 SRC = [
     ("ifeval", ROOT / "data/if/eval/IFEval/ifeval_input_data.jsonl"),

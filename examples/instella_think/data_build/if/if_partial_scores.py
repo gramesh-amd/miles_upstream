@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Per-constraint (partial) scores for every prefiltered prompt. Run in a container.
+"""IF prefilter, scoring: per-constraint scores for every prompt's 8 rollouts, using if_reward.py.
 
-For each of the 26k prompts x 8 saved rollouts, records how many constraints each
-rollout satisfied, so the pool can be re-cut by partial score instead of the
-all-or-nothing pass rate the first filter used.
+    GEN_GLOB='$ROOT/out/if_prefilter2/*.jsonl' OUT=$ROOT/out/if_prefilter2_scores/partial_scores_mat.jsonl \
+        NPROC=96 python3 if_partial_scores.py
 
-Writes out/if_prefilter/partial_scores.jsonl:
-  key, domain, nc, binary_pass (k/8), partial[8] (fraction satisfied per rollout),
-  per_constraint_pass {id: k/8}, unclosed (rollouts with no </think>)
+One line per prompt: key, domain, nc, binary_pass (k/8), partial[8] (fraction satisfied per rollout),
+per_constraint_pass {id: k/8}, ids, mat (rollout x constraint pass matrix), unclosed (no </think>).
+Needs IFBench (IF_IFBENCH_DIR) and NLTK data (NLTK_DATA), as if_reward.py does.
 """
 import glob
 import gzip
@@ -19,7 +18,7 @@ from multiprocessing import Pool
 os.environ.setdefault("IF_IFBENCH_DIR", "/workspace/repos/IFBench")
 os.environ.setdefault("NLTK_DATA", "/workspace/out/nltk_data")
 os.environ["IF_THINK_PREFILL"] = "1"
-sys.path.insert(0, "/workspace/instella_think")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 
 class S:
@@ -62,14 +61,14 @@ def work(line):
 
 if __name__ == "__main__":
     lines = []
-    for f in sorted(glob.glob(os.environ.get("GEN_GLOB", "/workspace/out/if_prefilter/gen_g*.jsonl.gz"))):
+    for f in sorted(glob.glob(os.environ.get("GEN_GLOB", "/workspace/out/if_prefilter2/*.jsonl"))):
         try:
             with (gzip.open(f, "rt") if f.endswith(".gz") else open(f)) as fh:
                 for line in fh:
                     lines.append(line)
         except (EOFError, OSError):
             pass  # shard still being appended: keep what was read
-    out = os.environ.get("OUT", "/workspace/out/if_prefilter/partial_scores_mat.jsonl")
+    out = os.environ.get("OUT", "/workspace/out/if_prefilter2_scores/partial_scores_mat.jsonl")
     with Pool(int(os.environ.get("NPROC", "24"))) as p, open(out, "w") as fo:
         n = 0
         for r in p.imap_unordered(work, lines, chunksize=64):

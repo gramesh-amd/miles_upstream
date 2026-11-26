@@ -34,8 +34,8 @@ constant; recipe fixed.
 import json
 import os
 
-ROOT = "/it-share-prj2-1/data/goramesh-instella-rl"
-SRC = f"{ROOT}/data/mix_v4_math.jsonl"
+ROOT = os.environ.get("INSTELLA_RL_ROOT", "/it-share-prj2-1/data/goramesh-instella-rl")
+SRC = os.environ.get("SRC", f"{ROOT}/data/mix_v4_math.jsonl")
 DST = os.environ.get("DST", f"{ROOT}/data/mix_v5_math.jsonl")
 
 # Byte-identical to the suffix in data/aime-2024-olmes.jsonl. Any divergence

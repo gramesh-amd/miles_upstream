@@ -32,7 +32,7 @@ import urllib.request
 
 import pyarrow.parquet as pq
 
-ROOT = "/it-share-prj2-1/data/goramesh-instella-rl"
+ROOT = os.environ.get("INSTELLA_RL_ROOT", "/it-share-prj2-1/data/goramesh-instella-rl")
 OUT = f"{ROOT}/out/analysis_1012/polaris"
 REPO = "POLARIS-Project/Polaris-Dataset-53K"
 BAND = {int(x) for x in os.environ.get("BAND", "1,2,3,4,5").split(",")}

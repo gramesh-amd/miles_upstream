@@ -1,6 +1,9 @@
-import gzip,json,glob,re,collections,sys
+"""Step 1: per-problem stats from the v6 training rollouts (n, reward sum, solved, truncated, first/last step,
+groups).  python3 v6_solve.py <workers> $CODE1_WORK/v6_solve.json"""
+import gzip,json,glob,re,collections,sys,os
 from multiprocessing import Pool
-S='/it-share-prj2-1/data/goramesh-instella-rl/out/v7_regrade/samples/'
+ROOT=os.environ.get('INSTELLA_RL_ROOT','/it-share-prj2-1/data/goramesh-instella-rl')
+S=f'{ROOT}/out/v7_regrade/samples/'
 pid_re=re.compile(r'"problem_id":\s*"([^"]+)"'); rw_re=re.compile(r'"reward":\s*"?([-0-9.eE]+)')
 st_re=re.compile(r'"step":\s*"?(\d+)'); tr_re=re.compile(r'"truncated":\s*"?(\w+)')
 def one(fn):

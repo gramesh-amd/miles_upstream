@@ -1,5 +1,7 @@
-import json,collections,csv,statistics as st
-D='/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data/final_v3_candidate'
+"""Counts and schema checks for a built final_v3 dir; adds them to its stats.json.  python3 final_stats.py [dir]"""
+import json,collections,csv,os,sys,statistics as st
+ROOT=os.environ.get('INSTELLA_RL_ROOT','/it-share-prj2-1/data/goramesh-instella-rl')
+D=sys.argv[1] if len(sys.argv)>1 else f'{ROOT}/out/v7_data/final_v3_candidate'
 rows=[json.loads(l) for l in open(f'{D}/train.jsonl')]
 u=[r for r in rows if 'oversample_of' not in r['metadata']]
 c=collections.Counter((r['metadata']['src'],r['metadata']['route']) for r in u)
@@ -8,7 +10,7 @@ ch=collections.Counter(x for r in u for x in r['metadata'].get('v7_changes',[]) 
 pref=collections.Counter((r['metadata']['route'],r['metadata'].get('v6_prefilter_n_correct')) for r in rows)
 nt={rt:[len(json.loads(r['label'])) for r in u if r['metadata']['route']==rt] for rt in ('function','stdio')}
 keys=collections.Counter(tuple(sorted(r['metadata'].keys()))==tuple(sorted(r['metadata'].keys())) for r in u)
-v2keys=set(json.loads(open('/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data/final_v2/train.jsonl').readline())['metadata'])
+v2keys=set(json.loads(open(f'{ROOT}/out/v7_data/final_v2/train.jsonl').readline())['metadata'])
 missing=collections.Counter(k for r in u for k in ('rm_type','split','n_tests','custom_id','src','route','v7_changes','verified') if k not in r['metadata'])
 nchk=sum(1 for r in u if r['metadata'].get('checker'))
 ntest_ok=sum(1 for r in u if r['metadata']['n_tests']==len(json.loads(r['label'])))

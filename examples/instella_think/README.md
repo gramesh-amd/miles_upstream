@@ -21,6 +21,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `test_code_hack_monitor.py` | Reward-hack scanner, reward modes, client/server compare parity and token redaction; offline, or against a server via `test_grader.sh`. |
 | `prepare_code_data.py` | Builds the code train JSONL from Dolci. |
 | `data_v8/` | Builds the v8 code RL mix (new Codeforces / HardTests / CodeContests+ / TACO / LeetCode / Codewars rows verified on the sandbox, plus the carry-over rows), or replays it exactly from its verified intermediates; `build_v8.sh` runs it, `test_data_v8.py` tests the deterministic parts. See "Code RL data (v8 mix)". |
+| `data_build/` | How the other shipped training sets were built: math `mix_v5` (Polaris-led, graded with DPO), IF3 `if_train_hybrid20k` (DPO prefilter, hybrid reward) and CODE1 `final_v3` (v7 cleaning of Dolci code, then dedup and mix B). One README per pipeline. |
 | `prepare_code_benchmarks.py` | Builds HumanEval+, MBPP+ and LiveCodeBench v3 as eval sets with OLMo 3's oe-eval protocol, plus LCB v5/v6, HumanEval/MBPP Pro, CRUXEval and Codeforces. |
 | `validate_code_benchmarks.py` | Grades reference / always-wrong answers and old eval dumps against the bench sandbox. |
 | `eval_code_ckpt.py` / `eval_code_ckpt.sh` | Offline benchmark eval of a saved checkpoint: export, serve, generate and grade, with `summary.json` per run. `eval_code_wandb.py` logs it to W&B; `test_eval_code_ckpt.py` tests the scoring. See "Offline checkpoint evals". |

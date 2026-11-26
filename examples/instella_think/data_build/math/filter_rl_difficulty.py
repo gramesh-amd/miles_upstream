@@ -23,8 +23,8 @@ measure the gap first (scripts/probe_reward_closer.py).
 
 Needs an SGLang server up with the DPO checkpoint:
 
-    MODEL=/workspace/models/Instella-MoE-16B-A3B-DPO \
-        bash /workspace/scripts/serve_sglang_farskip_dp.sh
+    MODEL=/workspace/models/Instella-MoE-16B-A3B-DPO CONTEXT_LENGTH=36864 \
+        bash ../serve_grader.sh
 
     python3 filter_rl_difficulty.py \
         --input  /workspace/data/math_prompts.jsonl \
@@ -60,7 +60,7 @@ TOP_P = 1.0
 
 
 def load_verifier():
-    for p in ("/workspace/repos/Primus-Instella-Internal/rl/examples/if_rl",
+    for p in (os.environ.get("OLMO3_VERIFY_DIR", "/workspace/repos/Primus-Instella-Internal/rl/examples/if_rl"),
               os.path.expanduser("~/Primus-Instella-Internal/rl/examples/if_rl")):
         if os.path.isdir(p):
             sys.path.insert(0, p)

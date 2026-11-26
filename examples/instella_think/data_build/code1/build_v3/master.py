@@ -1,5 +1,9 @@
-import json,csv,gzip,ast,collections
-V7='/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data'
+"""Step 2: one row per Dolci code row with its v6 solve stats, final_v1/final_v2 drop reasons and route.
+Writes $CODE1_WORK/master.csv."""
+import json,csv,gzip,ast,collections,os
+ROOT=os.environ.get('INSTELLA_RL_ROOT','/it-share-prj2-1/data/goramesh-instella-rl')
+WORK=os.environ.get('CODE1_WORK',f'{ROOT}/out/v7_improve/data_audit')
+V7=f'{ROOT}/out/v7_data'
 ids=[json.loads(l) for l in open(f'{V7}/input/row_ids.jsonl')]
 rows=[]
 for l,i in zip(open(f'{V7}/input/code-train/dolci-code-train.jsonl'),ids):
@@ -12,7 +16,7 @@ pref={}
 for l in gzip.open(f'{V7}/../v7_regrade/problems.jsonl.gz','rt'):
     d=json.loads(l); md=d['metadata']; md=md if isinstance(md,dict) else ast.literal_eval(md)
     pref[d['problem_id']]=(md.get('prefilter') or {}).get('n_correct')
-solve=json.load(open('/it-share-prj2-1/data/goramesh-instella-rl/out/v7_improve/data_audit/v6_solve.json'))
+solve=json.load(open(f'{WORK}/v6_solve.json'))
 train={}
 for l in open(f'{V7}/final_v2/train.jsonl'):
     m=json.loads(l)['metadata']; train[m['custom_id']]=m
@@ -28,6 +32,6 @@ for r in rows:
              in_v2=int(c in train), route=train[c]['route'] if c in train else r['route0'],
              v1_reason=d1.get(c,''), v2_reason=d2.get(c,''))
     out.append(r)
-with open('/it-share-prj2-1/data/goramesh-instella-rl/out/v7_improve/data_audit/master.csv','w') as f:
+with open(f'{WORK}/master.csv','w') as f:
     w=csv.DictWriter(f,list(out[0].keys())); w.writeheader(); w.writerows(out)
 print(len(out),'dup cids',sum(v>1 for v in cid_count.values()),'in_v2',sum(r['in_v2'] for r in out),'in_v6',sum(bool(r['pid']) for r in out))

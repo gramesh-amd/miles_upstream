@@ -37,7 +37,7 @@ import os
 import re
 from collections import Counter, defaultdict
 
-ROOT = "/it-share-prj2-1/data/goramesh-instella-rl"
+ROOT = os.environ.get("INSTELLA_RL_ROOT", "/it-share-prj2-1/data/goramesh-instella-rl")
 A = f"{ROOT}/out/analysis_1012"
 OUT = os.environ.get("OUT", f"{ROOT}/data/mix_v4_math.jsonl")
 # Keep anything not perfectly solved. Set MAXK=7 to also drop 8/8 (default) and

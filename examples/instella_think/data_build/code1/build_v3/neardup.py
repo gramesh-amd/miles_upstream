@@ -34,7 +34,8 @@ def run(items,thr=0.7):
             pairs.append((i,j,round(jac,3),di==dj))
     return pairs
 if __name__=='__main__':
-    T='/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data/final_v2/train.jsonl'
+    import os
+    T=os.environ.get('INSTELLA_RL_ROOT','/it-share-prj2-1/data/goramesh-instella-rl')+'/out/v7_data/final_v2/train.jsonl'
     items=load([(T,'train')]+[(p,'cand') for p in sys.argv[1:]])
     pairs=run(items)
     with open('neardup_pairs.jsonl' if len(sys.argv)==1 else 'neardup_pairs_with_cands.jsonl','w') as f:

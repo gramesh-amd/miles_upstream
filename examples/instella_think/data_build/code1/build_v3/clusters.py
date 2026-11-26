@@ -1,5 +1,9 @@
-import pandas as pd,re,collections
-d=pd.read_csv('/it-share-prj2-1/data/goramesh-instella-rl/out/v7_improve/data_audit/master.csv',keep_default_na=False)
+"""Step 3: group duplicate rows into clusters (from the final_v1/final_v2 duplicate reasons) and label each
+row's drop category. Writes $CODE1_WORK/master2.csv."""
+import pandas as pd,re,collections,os
+ROOT=os.environ.get('INSTELLA_RL_ROOT','/it-share-prj2-1/data/goramesh-instella-rl')
+WORK=os.environ.get('CODE1_WORK',f'{ROOT}/out/v7_improve/data_audit')
+d=pd.read_csv(f'{WORK}/master.csv',keep_default_na=False)
 par={c:c for c in d.cid}
 def f(x):
     while par[x]!=x: par[x]=par[par[x]]; x=par[x]
@@ -25,7 +29,7 @@ def cat(r):
 d['cat']=d.apply(cat,axis=1)
 cl_kept=d.groupby('cluster').in_v2.max()
 d['cluster_kept']=d.cluster.map(cl_kept)
-d.to_csv('/it-share-prj2-1/data/goramesh-instella-rl/out/v7_improve/data_audit/master2.csv',index=False)
+d.to_csv(f'{WORK}/master2.csv',index=False)
 s=d[(d.pid!='')&(d.route0=='stdio')].copy()
 for c in ['v6_ever','v6_solve','v6_pref']: s[c]=pd.to_numeric(s[c],errors='coerce')
 print('v6 stdio rows',len(s),'clusters',s.cluster.nunique(),'clusters with a member in v2',s[s.cluster_kept==1].cluster.nunique())

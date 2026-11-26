@@ -33,7 +33,7 @@ import re
 import subprocess
 import sys
 
-ROOT = "/it-share-prj2-1/data/goramesh-instella-rl"
+ROOT = os.environ.get("INSTELLA_RL_ROOT", "/it-share-prj2-1/data/goramesh-instella-rl")
 OUT = f"{ROOT}/out/analysis_1012/dolci_filter"
 CREDS = os.path.expanduser("~/.oci_s3_creds.env")
 BUCKET_DIR = ("goramesh/instella-backup/data/olmo3_rl_research_data/"
@@ -44,12 +44,16 @@ GRADES = f"{OUT}/grades_30k.jsonl"
 
 
 def fetch(key, dest):
-    subprocess.run([sys.executable, f"{ROOT}/scripts/oci_ls.py", CREDS,
+    subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "oci_ls.py"), CREDS,
                     "--get", key, dest], check=True,
                    stdout=subprocess.DEVNULL)
 
 
 os.makedirs(OUT, exist_ok=True)
+# The pool the grades index into (gidx = line number); build_mix_v4.py joins on it.
+POOL = f"{OUT}/pool_30k.jsonl"
+if not os.path.exists(POOL):
+    fetch("goramesh/instella-backup/data/olmo3_rl_research_data/dolci_think_rl_math_30k.jsonl", POOL)
 done_shards = set()
 if os.path.exists(GRADES):
     for line in open(GRADES):

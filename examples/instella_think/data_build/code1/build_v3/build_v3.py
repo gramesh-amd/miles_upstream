@@ -20,15 +20,17 @@ import argparse, ast, collections, csv, gzip, hashlib, json, os, pickle, random,
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-V7 = "/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data"
+ROOT = os.environ.get("INSTELLA_RL_ROOT", "/it-share-prj2-1/data/goramesh-instella-rl")
+WORK = os.environ.get("CODE1_WORK", f"{ROOT}/out/v7_improve/data_audit")
+V7 = f"{ROOT}/out/v7_data"
 sys.path.insert(0, HERE)
 from neardup import run as minhash_pairs
 from testdup import keys as test_keys
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--mix", default="B")
-ap.add_argument("--checkers", default=os.path.join(HERE, "checkers_s0/accepted_rows.jsonl") + "," + os.path.join(HERE, "checkers_s1/accepted_rows.jsonl"))
-ap.add_argument("--out", default="/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data/final_v3_candidate")
+ap.add_argument("--checkers", default=os.path.join(WORK, "checkers_s0/accepted_rows.jsonl") + "," + os.path.join(WORK, "checkers_s1/accepted_rows.jsonl"))
+ap.add_argument("--out", default=f"{V7}/final_v3_candidate")
 ap.add_argument("--write", action="store_true")
 ap.add_argument("--seed", type=int, default=0)
 a = ap.parse_args()
@@ -36,7 +38,7 @@ rng = random.Random(a.seed)
 S = collections.Counter()
 dropped = []  # (custom_id, src, route, reason)
 
-M = pd.read_csv(os.path.join(HERE, "master2.csv"), keep_default_na=False).set_index("cid")
+M = pd.read_csv(os.path.join(WORK, "master2.csv"), keep_default_na=False).set_index("cid")
 date = {r["custom_id"]: (r["date"], r["ref"], r["ref_id"]) for r in csv.DictReader(open(f"{V7}/decontam/date_check.csv"))}
 decon = set(open(f"{V7}/decontam/drop_list.txt").read().split())
 
@@ -112,8 +114,8 @@ for r in rows:
 rows = keep
 
 # ---------- 2. restored stdio rows
-C = {c["cid"]: c for c in (json.loads(l) for l in gzip.open(os.path.join(HERE, "restore_cands.jsonl.gz"), "rt"))}
-V = {v["cid"]: v for v in (json.loads(l) for l in open(os.path.join(HERE, "restore_verify.jsonl")))}
+C = {c["cid"]: c for c in (json.loads(l) for l in gzip.open(os.path.join(WORK, "restore_cands.jsonl.gz"), "rt"))}
+V = {v["cid"]: v for v in (json.loads(l) for l in open(os.path.join(WORK, "restore_verify.jsonl")))}
 TAG = {"image": "v3_restored_image_placeholder", "multi_noR1checker": "v3_restored_multi_answer_openr1_token_compare",
        "multi_nomap": "v3_restored_multi_answer_exact_compare"}
 for cid, v in V.items():

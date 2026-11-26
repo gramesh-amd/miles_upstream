@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Async driver for the second IF prefilter. Runs IN-CONTAINER against servers
-already started by if_prefilter2.py (same shards, same resume rule).
+"""IF prefilter, generation: 8 rollouts per candidate from the DPO model at the training
+settings (T=0.8, top_p 1.0, 32K). Sends the exact chat-templated text training uses (`rendered`).
 
-Why not if_prefilter2.py's thread pool: an n=8 request holds its slot until the
-slowest of the 8 finishes, and with this long-tailed length distribution ~78% of
-in-flight sequences were finished siblings waiting -- GPUs ran ~70 sequences at
-7% KV use. Here every rollout is its own request, so a finished sequence frees
-its slot at once, and a per-server semaphore keeps each server at its
---max-running-requests.
+Needs sglang servers already up (../serve_grader.sh with PORT=30971 MAX_RUNNING=2048), one per node:
+
+    python3 if_prefilter2_async.py --hosts g2:10.0.0.1,g34:10.0.0.2 \
+        --candidates $ROOT/data/if/if_candidates2.jsonl --out $ROOT/out/if_prefilter2
+
+Every rollout is its own request, so a finished sequence frees its slot at once (an n=8 request
+holds the slot until the slowest of the 8 finishes). Resumable: prompts already in --out are skipped.
 """
-import argparse, asyncio, glob, json, time
+import argparse, asyncio, glob, json, os, time
 
 import aiohttp
 
-OUT = "/workspace/out/if_prefilter2"
+OUT = None
 
 
 def load_done():
@@ -33,8 +34,8 @@ def load_done():
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidates", default="/workspace/data/if/if_candidates2.jsonl")
-    ap.add_argument("--hosts", default="g2:10.32.81.253,g34:10.32.80.106,g26:10.32.82.4,"
-                                       "g52:10.32.80.122,g53:10.32.80.123")
+    ap.add_argument("--out", default="/workspace/out/if_prefilter2")
+    ap.add_argument("--hosts", required=True, help="tag:ip,tag:ip,... one sglang server per node")
     ap.add_argument("--port", type=int, default=30971)
     ap.add_argument("--rollouts", type=int, default=8)
     ap.add_argument("--max-new", type=int, default=32768)
@@ -42,6 +43,9 @@ async def main():
     ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument("--per-server", type=int, default=1600)
     a = ap.parse_args()
+    global OUT
+    OUT = a.out
+    os.makedirs(OUT, exist_ok=True)
 
     hosts = [h.split(":") for h in a.hosts.split(",")]
     shards = [f"{OUT}/gen_{tag}.jsonl" for tag, _ in hosts]

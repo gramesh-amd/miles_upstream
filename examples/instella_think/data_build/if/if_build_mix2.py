@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Candidate set for the second IF prefilter. Runs IN-CONTAINER.
+"""IF prefilter, step 1: draw the candidate set (40,000 prompts) from IF_multi_constraints_upto5,
+stratified by domain and by constraint count, rarest verifier first within each cell.
 
-Differences from if_build_mix.py:
+Differences from the first prefilter's candidate builder:
   * only prompts whose constraints are mutually satisfiable: no pair forbidden by
     IFEvalG's INSTRUCTION_CONFLICTS (45.6% of the first pool violated it) and no
     constraint type that never passed in the first prefilter;
@@ -12,13 +13,12 @@ Differences from if_build_mix.py:
     (single user turn, tokenizer chat template, add_generation_prompt=True), so
     the prefilter measures the input distribution RL will see.
 """
-import argparse, ast, collections, json, random, re, sys
+import argparse, ast, collections, json, os, random, re, sys
 
 import pandas as pd
 from transformers import AutoTokenizer
 
-sys.path.insert(0, "/workspace/instella_think")
-sys.path.insert(0, "/workspace/scripts")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from IFEvalG import instructions_registry as reg  # noqa: E402
 
 SRC = "/workspace/data/if/IF_multi_constraints_upto5/data/train-00000-of-00001.parquet"
@@ -60,10 +60,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=40000)
     ap.add_argument("--out", default="/workspace/data/if/if_candidates2.jsonl")
+    ap.add_argument("--src", default=SRC, help="IF_multi_constraints_upto5 train parquet")
+    ap.add_argument("--tokenizer", default=TOK)
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
 
-    df = pd.read_parquet(SRC)
+    df = pd.read_parquet(a.src)
     df["gt"] = df["ground_truth"].map(lambda s: ast.literal_eval(s)[0])
     df["ids"] = df["gt"].map(lambda e: list(e["instruction_id"]))
     df = df[df["ids"].map(satisfiable)].copy()
@@ -93,7 +95,7 @@ def main():
         print(f"redistributed {shortfall:,} to deeper cells")
     out = out.sample(frac=1.0, random_state=a.seed)
 
-    tok = AutoTokenizer.from_pretrained(TOK, trust_remote_code=True)
+    tok = AutoTokenizer.from_pretrained(a.tokenizer, trust_remote_code=True)
     with open(a.out, "w") as fh:
         for _, r in out.iterrows():
             rendered = tok.apply_chat_template([{"role": "user", "content": r["prompt"]}],

@@ -20,7 +20,8 @@ def pairs(rows,minshare=5,frac=0.5):
         if n>=min(minshare,m) and n>=frac*m and m>=3: out.append((i,j,n,m))
     return out
 if __name__=='__main__':
-    rows=[json.loads(l) for l in open('/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data/final_v2/train.jsonl')]
+    import os
+    rows=[json.loads(l) for l in open(os.environ.get('INSTELLA_RL_ROOT','/it-share-prj2-1/data/goramesh-instella-rl')+'/out/v7_data/final_v2/train.jsonl')]
     P=pairs(rows)
     c=collections.Counter((rows[i]['metadata']['src']+'|'+rows[i]['metadata']['route'],rows[j]['metadata']['src']+'|'+rows[j]['metadata']['route']) for i,j,_,_ in P)
     print(len(P),c.most_common())

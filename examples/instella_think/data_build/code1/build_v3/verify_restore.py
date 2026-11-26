@@ -1,6 +1,9 @@
-"""Verify restore candidates through the sandboxed grader (training options, 5 s/test). All code runs in the server."""
-import json,gzip,sys,time,collections
-sys.path.insert(0,'/it-share-prj2-1/data/goramesh-instella-rl/out/v7_data/final_v1/scripts')
+"""Step 5: verify restore candidates through the sandboxed grader (training options, 5 s/test). All code runs in
+the server. A row is restored only if some reference solution passes every test.
+    bash run_grader_job.sh restore 18990 64 python3 verify_restore.py $CODE1_WORK/restore_cands.jsonl.gz \
+        $CODE1_WORK/restore_verify.jsonl 64"""
+import json,gzip,sys,time,collections,os
+sys.path.insert(0,os.path.join(os.path.dirname(os.path.abspath(__file__)),'..','cleaning_stages','final_v1'))
 import gclient as gc
 from concurrent.futures import ThreadPoolExecutor
 C=[json.loads(l) for l in gzip.open(sys.argv[1],'rt')]
