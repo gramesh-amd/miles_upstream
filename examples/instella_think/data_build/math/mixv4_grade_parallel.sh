@@ -3,8 +3,8 @@
 #
 #   INPUT=<prompts.jsonl> OUTDIR=<dir under $ROOT> NODES="g2 g15 ..." bash mixv4_grade_parallel.sh
 #
-# Each node must already run the `instella_rl` container with this repo's examples/instella_think at
-# $CKIT and the share at /workspace (see the MI325 bringup). The script shards the input, starts
+# Each node must already run the `instella_rl` container with this miles checkout at /root/miles and the
+# share at /workspace (the MI325 bringup, mi325/bringup_node.sh, sets this up). The script shards the input, starts
 # ../serve_grader.sh on each node, waits for it, then runs filter_rl_difficulty.py on that node's shard.
 #
 # CONTEXT 36864, RESPONSE 32768: grade at the budget training uses (4K prompt + 32K response).
@@ -16,7 +16,7 @@ set -uo pipefail
 
 ROOT="${INSTELLA_RL_ROOT:-/it-share-prj2-1/data/goramesh-instella-rl}"   # share path on the host
 CROOT="${CROOT:-/workspace}"                                             # same share inside the container
-CKIT="${CKIT:-/workspace/instella_think}"                                # examples/instella_think inside the container
+CKIT="${CKIT:-/root/miles/examples/instella_think}"                      # examples/instella_think inside the container
 CONTAINER="${CONTAINER:-instella_rl}"
 HOST_PREFIX="${HOST_PREFIX:-tus1-p3-}"
 INPUT="${INPUT:-$ROOT/out/analysis_1012/dapo/dapo_17k_en.jsonl}"

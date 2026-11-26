@@ -32,8 +32,13 @@ at a 32K response budget. Labels from other models do not transfer: sets picked 
 labels were far too easy for Instella.
 
 `serve_grader.sh` starts the sglang + FarSkip server used for grading (tp = ep = dp = 8 with dp-attention, fp32 LM
-head, context 36,864). Run it inside the training container on each 8-GPU node. `FARSKIP_APPLY` points at the
-FarSkip overlay script for the node's sglang version.
+head, context 36,864). Run it inside the training container on each 8-GPU node. It re-applies the FarSkip sglang
+overlay from the MI325 kit if present; set `FARSKIP_APPLY` to another overlay script, or to empty if the container
+already has it (MI325 bringup and `setup_farskip.sh` both apply it).
+
+The data was built on the MI325 cluster. The math and IF pipelines are also on the `instella-mi325-farskip`
+branch. The code pipelines live only on this branch, because they need this branch's code grader
+(`code_exec_server.py` / `code_reward.py`, with the checker route and strict grading).
 
 CODE1 needs no model grading: every row is checked by running reference solutions in the sandboxed code grader
 (`../code_exec_server.py`).

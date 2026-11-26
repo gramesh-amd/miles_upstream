@@ -12,7 +12,10 @@ MODEL=${MODEL:-/workspace/models/Instella-MoE-16B-A3B-DPO}
 PORT=${PORT:-30000}
 SIZE=${SIZE:-8}
 FP32_LM_HEAD=${FP32_LM_HEAD-1}   # `-` not `:-`: an explicitly empty value serves a bf16 head
-FARSKIP_APPLY=${FARSKIP_APPLY:-/workspace/sglang_port/apply_farskip.sh}
+# FarSkip sglang overlay. Idempotent; MI325 bringup and setup_farskip.sh (MI355) already apply it, so an empty
+# FARSKIP_APPLY skips this step. Default: the MI325 kit's copy if present.
+_KIT_APPLY=/root/miles/examples/instella_think/mi325/sglang_port/apply_farskip.sh
+FARSKIP_APPLY=${FARSKIP_APPLY-$([ -f "$_KIT_APPLY" ] && echo "$_KIT_APPLY")}
 
 # MATCH_TRAINING=1 copies the rollout engines' scheduler settings (admission, retraction, auto-truncate).
 # These change how often requests are retracted and re-prefilled, not the numerics.
@@ -27,7 +30,7 @@ if [ "${MATCH_TRAINING:-0}" = "1" ]; then
 fi
 MEM_FRACTION="${MEM_FRACTION:-0.8}"
 
-bash "$FARSKIP_APPLY" || exit 1
+[ -z "$FARSKIP_APPLY" ] || bash "$FARSKIP_APPLY" || exit 1
 
 export FARSKIP_REFERENCE_DECODER_LAYER=1
 unset FARSKIP_OVERLAPPED_DECODER_LAYER
