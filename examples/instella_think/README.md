@@ -37,6 +37,7 @@ applied by `patch_mbridge_gate_proj.sh`.
 | `if_reward.py` | The IF reward (`--custom-rm-path if_reward.batched_reward`). Partial credit while training, strict at eval. Self-tests with `python3 if_reward.py`. |
 | `IFEvalG/` | Vendored IFEval constraint checkers (Apache-2.0, Google Research via AllenAI). ~53 constraint types, no network at runtime. |
 | `prepare_if_data.py` | Builds the IF train/eval JSONLs. `inspect` dumps a source's real schema; `build` writes the files and refuses to write a badly-mapped one. |
+| `data_build/` | How the shipped math `mix_v5` (Polaris-led, graded with DPO) and IF3 `if_train_hybrid20k` (DPO prefilter, hybrid reward) sets were built on this cluster. One README per pipeline; the code sets are on the `instella-code-rl-lux-v8` branch. |
 | `setup_if_deps.sh` | Per-node: install the checker deps and seed nltk `punkt` onto NFS. `--verify` checks the whole reward stack. |
 | `if_eval_log.py` | Logs IFEval's loose metric next to the strict one (`--custom-eval-rollout-log-function-path`). |
 | `prune_checkpoints.py` | **Required at `--save-interval 20`.** Keeps the newest N *and the best-scoring N*; this miles implements no retention. |
